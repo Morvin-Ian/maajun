@@ -213,7 +213,7 @@ async def _chat_loop(agent):
             break
 
         if user_input == "/clear":
-            agent.history.clear()
+            agent.clear_history()
             console.print("[dim]Session cleared.[/dim]")
             continue
 
@@ -224,7 +224,7 @@ async def _chat_loop(agent):
                 for msg in agent.history:
                     if msg["role"] == "user":
                         console.print(f"\n> {msg['content']}")
-                    else:
+                    elif msg["role"] == "assistant" and msg.get("content"):
                         console.print()
                         console.print(Markdown(msg["content"]))
             continue

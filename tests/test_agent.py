@@ -16,7 +16,7 @@ class FakeProvider:
         self.last_messages = messages
         if self.fail:
             raise ProviderError("boom")
-        return CompletionResponse(content=self.reply)
+        return CompletionResponse(content=self.reply, thinking="hmm ")
 
     async def stream_completion(self, messages, **kwargs):
         self.last_messages = messages

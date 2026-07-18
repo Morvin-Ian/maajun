@@ -1,4 +1,3 @@
-import json
 import re
 from collections.abc import AsyncIterator
 from typing import Any
@@ -24,7 +23,6 @@ _DSML_RE = re.compile(r"<\|+DSML\|+>.*?</\|+DSML\|+tool_calls>", re.DOTALL)
 _DSML_OPEN_RE = re.compile(r"<\|+DSML\|+[^>]*>")
 
 DEFAULT_MODEL = "deepseek-chat"
-# DeepSeek exposes reasoning via a dedicated model, not a request flag.
 THINKING_MODEL = "deepseek-reasoner"
 
 
@@ -40,7 +38,7 @@ class DeepSeekProvider(AIProvider):
 
     async def initialize(self) -> None:
         if not self.api_key:
-            raise ProviderError("DeepSeek API key is required. Run `maajun login` to set one.")
+            raise ProviderError("API key is required. Run `maajun login` to set one.")
 
         self.client = AsyncOpenAI(
             api_key=self.api_key,
@@ -55,7 +53,6 @@ class DeepSeekProvider(AIProvider):
         max_tokens: int = 4096,
         **kwargs,
     ) -> CompletionResponse:
-        """Send chat completion to DeepSeek"""
         if not self.client:
             await self.initialize()
 
@@ -136,13 +133,15 @@ class DeepSeekProvider(AIProvider):
 
         tool_calls = None
         if message.tool_calls:
+            # Keep arguments as the raw JSON string; the agent parses them
+            # and malformed JSON becomes a tool error instead of a crash here.
             tool_calls = [
                 {
                     "id": tc.id,
                     "type": tc.type,
                     "function": {
                         "name": tc.function.name,
-                        "arguments": json.loads(tc.function.arguments),
+                        "arguments": tc.function.arguments,
                     },
                 }
                 for tc in message.tool_calls
@@ -171,13 +170,13 @@ class DeepSeekProvider(AIProvider):
 def _wrap_error(e: APIError) -> ProviderError:
     if isinstance(e, AuthenticationError):
         return ProviderError(
-            "DeepSeek rejected the API key. Run `maajun login` to update it."
+            "API key is invalid. Run `maajun login` to update it."
         )
     if isinstance(e, RateLimitError):
-        return ProviderError("DeepSeek rate limit reached. Wait a moment and try again.")
+        return ProviderError("Rate limit reached. Wait a moment and try again.")
     if isinstance(e, APIConnectionError):
-        return ProviderError(f"Could not reach DeepSeek: {e}")
-    return ProviderError(f"DeepSeek API error: {e}")
+        return ProviderError(f"Could not reach provider: {e}")
+    return ProviderError(f"Provider API error: {e}")
 
 
 def _strip_dsml(text: str) -> str:

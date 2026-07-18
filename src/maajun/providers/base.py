@@ -6,8 +6,6 @@ from typing import Any
 
 
 class ProviderType(Enum):
-    """Canonical list of providers. All other provider lists derive from this."""
-
     DEEPSEEK = "deepseek"
     OPENAI = "openai"
     ANTHROPIC = "anthropic"
