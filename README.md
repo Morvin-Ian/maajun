@@ -1,51 +1,54 @@
 # Maajun
 
-AI-powered developer assistant. Chat with an AI directly from your terminal, with streamed responses.
+AI-powered developer assistant with two faces:
 
-## Setup
+- **Chat** — talk to an AI in your terminal, with streamed responses and
+  tools (it can read, search, and edit files, and run commands — with your
+  permission).
+- **Watch** — a monitoring daemon for your server. It tails your logs,
+  and when your app throws a new error it investigates the code, documents
+  the incident, and opens a pull request on GitHub — either with just the
+  analysis and suggested fix (*suggest* mode) or with the fix applied
+  (*fix* mode).
+
+## Quick start: chat
 
 ```bash
-# Install dependencies
-uv sync
-
-# Set up your API key (interactive, input hidden)
-maajun login
+uv sync           # or: pip install maajun
+maajun login      # store your DeepSeek API key (interactive, input hidden)
+maajun chat
 ```
 
 Get a DeepSeek API key at [platform.deepseek.com](https://platform.deepseek.com).
 
-## Usage
+## Quick start: error monitoring
 
 ```bash
-# Start a chat session
-maajun chat
-
-# Specify a provider
-maajun chat -p deepseek
-
-# Enable the provider's reasoning mode (DeepSeek: deepseek-reasoner)
-maajun chat --thinking
+maajun init            # writes ~/.config/maajun/config.toml — edit it
+maajun github-login    # store a GitHub token (or: export GITHUB_TOKEN=...)
+maajun watch --once    # dry run: one poll cycle
+maajun watch           # keep monitoring
 ```
 
-**Chat commands:**
-- `/clear` — start a new session
-- `/history` — show conversation history
-- `/quit` — exit
+Point `monitor.log_files` at your app's log files and `github.repo` at the
+repository maajun should open PRs on. Each new error becomes one PR:
 
-## Key Management
-
-```bash
-maajun provider-list             # see provider status
-maajun login                     # add or replace a key interactively
-maajun config-set-key deepseek   # non-interactive alternative (prompts for the key)
-maajun config-remove-key openai  # remove a provider's key
-maajun sign-out                  # clear all keys
+```
+error in log ──▶ fingerprint & dedup ──▶ AI analyzes your code
+                                              │
+   PR on GitHub ◀── branch + incident report ─┘
 ```
 
-Keys are stored in your OS keyring (gnome-keyring on Linux). Avoid passing the key
-as a command-line argument — it would be saved in your shell history.
+The same error never opens two PRs — repeat sightings only bump a counter.
 
-## Supported Providers
+## Documentation
+
+- [How it works](docs/architecture.md) — components and the incident pipeline
+- [Monitoring guide](docs/monitoring.md) — config reference, GitHub
+  permissions, modes, running on a VPS
+- [Command reference](docs/commands.md) — every CLI command and flag
+
+## Supported AI providers
 
 | Provider | Status |
 |----------|--------|
