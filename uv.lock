@@ -401,6 +401,7 @@ name = "maajun"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
+    { name = "httpx" },
     { name = "keyring" },
     { name = "openai" },
     { name = "pydantic" },
@@ -417,6 +418,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "httpx", specifier = ">=0.27" },
     { name = "keyring", specifier = ">=25.0.0" },
     { name = "openai", specifier = ">=1.0.0" },
     { name = "pydantic", specifier = ">=2.13.4" },

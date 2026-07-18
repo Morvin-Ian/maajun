@@ -1,7 +1,20 @@
+import os
+import tomllib
+from pathlib import Path
 
 from pydantic import BaseModel, Field, field_validator
 
 from maajun.providers.base import ProviderType
+
+
+def default_config_path() -> Path:
+    base = os.environ.get("XDG_CONFIG_HOME", "~/.config")
+    return Path(base).expanduser() / "maajun" / "config.toml"
+
+
+def default_data_dir() -> Path:
+    base = os.environ.get("XDG_DATA_HOME", "~/.local/share")
+    return Path(base).expanduser() / "maajun"
 
 
 class AIProviderConfig(BaseModel):
@@ -21,5 +34,50 @@ class AIProviderConfig(BaseModel):
         return v
 
 
+class GitHubConfig(BaseModel):
+    repo: str = ""  # "owner/name"
+    base_branch: str = "main"
+    # "suggest": the PR contains only the analysis report.
+    # "fix": the agent may also edit code inside the workspace.
+    mode: str = "suggest"
+
+    @field_validator("mode")
+    @classmethod
+    def validate_mode(cls, v: str) -> str:
+        if v not in ("suggest", "fix"):
+            raise ValueError('mode must be "suggest" or "fix"')
+        return v
+
+    @field_validator("repo")
+    @classmethod
+    def validate_repo(cls, v: str) -> str:
+        if v and v.count("/") != 1:
+            raise ValueError('repo must be in "owner/name" form')
+        return v
+
+
+class MonitorConfig(BaseModel):
+    log_files: list[str] = Field(default_factory=list)
+    error_pattern: str = r"\b(ERROR|CRITICAL|FATAL)\b"
+    poll_interval: float = 30.0
+
+
+class DaemonConfig(BaseModel):
+    workdir: str = str(default_data_dir())
+
+
 class Config(BaseModel):
     ai: AIProviderConfig = Field(default_factory=AIProviderConfig)
+    github: GitHubConfig = Field(default_factory=GitHubConfig)
+    monitor: MonitorConfig = Field(default_factory=MonitorConfig)
+    daemon: DaemonConfig = Field(default_factory=DaemonConfig)
+
+    @classmethod
+    def load(cls, path: Path | None = None) -> "Config":
+        """Load config from a TOML file; missing file yields defaults."""
+        path = path or default_config_path()
+        if not path.exists():
+            return cls()
+        with open(path, "rb") as f:
+            data = tomllib.load(f)
+        return cls.model_validate(data)

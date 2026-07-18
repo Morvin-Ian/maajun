@@ -1,6 +1,8 @@
 import asyncio
 import getpass
 import json
+import logging
+from pathlib import Path
 
 import typer
 from rich.console import Console, Group
@@ -11,7 +13,7 @@ from rich.table import Table
 from rich.text import Text
 
 from maajun.auth import AuthManager
-from maajun.config import AIProviderConfig, Config
+from maajun.config import AIProviderConfig, Config, default_config_path
 from maajun.providers.base import ProviderError, ProviderType
 from maajun.providers.factory import ProviderFactory
 
@@ -58,6 +60,9 @@ def main(ctx: typer.Context):
         console.print("\n[bold]Commands:[/bold]\n")
         console.print("  [cyan]login[/cyan]              Set up an API key interactively")
         console.print("  [cyan]chat[/cyan]               Start an interactive chat session")
+        console.print("  [cyan]init[/cyan]               Write a starter daemon config")
+        console.print("  [cyan]github-login[/cyan]       Store a GitHub token for PRs")
+        console.print("  [cyan]watch[/cyan]              Monitor for errors, open PRs")
         console.print("  [cyan]provider-list[/cyan]      Show provider status")
         console.print("  [cyan]config-remove-key[/cyan]  Remove a stored API key")
         console.print("  [cyan]sign-out[/cyan]           Clear all stored keys\n")
@@ -354,6 +359,158 @@ def config_remove_key(
     auth = AuthManager()
     auth.clear_provider_key(provider)
     console.print(f"[green]✓ API key removed for {provider}[/green]")
+
+
+STARTER_CONFIG = """\
+# Maajun daemon configuration.
+
+[ai]
+provider = "deepseek"
+# thinking_mode = true
+
+[github]
+# Repository the daemon documents errors in and opens PRs against.
+repo = "owner/name"
+base_branch = "main"
+# "suggest": PRs contain only the incident report and suggested fix.
+# "fix": the agent may also change code inside its isolated workspace.
+mode = "suggest"
+
+[monitor]
+# Log files to watch for tracebacks and error lines.
+log_files = ["/var/log/myapp/error.log"]
+error_pattern = "\\\\b(ERROR|CRITICAL|FATAL)\\\\b"
+poll_interval = 30
+
+[daemon]
+# Where clones, the incident database, and state live.
+# workdir = "~/.local/share/maajun"
+"""
+
+
+@app.command()
+def init(
+    path: Path | None = typer.Option(None, "--config", "-c", help="Config file location"),
+):
+    """Write a starter config file for the monitoring daemon"""
+    path = path or default_config_path()
+    if path.exists():
+        console.print(f"[yellow]⚠ {path} already exists.[/yellow]")
+        overwrite = console.input("> Overwrite? (y/N): ").strip().lower()
+        if overwrite != "y":
+            console.print("[dim]Cancelled.[/dim]")
+            return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(STARTER_CONFIG)
+    console.print(f"[green]✓ Wrote {path}[/green]")
+    console.print(
+        "\n[bold]Next steps:[/bold]\n"
+        "  1. Edit the config: set [cyan]github.repo[/cyan] and [cyan]monitor.log_files[/cyan]\n"
+        "  2. Run [bold]maajun github-login[/bold] to store a GitHub token\n"
+        "  3. Run [bold]maajun watch[/bold] to start monitoring\n"
+    )
+
+
+@app.command(name="github-login")
+def github_login(
+    config_path: Path | None = typer.Option(None, "--config", "-c", help="Config file location"),
+):
+    """Store a GitHub token for creating branches and pull requests.
+
+    Use a fine-grained personal access token scoped to the target repo with
+    Contents: read/write and Pull requests: read/write permissions.
+    """
+    from maajun.vcs import GitHubClient, GitHubError
+
+    console.print(Panel(
+        "[bold]GitHub Login[/bold]\n\n"
+        "Create a fine-grained personal access token at\n"
+        "[cyan]https://github.com/settings/personal-access-tokens[/cyan]\n\n"
+        "Scope it to the repository maajun will open PRs on, with:\n"
+        "  • Contents: [bold]read and write[/bold]\n"
+        "  • Pull requests: [bold]read and write[/bold]",
+        border_style="blue",
+    ))
+    token = getpass.getpass("\n> GitHub token (input hidden): ").strip()
+    if not token:
+        console.print("[red]No token entered. Cancelled.[/red]")
+        raise typer.Exit(1)
+
+    client = GitHubClient(token)
+    config = Config.load(config_path)
+
+    async def validate() -> tuple[str, bool | None]:
+        login = await client.validate_token()
+        push = await client.can_push(config.github.repo) if config.github.repo else None
+        return login, push
+
+    try:
+        with console.status("[dim]Validating token...[/dim]"):
+            login, push = asyncio.run(validate())
+    except GitHubError as e:
+        console.print(f"[red]✗ {e}[/red]")
+        raise typer.Exit(1) from e
+
+    console.print(f"[green]✓ Authenticated as {login}.[/green]")
+    if push is True:
+        console.print(f"[green]✓ Token can push to {config.github.repo}.[/green]")
+    elif push is False:
+        console.print(
+            f"[yellow]⚠ Token cannot push to {config.github.repo} — "
+            "the daemon will fail to create branches. Check the token's "
+            "repository access and Contents permission.[/yellow]"
+        )
+    else:
+        console.print(
+            "[dim]No github.repo configured yet; repo access not checked.[/dim]"
+        )
+
+    auth = AuthManager()
+    try:
+        auth.set_github_token(token)
+        console.print("[green]✓ Token stored.[/green]")
+    except RuntimeError as e:
+        console.print(
+            f"[yellow]⚠ Could not store in keyring: {e}\n"
+            "On a server, export it instead: [bold]GITHUB_TOKEN=...[/bold][/yellow]"
+        )
+
+
+@app.command()
+def watch(
+    config_path: Path | None = typer.Option(None, "--config", "-c", help="Config file location"),
+    once: bool = typer.Option(False, "--once", help="Run a single poll cycle and exit"),
+    verbose: bool = typer.Option(False, "--verbose", "-v", help="Debug logging"),
+):
+    """Monitor configured error sources; document each new error in a PR"""
+    from maajun.daemon import build_daemon
+
+    logging.basicConfig(
+        level=logging.DEBUG if verbose else logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
+
+    config = Config.load(config_path)
+    try:
+        daemon = build_daemon(config)
+    except RuntimeError as e:
+        console.print(f"[red]✗ {e}[/red]")
+        raise typer.Exit(1) from e
+
+    console.print(Panel(
+        f"[bold]Maajun watch[/bold]\n\n"
+        f"Repo:     [cyan]{config.github.repo}[/cyan] "
+        f"(base: {config.github.base_branch})\n"
+        f"Mode:     [cyan]{config.github.mode}[/cyan]\n"
+        f"Monitors: {', '.join(m.name for m in daemon.monitors)}\n"
+        f"Interval: {config.monitor.poll_interval}s",
+        border_style="blue",
+    ))
+
+    try:
+        asyncio.run(daemon.run(once=once))
+    except KeyboardInterrupt:
+        console.print("\n[dim]Stopped.[/dim]")
 
 
 @app.command(name="sign-out")
