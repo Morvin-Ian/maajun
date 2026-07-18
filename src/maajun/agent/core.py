@@ -104,11 +104,11 @@ class Agent:
             raise
 
     async def chat_stream(self, message: str) -> AsyncIterator[StreamChunk]:
-        """Yield ("thinking" | "content", text) chunks.
+        """Yield ("thinking" | "content", text) chunks as they arrive.
 
-        Tool-call rounds use non-streaming requests because DeepSeek does not
-        reliably stream tool_calls; each round's output is yielded as soon as
-        it completes.
+        Tool calls are handled transparently: the provider emits them as a
+        single event once a round's stream ends, the tools run, and the next
+        round starts streaming.
         """
         self.history.append({"role": "user", "content": message})
         self._trim_history()
@@ -119,17 +119,31 @@ class Agent:
 
         try:
             for _ in range(MAX_TOOL_ROUNDS):
-                response = await self._complete(messages, tools)
+                round_content: list[str] = []
+                tool_calls: list[dict] = []
 
-                if response.thinking:
-                    yield "thinking", response.thinking
-                if response.content:
-                    content_parts.append(response.content)
-                    yield "content", response.content
+                async for kind, data in self.provider.stream_completion(
+                    messages=messages,
+                    tools=tools,
+                    temperature=self.config.ai.temperature,
+                    max_tokens=self.config.ai.max_tokens,
+                ):
+                    if kind == "tool_calls":
+                        tool_calls = data
+                    else:
+                        if kind == "content":
+                            round_content.append(data)
+                        yield kind, data
 
-                if not response.tool_calls:
+                content_parts.extend(round_content)
+
+                if not tool_calls:
                     break
 
+                response = CompletionResponse(
+                    content="".join(round_content),
+                    tool_calls=tool_calls,
+                )
                 async for name, result in self._run_tools(messages, response):
                     preview = result[:TOOL_RESULT_PREVIEW]
                     if len(result) > TOOL_RESULT_PREVIEW:

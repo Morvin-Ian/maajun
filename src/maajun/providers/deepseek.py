@@ -80,11 +80,12 @@ class DeepSeekProvider(AIProvider):
         max_tokens: int = 4096,
         **kwargs,
     ) -> AsyncIterator[StreamChunk]:
-        """Stream completion from DeepSeek as ("thinking" | "content", text) chunks"""
+        """Stream text deltas; emit accumulated tool_calls once at stream end."""
         if not self.client:
             await self.initialize()
 
         tool_defs = self.prepare_tools(tools) if tools else None
+        tool_calls = _ToolCallAccumulator()
 
         try:
             stream = await self.client.chat.completions.create(
@@ -106,8 +107,13 @@ class DeepSeekProvider(AIProvider):
                     yield "thinking", thinking
                 if delta.content:
                     yield "content", delta.content
+                if delta.tool_calls:
+                    tool_calls.add(delta.tool_calls)
         except APIError as e:
             raise _wrap_error(e) from e
+
+        if tool_calls:
+            yield "tool_calls", tool_calls.result()
 
     async def validate_credentials(self) -> bool:
         """Validate DeepSeek credentials with a minimal request"""
@@ -165,6 +171,39 @@ class DeepSeekProvider(AIProvider):
             raw_response=response,
             thinking=getattr(message, "reasoning_content", None),
         )
+
+
+class _ToolCallAccumulator:
+    """Reassembles tool calls from stream deltas.
+
+    The API sends each tool call fragmented across chunks: id and name arrive
+    once, arguments arrive as string fragments to be concatenated, and the
+    call's position is identified by index.
+    """
+
+    def __init__(self) -> None:
+        self._calls: dict[int, dict[str, Any]] = {}
+
+    def __bool__(self) -> bool:
+        return bool(self._calls)
+
+    def add(self, deltas: list[Any]) -> None:
+        for delta in deltas:
+            call = self._calls.setdefault(delta.index, {
+                "id": "",
+                "type": "function",
+                "function": {"name": "", "arguments": ""},
+            })
+            if delta.id:
+                call["id"] = delta.id
+            if delta.function:
+                if delta.function.name:
+                    call["function"]["name"] = delta.function.name
+                if delta.function.arguments:
+                    call["function"]["arguments"] += delta.function.arguments
+
+    def result(self) -> list[dict[str, Any]]:
+        return [self._calls[i] for i in sorted(self._calls)]
 
 
 def _wrap_error(e: APIError) -> ProviderError:

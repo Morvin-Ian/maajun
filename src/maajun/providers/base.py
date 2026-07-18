@@ -32,8 +32,11 @@ class CompletionResponse:
     thinking: str | None = None
 
 
-# Chunk kinds yielded by stream_completion
-StreamChunk = tuple[str, str]  # ("thinking" | "content", text)
+# Events yielded by stream_completion:
+#   ("thinking", str)      — reasoning text delta
+#   ("content", str)       — answer text delta
+#   ("tool_calls", list)   — accumulated tool calls, emitted once at stream end
+StreamChunk = tuple[str, Any]
 
 
 class AIProvider(ABC):
@@ -64,7 +67,11 @@ class AIProvider(ABC):
         max_tokens: int = 4096,
         **kwargs,
     ) -> AsyncIterator[StreamChunk]:
-        """Yield ("thinking" | "content", text) chunks as they arrive."""
+        """Yield StreamChunk events as they arrive.
+
+        Text deltas are yielded immediately; if the model requests tools,
+        a single ("tool_calls", list) event is yielded after the stream ends.
+        """
 
     @abstractmethod
     async def validate_credentials(self) -> bool:

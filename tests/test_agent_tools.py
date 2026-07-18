@@ -14,7 +14,20 @@ from maajun.providers.base import CompletionResponse, ProviderError
 # ---------------------------------------------------------------------------
 
 
-class ToolCallingProvider:
+class StreamsFromChatMixin:
+    """stream_completion that mirrors chat_completion as stream events."""
+
+    async def stream_completion(self, messages, **kwargs):
+        response = await self.chat_completion(messages, **kwargs)
+        if response.thinking:
+            yield "thinking", response.thinking
+        if response.content:
+            yield "content", response.content
+        if response.tool_calls:
+            yield "tool_calls", response.tool_calls
+
+
+class ToolCallingProvider(StreamsFromChatMixin):
     """Provider that returns tool_calls on the first call, then plain text."""
 
     def __init__(self, tool_result="tool output", reply="final answer"):
@@ -44,9 +57,6 @@ class ToolCallingProvider:
         # Second call: return final answer
         return CompletionResponse(content=self.reply)
 
-    async def stream_completion(self, messages, **kwargs):
-        yield "content", self.reply
-
     async def validate_credentials(self):
         return True
 
@@ -54,7 +64,7 @@ class ToolCallingProvider:
         return "fake"
 
 
-class MultiToolProvider:
+class MultiToolProvider(StreamsFromChatMixin):
     """Provider that makes 3 tool calls across 2 rounds."""
 
     def __init__(self):
@@ -102,9 +112,6 @@ class MultiToolProvider:
             )
         return CompletionResponse(content="done")
 
-    async def stream_completion(self, messages, **kwargs):
-        yield "content", "done"
-
     async def validate_credentials(self):
         return True
 
@@ -112,7 +119,7 @@ class MultiToolProvider:
         return "fake"
 
 
-class FailToolProvider:
+class FailToolProvider(StreamsFromChatMixin):
     """Provider that tries a tool that fails, then gives up."""
 
     def __init__(self):
@@ -139,9 +146,6 @@ class FailToolProvider:
                 ],
             )
         return CompletionResponse(content="recovered")
-
-    async def stream_completion(self, messages, **kwargs):
-        yield "content", "recovered"
 
     async def validate_credentials(self):
         return True
@@ -261,10 +265,30 @@ async def test_chat_stream_executes_tools(config):
 
     chunks = [chunk async for chunk in agent.chat_stream("do something")]
 
-    # Should have content chunks
+    assert provider.call_count == 2
+
+    # Tool progress is surfaced as thinking chunks
+    progress = [c for c in chunks if c[0] == "thinking" and "🔧" in c[1]]
+    assert len(progress) == 1
+    assert "bash" in progress[0][1]
+
     content_chunks = [c for c in chunks if c[0] == "content"]
-    assert len(content_chunks) > 0
     assert "".join(c[1] for c in content_chunks) == "streamed answer"
 
-    # History should be updated
     assert agent.history[-1]["content"] == "streamed answer"
+
+
+async def test_chat_stream_multiple_tool_rounds(config):
+    provider = MultiToolProvider()
+    agent = _make_agent(config, provider)
+
+    chunks = [chunk async for chunk in agent.chat_stream("multi")]
+
+    assert provider.call_count == 3
+    progress = [c for c in chunks if c[0] == "thinking" and "🔧" in c[1]]
+    assert len(progress) == 3
+    assert agent.history[-1]["content"] == "done"
+
+    # Tool results were fed back to the provider
+    tool_msgs = [m for m in provider.last_messages if m["role"] == "tool"]
+    assert len(tool_msgs) == 3
