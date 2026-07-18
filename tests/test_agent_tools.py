@@ -4,8 +4,8 @@ import json
 
 import pytest
 
-from maajun.agent.core import Agent
-from maajun.agent.tools import ToolRegistry
+from maajun.agent.core import PERMISSION_DENIED, Agent
+from maajun.agent.tools import BASH, ToolRegistry, default_registry
 from maajun.config import AIProviderConfig, Config
 from maajun.providers.base import CompletionResponse, ProviderError
 
@@ -257,6 +257,80 @@ async def test_agent_clear_history(config):
     assert len(agent.history) == 2
     agent.clear_history()
     assert agent.history == []
+
+
+def _tool_messages(provider):
+    return [m for m in provider.last_messages if m["role"] == "tool"]
+
+
+async def test_dangerous_tool_denied_without_callback(config):
+    provider = ToolCallingProvider()
+    agent = _make_agent(config, provider)
+    agent.registry = ToolRegistry([BASH])
+
+    response = await agent.chat("run something")
+
+    assert response.content == "final answer"
+    assert _tool_messages(provider)[0]["content"] == PERMISSION_DENIED
+
+
+async def test_dangerous_tool_runs_when_approved(config):
+    provider = ToolCallingProvider()
+    agent = _make_agent(config, provider)
+    agent.registry = ToolRegistry([BASH])
+
+    approvals = []
+
+    async def approve(name, args):
+        approvals.append((name, args))
+        return True
+
+    agent.approve = approve
+    await agent.chat("run something")
+
+    assert approvals == [("bash", {"command": "echo test"})]
+    assert "test" in _tool_messages(provider)[0]["content"]
+
+
+async def test_dangerous_tool_denied_by_callback(config):
+    provider = ToolCallingProvider()
+    agent = _make_agent(config, provider)
+    agent.registry = ToolRegistry([BASH])
+
+    async def deny(name, args):
+        return False
+
+    agent.approve = deny
+    await agent.chat("run something")
+
+    assert _tool_messages(provider)[0]["content"] == PERMISSION_DENIED
+
+
+async def test_safe_tool_skips_approval(config):
+    provider = FailToolProvider()  # calls read_file
+    agent = _make_agent(config, provider)
+    agent.registry = default_registry()
+
+    async def approve(name, args):
+        raise AssertionError("approval should not be requested for safe tools")
+
+    agent.approve = approve
+    response = await agent.chat("read a file")
+
+    assert response.content == "recovered"
+    assert "Error" in _tool_messages(provider)[0]["content"]
+
+
+async def test_chat_stream_denies_dangerous_tool_without_callback(config):
+    provider = ToolCallingProvider(reply="adjusted")
+    agent = _make_agent(config, provider)
+    agent.registry = ToolRegistry([BASH])
+
+    async for _ in agent.chat_stream("run something"):
+        pass
+
+    assert _tool_messages(provider)[0]["content"] == PERMISSION_DENIED
+    assert agent.history[-1]["content"] == "adjusted"
 
 
 async def test_chat_stream_executes_tools(config):

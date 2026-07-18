@@ -40,7 +40,7 @@ async def _git_status(path: str = ".") -> str:
     return "\n\n".join(parts)
 
 
-GIT_STATUS: Tool = (
+GIT_STATUS: Tool = Tool(
     ToolDefinition(
         name="git_status",
         description="Show git branch, status, and recent commits for the repo at the given path.",

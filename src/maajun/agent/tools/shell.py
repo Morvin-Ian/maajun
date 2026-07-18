@@ -39,7 +39,7 @@ async def _bash(command: str, timeout: int = 30) -> str:
     return output if output else "(no output)"
 
 
-BASH: Tool = (
+BASH: Tool = Tool(
     ToolDefinition(
         name="bash",
         description=(
@@ -62,4 +62,5 @@ BASH: Tool = (
         ),
     ),
     _bash,
+    requires_permission=True,
 )

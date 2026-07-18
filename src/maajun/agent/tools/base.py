@@ -7,12 +7,19 @@ are sent to the LLM; the agent loop calls executors.
 from __future__ import annotations
 
 from collections.abc import Callable, Coroutine, Iterable
-from typing import Any
+from typing import Any, NamedTuple
 
 from maajun.providers.base import ToolDefinition
 
 ToolExecutor = Callable[..., Coroutine[Any, Any, str]]
-Tool = tuple[ToolDefinition, ToolExecutor]
+
+
+class Tool(NamedTuple):
+    definition: ToolDefinition
+    executor: ToolExecutor
+    # Tools that modify files or run commands need user approval before
+    # each call; the agent denies them when no approval handler is set.
+    requires_permission: bool = False
 
 
 def json_schema(props: dict, required: list[str] | None = None) -> dict:
@@ -29,18 +36,21 @@ class ToolRegistry:
             self.register(tool)
 
     def register(self, tool: Tool) -> None:
-        self._tools[tool[0].name] = tool
+        self._tools[tool.definition.name] = tool
 
     def definitions(self) -> list[ToolDefinition]:
-        return [definition for definition, _ in self._tools.values()]
+        return [tool.definition for tool in self._tools.values()]
+
+    def requires_permission(self, name: str) -> bool:
+        tool = self._tools.get(name)
+        return bool(tool and tool.requires_permission)
 
     async def execute(self, name: str, arguments: dict[str, Any]) -> str:
         tool = self._tools.get(name)
         if not tool:
             return f"Error: unknown tool '{name}'"
-        _, executor = tool
         try:
-            return await executor(**arguments)
+            return await tool.executor(**arguments)
         except TypeError as e:
             return f"Error calling tool '{name}': {e}"
         except Exception as e:

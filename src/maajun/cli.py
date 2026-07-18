@@ -1,5 +1,6 @@
 import asyncio
 import getpass
+import json
 
 import typer
 from rich.console import Console, Group
@@ -145,10 +146,22 @@ def login():
     console.print("\n[dim]Run [bold]maajun chat[/bold] to start chatting.[/dim]")
 
 
+def _format_tool_args(args: dict) -> str:
+    text = json.dumps(args, indent=2)
+    if len(text) > 500:
+        text = text[:500] + "\n... (truncated)"
+    return text
+
+
 @app.command()
 def chat(
     provider: str | None = typer.Option(None, "--provider", "-p", help="AI provider to use"),
     thinking: bool = typer.Option(False, "--thinking", help="Enable the provider's reasoning mode"),
+    auto_approve: bool = typer.Option(
+        False,
+        "--auto-approve",
+        help="Run tools that modify files or execute commands without asking",
+    ),
 ):
     """Start an interactive chat session"""
     auth = AuthManager()
@@ -169,17 +182,50 @@ def chat(
 
     from maajun.agent.core import Agent
 
-    agent = Agent(_build_config(auth, provider, thinking))
+    # Holds the active Live display so the approval prompt can pause it.
+    live_holder: dict = {"live": None}
 
+    async def approve_always(name: str, args: dict) -> bool:
+        return True
+
+    async def approve_interactively(name: str, args: dict) -> bool:
+        live = live_holder["live"]
+        if live:
+            live.stop()
+        console.print()
+        console.print(Panel(
+            f"[bold]{name}[/bold]\n{_format_tool_args(args)}",
+            title="[yellow]Tool needs permission[/yellow]",
+            border_style="yellow",
+        ))
+        try:
+            answer = console.input("> Allow this call? (y/N): ").strip().lower()
+        except EOFError:
+            answer = ""
+        if live:
+            live.start()
+        return answer == "y"
+
+    agent = Agent(
+        _build_config(auth, provider, thinking),
+        approve=approve_always if auto_approve else approve_interactively,
+    )
+
+    permission_note = (
+        "[dim]Tools run automatically (--auto-approve).[/dim]"
+        if auto_approve
+        else "[dim]You'll be asked before commands run or files change.[/dim]"
+    )
     console.print(Panel(
         f"[bold]Maajun[/bold]  [dim]({provider})[/dim]\n\n"
         "[dim]Type your message at the > prompt.[/dim]\n"
+        f"{permission_note}\n"
         "[dim]/clear  /history  /quit[/dim]",
         border_style="blue",
     ))
 
     try:
-        asyncio.run(_chat_loop(agent))
+        asyncio.run(_chat_loop(agent, live_holder))
     except KeyboardInterrupt:
         console.print("\n[dim]Goodbye![/dim]")
 
@@ -197,7 +243,8 @@ def _response_renderable(thinking: str, content: str) -> Group:
     return Group(*parts)
 
 
-async def _chat_loop(agent):
+async def _chat_loop(agent, live_holder=None):
+    live_holder = live_holder if live_holder is not None else {"live": None}
     while True:
         try:
             user_input = console.input("\n> ").strip()
@@ -233,12 +280,16 @@ async def _chat_loop(agent):
         thinking, content = "", ""
         try:
             with Live(console=console, refresh_per_second=8, vertical_overflow="visible") as live:
-                async for kind, text in agent.chat_stream(user_input):
-                    if kind == "thinking":
-                        thinking += text
-                    else:
-                        content += text
-                    live.update(_response_renderable(thinking, content))
+                live_holder["live"] = live
+                try:
+                    async for kind, text in agent.chat_stream(user_input):
+                        if kind == "thinking":
+                            thinking += text
+                        else:
+                            content += text
+                        live.update(_response_renderable(thinking, content))
+                finally:
+                    live_holder["live"] = None
         except ProviderError as e:
             console.print(f"[red]{e}[/red]")
         except Exception as e:

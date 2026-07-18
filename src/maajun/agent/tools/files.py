@@ -28,7 +28,7 @@ async def _read_file(path: str, offset: int = 0, limit: int = 2000) -> str:
     return header + "\n" + "\n".join(numbered)
 
 
-READ_FILE: Tool = (
+READ_FILE: Tool = Tool(
     ToolDefinition(
         name="read_file",
         description=(
@@ -74,7 +74,7 @@ async def _edit_file(path: str, old_string: str, new_string: str) -> str:
     return f"Edited {p}"
 
 
-EDIT_FILE: Tool = (
+EDIT_FILE: Tool = Tool(
     ToolDefinition(
         name="edit_file",
         description=(
@@ -98,6 +98,7 @@ EDIT_FILE: Tool = (
         ),
     ),
     _edit_file,
+    requires_permission=True,
 )
 
 
@@ -108,7 +109,7 @@ async def _write_file(path: str, content: str) -> str:
     return f"Wrote {len(content)} bytes to {p}"
 
 
-WRITE_FILE: Tool = (
+WRITE_FILE: Tool = Tool(
     ToolDefinition(
         name="write_file",
         description=(
@@ -124,4 +125,5 @@ WRITE_FILE: Tool = (
         ),
     ),
     _write_file,
+    requires_permission=True,
 )

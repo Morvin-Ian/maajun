@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import json
 import logging
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
+from typing import Any
 
 from maajun.agent.tools import ToolRegistry, default_registry
 from maajun.config import Config
@@ -23,6 +24,15 @@ MAX_HISTORY_MESSAGES = 40
 
 TOOL_RESULT_PREVIEW = 200
 
+# Called with (tool_name, arguments) before a permission-gated tool runs;
+# returns whether the call is approved.
+PermissionCallback = Callable[[str, dict[str, Any]], Awaitable[bool]]
+
+PERMISSION_DENIED = (
+    "Error: the user denied permission for this tool call. "
+    "Do not retry it — adjust your approach or ask the user what to do."
+)
+
 SYSTEM_PROMPT = """\
 You are Maajun, an expert AI coding assistant with access to tools.
 
@@ -35,6 +45,10 @@ When editing files:
   surrounding context to make it unique.
 - If old_string is not found, re-read the file and try again.
 
+Some tools (bash, edit_file, write_file) require the user's approval for
+each call.  If a call is denied, do not retry it — explain what you wanted
+to do and ask the user how to proceed.
+
 Be concise, accurate, and helpful.  Use markdown when it improves readability.
 If you're unsure about something, say so rather than guessing."""
 
@@ -45,10 +59,12 @@ class Agent:
         config: Config,
         *,
         tools: ToolRegistry | None = None,
+        approve: PermissionCallback | None = None,
     ):
         self.config = config
         self.history: list[dict[str, str]] = []
         self.registry = tools or default_registry()
+        self.approve = approve
         self.provider = ProviderFactory.create_provider(
             ProviderType(config.ai.provider),
             {
@@ -184,8 +200,12 @@ class Agent:
             args = self._parse_args(fn)
 
             log.info("tool_call name=%s args=%s", name, args)
-            result = await self.registry.execute(name, args)
-            log.info("tool_result name=%s len=%d", name, len(result))
+            if await self._permitted(name, args):
+                result = await self.registry.execute(name, args)
+                log.info("tool_result name=%s len=%d", name, len(result))
+            else:
+                result = PERMISSION_DENIED
+                log.info("tool_denied name=%s", name)
 
             messages.append({
                 "role": "tool",
@@ -193,6 +213,13 @@ class Agent:
                 "content": result,
             })
             yield name, result
+
+    async def _permitted(self, name: str, args: dict[str, Any]) -> bool:
+        if not self.registry.requires_permission(name):
+            return True
+        if self.approve is None:
+            return False
+        return await self.approve(name, args)
 
     def _request_messages(self) -> list[dict[str, str]]:
         return [

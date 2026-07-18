@@ -30,7 +30,7 @@ async def _glob(pattern: str, path: str = ".") -> str:
     return "\n".join(results)
 
 
-GLOB: Tool = (
+GLOB: Tool = Tool(
     ToolDefinition(
         name="glob",
         description=(
@@ -101,7 +101,7 @@ async def _grep(
     return header + "\n" + "\n".join(results)
 
 
-GREP: Tool = (
+GREP: Tool = Tool(
     ToolDefinition(
         name="grep",
         description=(
@@ -150,7 +150,7 @@ async def _list_dir(path: str = ".") -> str:
     return "\n".join(entries)
 
 
-LIST_DIR: Tool = (
+LIST_DIR: Tool = Tool(
     ToolDefinition(
         name="list_dir",
         description="List the contents of a directory. Appends / to directory names.",
