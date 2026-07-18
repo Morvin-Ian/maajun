@@ -17,8 +17,11 @@ MAX_PENDING = 64 * 1024
 class LogFileMonitor(Monitor):
     """Incrementally reads a log file, surviving rotation and truncation.
 
-    Emits one event per Python traceback and one per line matching the
-    error pattern (pattern lines inside a traceback are not double-counted).
+    Emits one event per error: an ERROR line immediately followed by a
+    traceback (the logging.exception pattern) is merged into a single
+    event rather than two. Text that might still be streaming in (an
+    unterminated traceback, or an ERROR line that may have a traceback
+    right behind it) is carried over and flushed on the next quiet poll.
     """
 
     def __init__(self, path: str | Path, error_pattern: str = DEFAULT_ERROR_PATTERN):
@@ -35,6 +38,12 @@ class LogFileMonitor(Monitor):
     async def poll(self) -> list[ErrorEvent]:
         text = self._read_new()
         if not text:
+            if self._pending:
+                # Nothing new for a whole interval — what we held back is
+                # not still streaming; emit it.
+                events, _ = self._parse(self._pending, flush=True)
+                self._pending = ""
+                return events
             return []
         events, self._pending = self._parse(self._pending + text)
         if len(self._pending) > MAX_PENDING:
@@ -60,29 +69,43 @@ class LogFileMonitor(Monitor):
             self._offset = f.tell()
         return text
 
-    def _parse(self, text: str) -> tuple[list[ErrorEvent], str]:
+    def _parse(self, text: str, flush: bool = False) -> tuple[list[ErrorEvent], str]:
         """Extract events from complete lines; return (events, carry-over).
 
-        Carry-over holds an incomplete final line or a traceback that may
-        still be streaming in, so it can be re-parsed on the next poll.
+        With flush=True nothing is carried: held-back text is emitted even
+        if it looks incomplete.
         """
         events: list[ErrorEvent] = []
         lines = text.split("\n")
         tail = lines.pop()  # "" if text ended with a newline
+        if flush and tail:
+            lines.append(tail)
+            tail = ""
 
         i = 0
         while i < len(lines):
             line = lines[i]
+
             if TRACEBACK_HEADER in line:
                 block, end = self._collect_traceback(lines, i)
-                if end is None:
-                    # Traceback not terminated yet — carry it to next poll.
-                    carry = "\n".join(lines[i:] + [tail])
-                    return events, carry
+                if end is None and not flush:
+                    return events, "\n".join(lines[i:] + [tail])
                 events.append(self._traceback_event(block))
-                i = end
+                i = end if end is not None else len(lines)
                 continue
+
             if self.error_re.search(line):
+                nxt = i + 1
+                if nxt == len(lines) and not flush:
+                    # A traceback may be right behind this line; wait one poll.
+                    return events, "\n".join([line, tail])
+                if nxt < len(lines) and TRACEBACK_HEADER in lines[nxt]:
+                    block, end = self._collect_traceback(lines, nxt)
+                    if end is None and not flush:
+                        return events, "\n".join(lines[i:] + [tail])
+                    events.append(self._traceback_event(block, context_line=line))
+                    i = end if end is not None else len(lines)
+                    continue
                 events.append(ErrorEvent(
                     source=self.name,
                     message=line.strip()[:200],
@@ -111,10 +134,13 @@ class LogFileMonitor(Monitor):
             return block, i + 1
         return block, None
 
-    def _traceback_event(self, block: list[str]) -> ErrorEvent:
+    def _traceback_event(self, block: list[str], context_line: str | None = None) -> ErrorEvent:
         exception_line = block[-1].strip()
+        details = "\n".join(block)
+        if context_line:
+            details = f"{context_line.strip()}\n{details}"
         return ErrorEvent(
             source=self.name,
             message=exception_line[:200],
-            details="\n".join(block),
+            details=details,
         )

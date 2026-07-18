@@ -1,5 +1,3 @@
-"""Incident store — SQLite-backed dedup so one error yields one PR."""
-
 from __future__ import annotations
 
 import sqlite3

@@ -50,24 +50,53 @@ async def test_detects_error_lines(logfile):
 async def test_only_new_content_is_read(logfile):
     monitor = LogFileMonitor(logfile)
     with open(logfile, "a") as f:
-        f.write("ERROR first\n")
+        f.write("ERROR first\nINFO ok\n")
     assert len(await monitor.poll()) == 1
     assert await monitor.poll() == []
 
     with open(logfile, "a") as f:
-        f.write("ERROR second\n")
+        f.write("ERROR second\nINFO ok\n")
     events = await monitor.poll()
     assert len(events) == 1
     assert "second" in events[0].message
 
 
+async def test_trailing_error_line_flushes_on_quiet_poll(logfile):
+    monitor = LogFileMonitor(logfile)
+    with open(logfile, "a") as f:
+        f.write("ERROR at end of file\n")
+
+    # Held back one poll in case a traceback follows it...
+    assert await monitor.poll() == []
+    # ...then flushed once the file stays quiet.
+    events = await monitor.poll()
+    assert len(events) == 1
+    assert "at end of file" in events[0].message
+    assert await monitor.poll() == []
+
+
+async def test_logging_exception_yields_single_merged_event(logfile):
+    """An ERROR line immediately followed by a traceback is one incident."""
+    monitor = LogFileMonitor(logfile)
+    with open(logfile, "a") as f:
+        f.write("2026-07-18 ERROR shop: failed to process order 3\n")
+        f.write(TRACEBACK)
+        f.write("INFO next\n")
+
+    events = await monitor.poll()
+    assert len(events) == 1
+    assert events[0].message == "IndexError: list index out of range"
+    assert "failed to process order 3" in events[0].details
+    assert "Traceback" in events[0].details
+
+
 async def test_handles_truncation(logfile):
     monitor = LogFileMonitor(logfile)
     with open(logfile, "a") as f:
-        f.write("ERROR before rotation\n")
-    await monitor.poll()
+        f.write("ERROR before rotation\nINFO ok\n")
+    assert len(await monitor.poll()) == 1
 
-    logfile.write_text("ERROR after rotation\n")
+    logfile.write_text("ERROR after rotation\nINFO ok\n")
     events = await monitor.poll()
     assert len(events) == 1
     assert "after rotation" in events[0].message
