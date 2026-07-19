@@ -1,3 +1,6 @@
+import asyncio
+import logging
+import random
 import re
 from collections.abc import AsyncIterator
 from typing import Any
@@ -19,11 +22,19 @@ from .base import (
     ToolDefinition,
 )
 
+log = logging.getLogger(__name__)
+
+MAX_RETRIES = 3
+BASE_DELAY = 1.0
+MAX_DELAY = 30.0
+
+NON_RETRYABLE = (AuthenticationError,)
+
 _DSML_RE = re.compile(r"<\|+DSML\|+>.*?</\|+DSML\|+tool_calls>", re.DOTALL)
 _DSML_OPEN_RE = re.compile(r"<\|+DSML\|+[^>]*>")
 
-DEFAULT_MODEL = "deepseek-chat"
-THINKING_MODEL = "deepseek-reasoner"
+DEFAULT_MODEL = "deepseek-v4-flash"
+THINKING_MODEL = "deepseek-v4-pro"
 
 
 class DeepSeekProvider(AIProvider):
@@ -45,6 +56,31 @@ class DeepSeekProvider(AIProvider):
             base_url=self.base_url,
         )
 
+    async def _retryable(self, coro_func, *args, **kwargs):
+        """Call coro_func with retries on transient errors (429, 500, 502, 503, connection)."""
+        last_exc = None
+        for attempt in range(MAX_RETRIES):
+            try:
+                return await coro_func(*args, **kwargs)
+            except NON_RETRYABLE:
+                raise
+            except (RateLimitError, APIConnectionError, APIError) as e:
+                last_exc = e
+                status = getattr(e, "status_code", None)
+                transient = isinstance(e, APIConnectionError) or (
+                    isinstance(e, APIError) and status in (429, 500, 502, 503)
+                )
+                if transient:
+                    delay = min(MAX_DELAY, BASE_DELAY * (2 ** attempt) * (1 + random.random()))
+                    log.warning(
+                        "API error (attempt %d/%d): %s — retrying in %.1fs",
+                        attempt + 1, MAX_RETRIES, e, delay,
+                    )
+                    await asyncio.sleep(delay)
+                else:
+                    break
+        raise _wrap_error(last_exc)
+
     async def chat_completion(
         self,
         messages: list[dict[str, Any]],
@@ -58,17 +94,15 @@ class DeepSeekProvider(AIProvider):
 
         tool_defs = self.prepare_tools(tools) if tools else None
 
-        try:
-            response = await self.client.chat.completions.create(
-                model=self.model,
-                messages=messages,
-                tools=tool_defs,
-                temperature=temperature,
-                max_tokens=max_tokens,
-                **kwargs,
-            )
-        except APIError as e:
-            raise _wrap_error(e) from e
+        response = await self._retryable(
+            self.client.chat.completions.create,
+            model=self.model,
+            messages=messages,
+            tools=tool_defs,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            **kwargs,
+        )
 
         return self.parse_response(response)
 
@@ -88,7 +122,8 @@ class DeepSeekProvider(AIProvider):
         tool_calls = _ToolCallAccumulator()
 
         try:
-            stream = await self.client.chat.completions.create(
+            stream = await self._retryable(
+                self.client.chat.completions.create,
                 model=self.model,
                 messages=messages,
                 tools=tool_defs,
@@ -109,6 +144,8 @@ class DeepSeekProvider(AIProvider):
                     yield "content", delta.content
                 if delta.tool_calls:
                     tool_calls.add(delta.tool_calls)
+        except ProviderError:
+            raise
         except APIError as e:
             raise _wrap_error(e) from e
 
@@ -121,7 +158,8 @@ class DeepSeekProvider(AIProvider):
             if not self.client:
                 await self.initialize()
 
-            response = await self.client.chat.completions.create(
+            response = await self._retryable(
+                self.client.chat.completions.create,
                 model=DEFAULT_MODEL,
                 messages=[{"role": "user", "content": "Hello"}],
                 max_tokens=5,
@@ -170,6 +208,7 @@ class DeepSeekProvider(AIProvider):
             usage=usage,
             raw_response=response,
             thinking=getattr(message, "reasoning_content", None),
+            model=self.model,
         )
 
 

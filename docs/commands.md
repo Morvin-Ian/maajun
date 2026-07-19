@@ -29,8 +29,11 @@ Write a starter config to `~/.config/maajun/config.toml`
 
 ### `maajun github-login`
 
-Store a GitHub personal access token (input hidden). Validates that the
-token authenticates and can push to the configured repo before storing.
+Set up GitHub access in one step: prompts for the target repository
+(`owner/name`, shown as you type; the configured value is offered as the
+default) and then a personal access token (input hidden). Validates that
+the token authenticates and can push to that repo, saves the repo into
+`github.repo` in the config file, and stores the token in the keyring.
 
 ### `maajun watch`
 
@@ -40,7 +43,11 @@ Run the monitoring daemon.
 |------|---------|
 | `-c, --config PATH` | Config file (default `~/.config/maajun/config.toml`) |
 | `--once` | One poll cycle, then exit (testing, cron) |
+| `--dry-run` | Analyze errors but skip git/PR operations; nothing is persisted |
 | `-v, --verbose` | Debug logging |
+
+The daemon exits gracefully on `SIGTERM`/`SIGINT`, finishing the
+incident it is currently processing first.
 
 ## Credentials
 

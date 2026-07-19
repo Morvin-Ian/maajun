@@ -4,13 +4,14 @@ Real: monitors, incident store, git workspace (clone/branch/commit/push).
 Fake: the AI agent and the GitHub API.
 """
 
+import asyncio
 import subprocess
 from pathlib import Path
 
 import pytest
 
 from maajun.config import Config, DaemonConfig, GitHubConfig, MonitorConfig
-from maajun.daemon import Daemon, make_permission_policy
+from maajun.daemon import SHUTDOWN_EVENT, Daemon, make_permission_policy
 from maajun.monitors import LogFileMonitor
 from maajun.providers.base import CompletionResponse
 from maajun.state import IncidentStore
@@ -211,3 +212,66 @@ async def test_fix_mode_allows_edits_inside_workspace_only(tmp_path):
     assert not await approve("edit_file", {"path": str(tmp_path.parent / "outside.py")})
     assert not await approve("edit_file", {})
     assert not await approve("bash", {"command": "rm -rf /"})
+
+
+# ---------------------------------------------------------------------------
+# Dry-run mode
+# ---------------------------------------------------------------------------
+
+
+async def test_dry_run_skips_git_and_pr(setup):
+    daemon, logfile, agent, github, store, remote = setup
+
+    with open(logfile, "a") as f:
+        f.write(TRACEBACK)
+
+    handled = await daemon.poll_once(dry_run=True)
+
+    assert len(handled) == 1
+    fp = handled[0]
+
+    # Agent still analyzed the error
+    assert "IndexError" in agent.prompts[0]
+
+    # No branch was created, no PR was opened
+    assert github.calls == []
+    show = subprocess.run(
+        ["git", "branch", "--list", f"maajun/incident-{fp}"],
+        cwd=str(remote), capture_output=True, text=True,
+    )
+    assert show.stdout.strip() == ""
+
+    # Incident not persisted — a real run should still process it
+    assert store.get(fp) is None
+
+
+# ---------------------------------------------------------------------------
+# Graceful shutdown
+# ---------------------------------------------------------------------------
+
+
+async def test_shutdown_event_stops_daemon():
+    """Daemon.run exits cleanly when SHUTDOWN_EVENT is set."""
+    SHUTDOWN_EVENT.clear()
+
+    config = Config(
+        github=GitHubConfig(repo="owner/name", base_branch="main"),
+        monitor=MonitorConfig(log_files=["/dev/null"], poll_interval=9999),
+    )
+    workspace = GitWorkspace(Path("/tmp/ws"), "owner/name", remote_url="http://x")
+    store = IncidentStore(Path("/tmp/does-not-exist/test.db"))
+    daemon = Daemon(
+        config,
+        monitors=[],
+        store=store,
+        workspace=workspace,
+        github=None,
+        agent_factory=lambda: None,
+    )
+
+    async def set_shutdown():
+        await asyncio.sleep(0.05)
+        SHUTDOWN_EVENT.set()
+
+    await asyncio.gather(daemon.run(), set_shutdown())
+    SHUTDOWN_EVENT.clear()

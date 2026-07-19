@@ -104,6 +104,7 @@ class Agent:
                         content=response.content,
                         thinking="".join(thinking_parts) or None,
                         usage=response.usage,
+                        model=response.model,
                     )
 
                 async for _name, _result in self._run_tools(messages, response):
@@ -113,6 +114,7 @@ class Agent:
             return CompletionResponse(
                 content=last_content,
                 thinking="".join(thinking_parts) or None,
+                model=response.model,
             )
 
         except Exception:

@@ -9,16 +9,27 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import signal
 from pathlib import Path
 
 from maajun.agent.core import Agent, PermissionCallback
 from maajun.auth import AuthManager
 from maajun.config import AIProviderConfig, Config
-from maajun.monitors import ErrorEvent, LogFileMonitor, Monitor
+from maajun.costs import extract_usage
+from maajun.monitors import (
+    ErrorEvent,
+    GitHubActionsMonitor,
+    LogFileMonitor,
+    Monitor,
+    SentryMonitor,
+)
+from maajun.notifications import Notifier
 from maajun.state import IncidentStore
 from maajun.vcs import GitHubClient, GitWorkspace
 
 log = logging.getLogger(__name__)
+
+SHUTDOWN_EVENT = asyncio.Event()
 
 ANALYZE_PROMPT = """\
 An error was detected on a monitored system. Investigate it against the
@@ -84,6 +95,7 @@ class Daemon:
         workspace: GitWorkspace,
         github: GitHubClient,
         agent_factory,
+        notifier: Notifier | None = None,
     ):
         """agent_factory: () -> object with `async chat(str) -> CompletionResponse`"""
         self.config = config
@@ -92,21 +104,34 @@ class Daemon:
         self.workspace = workspace
         self.github = github
         self.agent_factory = agent_factory
+        self.notifier = notifier or Notifier()
 
-    async def run(self, *, once: bool = False) -> None:
+    async def run(self, *, once: bool = False, dry_run: bool = False) -> None:
         log.info(
-            "daemon started repo=%s mode=%s monitors=%s",
+            "daemon started repo=%s mode=%s monitors=%s dry_run=%s",
             self.config.github.repo,
             self.config.github.mode,
             [m.name for m in self.monitors],
+            dry_run,
         )
-        while True:
-            await self.poll_once()
+        loop = asyncio.get_running_loop()
+        for sig in (signal.SIGTERM, signal.SIGINT):
+            loop.add_signal_handler(sig, SHUTDOWN_EVENT.set)
+
+        while not SHUTDOWN_EVENT.is_set():
+            await self.poll_once(dry_run=dry_run)
             if once:
                 return
-            await asyncio.sleep(self.config.monitor.poll_interval)
+            try:
+                await asyncio.wait_for(
+                    SHUTDOWN_EVENT.wait(),
+                    timeout=self.config.monitor.poll_interval,
+                )
+            except TimeoutError:
+                pass
+        log.info("daemon shutting down gracefully")
 
-    async def poll_once(self) -> list[str]:
+    async def poll_once(self, *, dry_run: bool = False) -> list[str]:
         """Poll all monitors; handle new incidents. Returns handled fingerprints."""
         handled: list[str] = []
         for monitor in self.monitors:
@@ -121,20 +146,30 @@ class Daemon:
                     continue
                 log.info("new error fp=%s: %s", event.fingerprint, event.message)
                 try:
-                    await self.handle_incident(event)
+                    await self.handle_incident(event, dry_run=dry_run)
                     handled.append(event.fingerprint)
-                except Exception:
+                except Exception as exc:
                     log.exception("incident fp=%s failed", event.fingerprint)
                     self.store.mark_failed(event.fingerprint)
+                    await self.notifier.notify_incident_failed(
+                        repo=self.config.github.repo,
+                        error_message=event.message,
+                        fingerprint=event.fingerprint,
+                        reason=str(exc),
+                    )
         return handled
 
-    async def handle_incident(self, event: ErrorEvent) -> str:
-        """Analyze one error and open a PR for it. Returns the PR URL."""
+    async def handle_incident(self, event: ErrorEvent, *, dry_run: bool = False) -> str:
+        """Analyze one error and open a PR for it. Returns the PR URL.
+
+        When dry_run=True, skips git/PR operations and logs what would happen.
+        """
         gh = self.config.github
         branch = f"maajun/incident-{event.fingerprint}"
 
-        self.workspace.sync(gh.base_branch)
-        self.workspace.create_branch(branch, gh.base_branch)
+        if not dry_run:
+            self.workspace.sync(gh.base_branch)
+            self.workspace.create_branch(branch, gh.base_branch)
 
         prompt = ANALYZE_PROMPT.format(
             workspace=self.workspace.path,
@@ -149,6 +184,26 @@ class Daemon:
         response = await agent.chat(prompt)
         report = response.content.strip()
 
+        prompt_tok, comp_tok, cost = extract_usage(
+            response.usage, getattr(response, "model", None)
+        )
+
+        if dry_run:
+            log.info(
+                "dry-run: would create branch=%s, commit report, push PR for fp=%s",
+                branch,
+                event.fingerprint,
+            )
+            log.info("dry-run report:\n%s", report[:500])
+            self.store.forget(event.fingerprint)
+            log.info(
+                "dry-run cost: prompt=%d completion=%d cost=$%.4f",
+                prompt_tok,
+                comp_tok,
+                cost,
+            )
+            return ""
+
         self._write_report(event, report)
         self.workspace.commit_all(f"maajun: incident report for {event.message[:60]}")
         self.workspace.push(branch)
@@ -160,8 +215,32 @@ class Daemon:
             title=f"[maajun] {event.message[:80]}",
             body=self._pr_body(event, report),
         )
-        self.store.mark_processed(event.fingerprint, branch=branch, pr_url=pr_url)
-        log.info("opened PR %s for fp=%s", pr_url, event.fingerprint)
+        self.store.mark_processed(
+            event.fingerprint,
+            branch=branch,
+            pr_url=pr_url,
+            cost_usd=cost,
+            prompt_tokens=prompt_tok,
+            completion_tokens=comp_tok,
+        )
+        log.info(
+            "opened PR %s for fp=%s (cost: $%.4f, tokens: %d/%d)",
+            pr_url,
+            event.fingerprint,
+            cost,
+            prompt_tok,
+            comp_tok,
+        )
+
+        await self.notifier.notify_pr_created(
+            repo=gh.repo,
+            pr_url=pr_url,
+            pr_title=f"[maajun] {event.message[:80]}",
+            error_message=event.message,
+            mode=gh.mode,
+            fingerprint=event.fingerprint,
+        )
+
         return pr_url
 
     def _write_report(self, event: ErrorEvent, report: str) -> None:
@@ -215,8 +294,25 @@ def build_daemon(config: Config, auth: AuthManager | None = None) -> Daemon:
         LogFileMonitor(path, config.monitor.error_pattern)
         for path in config.monitor.log_files
     ]
+    if config.monitor.sentry_auth_token and config.monitor.sentry_org:
+        for project in config.monitor.sentry_projects or ["default"]:
+            monitors.append(
+                SentryMonitor(
+                    config.monitor.sentry_auth_token,
+                    config.monitor.sentry_org,
+                    project,
+                )
+            )
+    if config.monitor.github_actions_token and config.monitor.github_actions_repos:
+        for repo in config.monitor.github_actions_repos:
+            monitors.append(
+                GitHubActionsMonitor(config.monitor.github_actions_token, repo)
+            )
     if not monitors:
-        raise RuntimeError("No monitors configured. Add log files under [monitor] in the config.")
+        raise RuntimeError(
+            "No monitors configured. Add log files under [monitor] "
+            "or Sentry/GitHub Actions settings."
+        )
 
     workdir = Path(config.daemon.workdir).expanduser()
     workspace = GitWorkspace(workdir / "workspaces", config.github.repo, token)
@@ -238,4 +334,5 @@ def build_daemon(config: Config, auth: AuthManager | None = None) -> Daemon:
         workspace=workspace,
         github=github,
         agent_factory=agent_factory,
+        notifier=Notifier(config.daemon.notify_webhook_urls),
     )

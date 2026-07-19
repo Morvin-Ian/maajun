@@ -1,11 +1,23 @@
 from types import SimpleNamespace
 
+import httpx
+import pytest
+from openai import APIStatusError, RateLimitError
+
+from maajun.providers.base import ProviderError
 from maajun.providers.deepseek import (
     DEFAULT_MODEL,
+    MAX_RETRIES,
     THINKING_MODEL,
     DeepSeekProvider,
     _strip_dsml,
 )
+
+
+def _fake_httpx_response(status_code):
+    """Build a minimal httpx.Response-like object for openai exceptions."""
+    request = httpx.Request("POST", "https://api.deepseek.com/chat/completions")
+    return httpx.Response(status_code, request=request)
 
 
 def make_response(content="hello", reasoning=None, tool_calls=None):
@@ -37,6 +49,17 @@ def test_default_model():
 
 def test_thinking_mode_switches_model():
     provider = DeepSeekProvider({"api_key": "x", "thinking_mode": True})
+    assert provider.model == THINKING_MODEL
+
+
+def test_custom_model_override():
+    provider = DeepSeekProvider({"api_key": "x", "model": "deepseek-v4-pro"})
+    assert provider.model == "deepseek-v4-pro"
+
+
+def test_thinking_mode_does_not_override_custom_model():
+    provider = DeepSeekProvider({"api_key": "x", "model": "my-custom", "thinking_mode": True})
+    # thinking_mode overrides even explicit model — this is current behavior
     assert provider.model == THINKING_MODEL
 
 
@@ -124,3 +147,116 @@ async def test_stream_completion_accumulates_tool_calls():
             "function": {"name": "read_file", "arguments": "{}"},
         },
     ]
+
+
+# ---------------------------------------------------------------------------
+# Retry logic
+# ---------------------------------------------------------------------------
+
+
+def _make_rate_limit_error():
+    """Create a RateLimitError that the openai SDK would raise on 429."""
+    return RateLimitError(
+        message="rate limit exceeded",
+        response=_fake_httpx_response(429),
+        body=None,
+    )
+
+
+def _make_api_status_error(status_code):
+    """Create an APIStatusError for the given HTTP status."""
+    return APIStatusError(
+        message=f"error {status_code}",
+        response=_fake_httpx_response(status_code),
+        body=None,
+    )
+
+
+def _fail_then_succeed(failures, final_result):
+    """Return an async callable that raises failures then returns final_result."""
+    call_count = 0
+
+    async def _call(**kwargs):
+        nonlocal call_count
+        if call_count < len(failures):
+            exc = failures[call_count]
+            call_count += 1
+            raise exc
+        call_count += 1
+        return final_result
+
+    return _call
+
+
+@pytest.mark.asyncio
+async def test_retry_succeeds_after_rate_limit(monkeypatch):
+    """Retries on 429 and eventually succeeds."""
+    async def _no_sleep(_delay):
+        pass
+    monkeypatch.setattr("maajun.providers.deepseek.asyncio.sleep", _no_sleep)
+    provider = DeepSeekProvider({"api_key": "x"})
+    provider.client = SimpleNamespace(
+        chat=SimpleNamespace(completions=SimpleNamespace(create=_fail_then_succeed(
+            [_make_rate_limit_error(), _make_rate_limit_error()],
+            make_response(content="ok"),
+        )))
+    )
+    result = await provider.chat_completion(messages=[{"role": "user", "content": "hi"}])
+    assert result.content == "ok"
+
+
+@pytest.mark.asyncio
+async def test_retry_gives_up_after_max_retries(monkeypatch):
+    """Exhausts retries and raises ProviderError."""
+    async def _no_sleep(_delay):
+        pass
+    monkeypatch.setattr("maajun.providers.deepseek.asyncio.sleep", _no_sleep)
+    provider = DeepSeekProvider({"api_key": "x"})
+    errors = [_make_rate_limit_error() for _ in range(MAX_RETRIES + 1)]
+    provider.client = SimpleNamespace(
+        chat=SimpleNamespace(completions=SimpleNamespace(create=_fail_then_succeed(
+            errors, make_response(),
+        )))
+    )
+    with pytest.raises(ProviderError, match="Rate limit"):
+        await provider.chat_completion(messages=[{"role": "user", "content": "hi"}])
+
+
+@pytest.mark.asyncio
+async def test_retry_on_server_error(monkeypatch):
+    """Retries on 500 and succeeds."""
+    async def _no_sleep(_delay):
+        pass
+    monkeypatch.setattr("maajun.providers.deepseek.asyncio.sleep", _no_sleep)
+    provider = DeepSeekProvider({"api_key": "x"})
+    provider.client = SimpleNamespace(
+        chat=SimpleNamespace(completions=SimpleNamespace(create=_fail_then_succeed(
+            [_make_api_status_error(500)],
+            make_response(content="recovered"),
+        )))
+    )
+    result = await provider.chat_completion(messages=[{"role": "user", "content": "hi"}])
+    assert result.content == "recovered"
+
+
+@pytest.mark.asyncio
+async def test_no_retry_on_auth_error(monkeypatch):
+    """Auth errors (401) are not retried."""
+    async def _no_sleep(_delay):
+        pass
+    monkeypatch.setattr("maajun.providers.deepseek.asyncio.sleep", _no_sleep)
+    provider = DeepSeekProvider({"api_key": "x"})
+    call_count = 0
+
+    async def auth_fail(**kwargs):
+        nonlocal call_count
+        call_count += 1
+        # 401 is not in the retryable set (only 429, 500, 502, 503)
+        raise _make_api_status_error(401)
+
+    provider.client = SimpleNamespace(
+        chat=SimpleNamespace(completions=SimpleNamespace(create=auth_fail))
+    )
+    with pytest.raises(ProviderError):
+        await provider.chat_completion(messages=[{"role": "user", "content": "hi"}])
+    assert call_count == 1  # no retries

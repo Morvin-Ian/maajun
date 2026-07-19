@@ -6,6 +6,8 @@ from typing import Any
 
 import httpx
 
+from maajun.utils import github_headers
+
 API_URL = "https://api.github.com"
 
 
@@ -17,11 +19,7 @@ class GitHubClient:
     def __init__(self, token: str, *, api_url: str = API_URL,
                  transport: httpx.AsyncBaseTransport | None = None):
         self.api_url = api_url.rstrip("/")
-        self._headers = {
-            "Authorization": f"Bearer {token}",
-            "Accept": "application/vnd.github+json",
-            "X-GitHub-Api-Version": "2022-11-28",
-        }
+        self._headers = github_headers(token)
         self._transport = transport
 
     def _client(self) -> httpx.AsyncClient:

@@ -3,10 +3,17 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 import re
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from typing import Any
+
+import httpx
+
+from maajun.utils import utcnow_iso
+
+log = logging.getLogger(__name__)
 
 _HEX_RE = re.compile(r"0x[0-9a-fA-F]+")
 _NUM_RE = re.compile(r"\d+")
@@ -21,17 +28,13 @@ def fingerprint(text: str) -> str:
     return hashlib.sha256(normalized.encode()).hexdigest()[:16]
 
 
-def _utcnow() -> str:
-    return datetime.now(UTC).isoformat(timespec="seconds")
-
-
 @dataclass
 class ErrorEvent:
     source: str  # e.g. "logfile:/var/log/app/error.log"
     message: str  # one-line summary
     details: str  # full traceback / log excerpt
     fingerprint: str = ""
-    timestamp: str = field(default_factory=_utcnow)
+    timestamp: str = field(default_factory=utcnow_iso)
 
     def __post_init__(self) -> None:
         if not self.fingerprint:
@@ -49,3 +52,46 @@ class Monitor(ABC):
     @abstractmethod
     def name(self) -> str:
         pass
+
+
+class HTTPPollMonitor(Monitor):
+    """Base for monitors that poll an HTTP API and dedup items by id.
+
+    Subclasses implement _fetch/_item_id/_to_event; poll() handles the
+    fetch-failure logging and seen-id bookkeeping.
+    """
+
+    def __init__(self, client: httpx.AsyncClient):
+        self._client = client
+        self._seen: set[str] = set()
+
+    async def poll(self) -> list[ErrorEvent]:
+        try:
+            items = await self._fetch()
+        except Exception:
+            log.exception("%s: failed to fetch", self.name)
+            return []
+
+        events: list[ErrorEvent] = []
+        for item in items:
+            item_id = self._item_id(item)
+            if item_id in self._seen:
+                continue
+            self._seen.add(item_id)
+            events.append(self._to_event(item))
+        return events
+
+    async def aclose(self) -> None:
+        await self._client.aclose()
+
+    @abstractmethod
+    async def _fetch(self) -> list[dict[str, Any]]:
+        """Return the raw items from the API."""
+
+    @abstractmethod
+    def _item_id(self, item: dict[str, Any]) -> str:
+        """Stable id used to skip already-seen items across polls."""
+
+    @abstractmethod
+    def _to_event(self, item: dict[str, Any]) -> ErrorEvent:
+        """Convert one raw item into an ErrorEvent."""

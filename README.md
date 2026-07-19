@@ -5,11 +5,12 @@ AI-powered developer assistant with two faces:
 - **Chat** — talk to an AI in your terminal, with streamed responses and
   tools (it can read, search, and edit files, and run commands — with your
   permission).
-- **Watch** — a monitoring daemon for your server. It tails your logs,
-  and when your app throws a new error it investigates the code, documents
-  the incident, and opens a pull request on GitHub — either with just the
-  analysis and suggested fix (*suggest* mode) or with the fix applied
-  (*fix* mode).
+- **Watch** — a monitoring daemon. It watches your error sources — local
+  log files, Sentry issues, failed GitHub Actions runs — and when a new
+  error appears it investigates the code, documents the incident, and
+  opens a pull request on GitHub — either with just the analysis and
+  suggested fix (*suggest* mode) or with the fix applied (*fix* mode).
+  It can ping Slack when a PR opens and records what each analysis cost.
 
 ## Quick start: chat
 
@@ -25,27 +26,32 @@ Get a DeepSeek API key at [platform.deepseek.com](https://platform.deepseek.com)
 
 ```bash
 maajun init            # writes ~/.config/maajun/config.toml — edit it
-maajun github-login    # store a GitHub token (or: export GITHUB_TOKEN=...)
-maajun watch --once    # dry run: one poll cycle
+maajun github-login    # set the target repo + store a GitHub token
+maajun watch --dry-run # analyze errors without opening PRs — test your config
+maajun watch --once    # one real poll cycle
 maajun watch           # keep monitoring
 ```
 
-Point `monitor.log_files` at your app's log files and `github.repo` at the
+Configure at least one error source — `monitor.log_files` to tail your
+app's logs, Sentry credentials to poll unresolved issues, or GitHub
+Actions repos to catch CI failures — and point `github.repo` at the
 repository maajun should open PRs on. Each new error becomes one PR:
 
 ```
-error in log ──▶ fingerprint & dedup ──▶ AI analyzes your code
-                                              │
-   PR on GitHub ◀── branch + incident report ─┘
+error detected ──▶ fingerprint & dedup ──▶ AI analyzes your code
+(logs / Sentry / CI)                            │
+   PR on GitHub ◀──── branch + incident report ─┘
 ```
 
 The same error never opens two PRs — repeat sightings only bump a counter.
 
 ## Documentation
 
-- [How it works](docs/architecture.md) — components and the incident pipeline
-- [Monitoring guide](docs/monitoring.md) — config reference, GitHub
-  permissions, modes, running on a VPS
+- [How it works](docs/architecture.md) — components, monitors, and the
+  incident pipeline
+- [Monitoring guide](docs/monitoring.md) — config reference, error
+  sources (logs, Sentry, GitHub Actions), notifications, cost tracking,
+  running on a VPS
 - [Command reference](docs/commands.md) — every CLI command and flag
 
 ## Supported AI providers

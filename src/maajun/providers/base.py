@@ -30,6 +30,7 @@ class CompletionResponse:
     usage: dict[str, int] | None = None
     raw_response: Any = None
     thinking: str | None = None
+    model: str | None = None
 
 
 # Events yielded by stream_completion:

@@ -1,0 +1,97 @@
+"""Shared fixtures for all maajun tests."""
+
+import getpass
+
+import keyring
+import keyring.errors
+import pytest
+
+from maajun.agent.core import Agent
+from maajun.config import AIProviderConfig, Config
+from maajun.providers.base import CompletionResponse, ProviderError
+from maajun.providers.factory import ProviderFactory
+
+
+@pytest.fixture(autouse=True)
+def _getpass_reads_stdin(monkeypatch):
+    """In a real terminal getpass reads /dev/tty, bypassing the test
+    runner's scripted stdin — tests would block waiting for the keyboard
+    (and capture whatever the developer types). Force plain stdin."""
+    monkeypatch.setattr(getpass, "getpass", lambda prompt="": input(prompt))
+
+
+# ---------------------------------------------------------------------------
+# Keyring mock
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def fake_keyring(monkeypatch):
+    """In-memory keyring that satisfies AuthManager tests."""
+    store = {}
+
+    def delete_password(service, name):
+        if (service, name) not in store:
+            raise keyring.errors.PasswordDeleteError(name)
+        del store[(service, name)]
+
+    monkeypatch.setattr(keyring, "get_password", lambda s, n: store.get((s, n)))
+    monkeypatch.setattr(keyring, "set_password", lambda s, n, v: store.__setitem__((s, n), v))
+    monkeypatch.setattr(keyring, "delete_password", delete_password)
+    return store
+
+
+# ---------------------------------------------------------------------------
+# Fake AI provider
+# ---------------------------------------------------------------------------
+
+
+class FakeProvider:
+    """Deterministic provider for unit tests that don't hit the API."""
+
+    def __init__(self, reply="pong", fail=False):
+        self.reply = reply
+        self.fail = fail
+        self.last_messages = None
+
+    async def chat_completion(self, messages, **kwargs):
+        self.last_messages = messages
+        if self.fail:
+            raise ProviderError("boom")
+        return CompletionResponse(content=self.reply, thinking="hmm ")
+
+    async def stream_completion(self, messages, **kwargs):
+        self.last_messages = messages
+        if self.fail:
+            raise ProviderError("boom")
+        yield "thinking", "hmm "
+        yield "content", self.reply[: len(self.reply) // 2]
+        yield "content", self.reply[len(self.reply) // 2 :]
+
+    async def validate_credentials(self):
+        return not self.fail
+
+    def get_provider_name(self):
+        return "deepseek"
+
+
+@pytest.fixture
+def fake_provider():
+    return FakeProvider()
+
+
+@pytest.fixture
+def agent(monkeypatch, fake_provider):
+    """Agent wired to a FakeProvider — no API calls."""
+    monkeypatch.setattr(ProviderFactory, "create_provider", lambda *a, **k: fake_provider)
+    return Agent(Config(ai=AIProviderConfig(provider="deepseek", api_key="x")))
+
+
+# ---------------------------------------------------------------------------
+# Config helpers
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def default_config():
+    return Config()

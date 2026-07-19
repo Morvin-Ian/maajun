@@ -62,3 +62,52 @@ def test_persists_across_reopen(tmp_path):
     s2 = IncidentStore(tmp_path / "incidents.db")
     assert s2.record(make_event()) is False
     s2.close()
+
+
+def test_mark_processed_with_cost(store):
+    event = make_event()
+    store.record(event)
+    store.mark_processed(
+        event.fingerprint,
+        branch="maajun/incident-abc",
+        pr_url="https://pr/1",
+        cost_usd=0.0042,
+        prompt_tokens=500,
+        completion_tokens=200,
+    )
+    row = store.get(event.fingerprint)
+    assert row["cost_usd"] == 0.0042
+    assert row["prompt_tokens"] == 500
+    assert row["completion_tokens"] == 200
+
+
+def test_total_cost(store):
+    e1 = make_event("ValueError: a")
+    e2 = make_event("KeyError: b")
+    store.record(e1)
+    store.record(e2)
+    store.mark_processed(e1.fingerprint, branch="b1", pr_url="https://pr/1", cost_usd=0.01)
+    store.mark_processed(e2.fingerprint, branch="b2", pr_url="https://pr/2", cost_usd=0.02)
+    assert abs(store.total_cost() - 0.03) < 0.0001
+
+
+def test_total_tokens(store):
+    e1 = make_event("ValueError: a")
+    e2 = make_event("KeyError: b")
+    store.record(e1)
+    store.record(e2)
+    store.mark_processed(e1.fingerprint, branch="b1", pr_url="https://pr/1",
+                         prompt_tokens=100, completion_tokens=50)
+    store.mark_processed(e2.fingerprint, branch="b2", pr_url="https://pr/2",
+                         prompt_tokens=200, completion_tokens=80)
+    totals = store.total_tokens()
+    assert totals["prompt_tokens"] == 300
+    assert totals["completion_tokens"] == 130
+
+
+def test_forget_drops_incident_so_it_records_as_new(store):
+    e = make_event("ValueError: a")
+    assert store.record(e) is True
+    store.forget(e.fingerprint)
+    assert store.get(e.fingerprint) is None
+    assert store.record(e) is True

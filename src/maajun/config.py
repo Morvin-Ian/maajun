@@ -61,9 +61,17 @@ class MonitorConfig(BaseModel):
     error_pattern: str = r"\b(ERROR|CRITICAL|FATAL)\b"
     poll_interval: float = 30.0
 
+    sentry_auth_token: str = ""
+    sentry_org: str = ""
+    sentry_projects: list[str] = Field(default_factory=list)
+
+    github_actions_token: str = ""
+    github_actions_repos: list[str] = Field(default_factory=list)
+
 
 class DaemonConfig(BaseModel):
     workdir: str = str(default_data_dir())
+    notify_webhook_urls: list[str] = Field(default_factory=list)
 
 
 class Config(BaseModel):

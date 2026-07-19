@@ -2,6 +2,7 @@ import asyncio
 import getpass
 import json
 import logging
+import re
 from pathlib import Path
 
 import typer
@@ -405,17 +406,46 @@ def init(
     console.print(f"[green]✓ Wrote {path}[/green]")
     console.print(
         "\n[bold]Next steps:[/bold]\n"
-        "  1. Edit the config: set [cyan]github.repo[/cyan] and [cyan]monitor.log_files[/cyan]\n"
-        "  2. Run [bold]maajun github-login[/bold] to store a GitHub token\n"
+        "  1. Edit the config: set [cyan]monitor.log_files[/cyan] (or Sentry/GitHub Actions)\n"
+        "  2. Run [bold]maajun github-login[/bold] to set the repo and store a token\n"
         "  3. Run [bold]maajun watch[/bold] to start monitoring\n"
     )
+
+
+PLACEHOLDER_REPO = "owner/name"
+
+
+def _save_repo_to_config(path: Path, repo: str) -> None:
+    """Set github.repo in the config file, creating the file if needed.
+
+    Edits the existing file in place (one line) so comments survive.
+    """
+    if path.exists():
+        text = path.read_text()
+        new, n = re.subn(
+            r'(?m)^(\s*)repo\s*=\s*"[^"]*"',
+            rf'\g<1>repo = "{repo}"',
+            text,
+            count=1,
+        )
+        if n == 0:
+            if "[github]" in text:
+                new = text.replace("[github]", f'[github]\nrepo = "{repo}"', 1)
+            else:
+                new = f'{text.rstrip()}\n\n[github]\nrepo = "{repo}"\n'
+        path.write_text(new)
+    else:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            STARTER_CONFIG.replace(f'repo = "{PLACEHOLDER_REPO}"', f'repo = "{repo}"')
+        )
 
 
 @app.command(name="github-login")
 def github_login(
     config_path: Path | None = typer.Option(None, "--config", "-c", help="Config file location"),
 ):
-    """Store a GitHub token for creating branches and pull requests.
+    """Set the target repository and store a GitHub token, in one step.
 
     Use a fine-grained personal access token scoped to the target repo with
     Contents: read/write and Pull requests: read/write permissions.
@@ -431,17 +461,30 @@ def github_login(
         "  • Pull requests: [bold]read and write[/bold]",
         border_style="blue",
     ))
-    token = getpass.getpass("\n> GitHub token (input hidden): ").strip()
+
+    config = Config.load(config_path)
+    current = config.github.repo if config.github.repo != PLACEHOLDER_REPO else ""
+
+    prompt = f"\n> Repository (owner/name) [{current}]: " if current else \
+        "\n> Repository (owner/name): "
+    repo = console.input(prompt).strip() or current
+    if not repo:
+        console.print("[red]No repository entered. Cancelled.[/red]")
+        raise typer.Exit(1)
+    if repo.count("/") != 1 or repo.startswith("/") or repo.endswith("/"):
+        console.print(f'[red]✗ "{repo}" is not in owner/name form.[/red]')
+        raise typer.Exit(1)
+
+    token = getpass.getpass("> GitHub token (input hidden): ").strip()
     if not token:
         console.print("[red]No token entered. Cancelled.[/red]")
         raise typer.Exit(1)
 
     client = GitHubClient(token)
-    config = Config.load(config_path)
 
-    async def validate() -> tuple[str, bool | None]:
+    async def validate() -> tuple[str, bool]:
         login = await client.validate_token()
-        push = await client.can_push(config.github.repo) if config.github.repo else None
+        push = await client.can_push(repo)
         return login, push
 
     try:
@@ -452,18 +495,19 @@ def github_login(
         raise typer.Exit(1) from e
 
     console.print(f"[green]✓ Authenticated as {login}.[/green]")
-    if push is True:
-        console.print(f"[green]✓ Token can push to {config.github.repo}.[/green]")
-    elif push is False:
+    if push:
+        console.print(f"[green]✓ Token can push to {repo}.[/green]")
+    else:
         console.print(
-            f"[yellow]⚠ Token cannot push to {config.github.repo} — "
+            f"[yellow]⚠ Token cannot push to {repo} — "
             "the daemon will fail to create branches. Check the token's "
             "repository access and Contents permission.[/yellow]"
         )
-    else:
-        console.print(
-            "[dim]No github.repo configured yet; repo access not checked.[/dim]"
-        )
+
+    if repo != config.github.repo:
+        path = config_path or default_config_path()
+        _save_repo_to_config(path, repo)
+        console.print(f"[green]✓ Saved github.repo = {repo} in {path}.[/green]")
 
     auth = AuthManager()
     try:
@@ -480,6 +524,9 @@ def github_login(
 def watch(
     config_path: Path | None = typer.Option(None, "--config", "-c", help="Config file location"),
     once: bool = typer.Option(False, "--once", help="Run a single poll cycle and exit"),
+    dry_run: bool = typer.Option(
+        False, "--dry-run", help="Analyze errors but skip git/PR operations"
+    ),
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Debug logging"),
 ):
     """Monitor configured error sources; document each new error in a PR"""
@@ -503,12 +550,13 @@ def watch(
         f"(base: {config.github.base_branch})\n"
         f"Mode:     [cyan]{config.github.mode}[/cyan]\n"
         f"Monitors: {', '.join(m.name for m in daemon.monitors)}\n"
-        f"Interval: {config.monitor.poll_interval}s",
+        f"Interval: {config.monitor.poll_interval}s"
+        + ("\n[yellow]Dry run — no branches/PRs will be created[/yellow]" if dry_run else ""),
         border_style="blue",
     ))
 
     try:
-        asyncio.run(daemon.run(once=once))
+        asyncio.run(daemon.run(once=once, dry_run=dry_run))
     except KeyboardInterrupt:
         console.print("\n[dim]Stopped.[/dim]")
 
