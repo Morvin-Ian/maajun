@@ -5,6 +5,7 @@ import logging
 import re
 from pathlib import Path
 
+
 import typer
 from rich.console import Console, Group
 from rich.live import Live
@@ -13,6 +14,8 @@ from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 
+from maajun.agent.core import Agent
+from maajun.daemon import build_daemon
 from maajun.auth import AuthManager
 from maajun.config import AIProviderConfig, Config, default_config_path
 from maajun.providers.base import ProviderError, ProviderType
@@ -186,7 +189,6 @@ def chat(
         console.print(f"[dim]Configured: {', '.join(configured)}[/dim]")
         raise typer.Exit(1)
 
-    from maajun.agent.core import Agent
 
     # Holds the active Live display so the approval prompt can pause it.
     live_holder: dict = {"live": None}
@@ -383,9 +385,22 @@ log_files = ["/var/log/myapp/error.log"]
 error_pattern = "\\\\b(ERROR|CRITICAL|FATAL)\\\\b"
 poll_interval = 30
 
+# GitHub Actions — poll repos for failed workflow runs (optional).
+# github_actions_token = "github_pat_..."
+# github_actions_repos = ["you/another-repo"]
+
 [daemon]
 # Where clones, the incident database, and state live.
 # workdir = "~/.local/share/maajun"
+
+# Email notifications when a PR opens or an incident fails (optional).
+# [daemon.email]
+# smtp_host = "smtp.gmail.com"
+# smtp_port = 587                    # 465 for implicit TLS, else STARTTLS
+# username = "you@example.com"
+# password = ""                      # or set MAAJUN_SMTP_PASSWORD
+# from_addr = "you@example.com"
+# to_addrs = ["you@example.com"]
 """
 
 
@@ -406,7 +421,7 @@ def init(
     console.print(f"[green]✓ Wrote {path}[/green]")
     console.print(
         "\n[bold]Next steps:[/bold]\n"
-        "  1. Edit the config: set [cyan]monitor.log_files[/cyan] (or Sentry/GitHub Actions)\n"
+        "  1. Edit the config: set [cyan]monitor.log_files[/cyan] (or GitHub Actions)\n"
         "  2. Run [bold]maajun github-login[/bold] to set the repo and store a token\n"
         "  3. Run [bold]maajun watch[/bold] to start monitoring\n"
     )
@@ -530,7 +545,6 @@ def watch(
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Debug logging"),
 ):
     """Monitor configured error sources; document each new error in a PR"""
-    from maajun.daemon import build_daemon
 
     logging.basicConfig(
         level=logging.DEBUG if verbose else logging.INFO,

@@ -1,9 +1,9 @@
 # Monitoring guide
 
-Maajun watches your error sources — local log files, Sentry, GitHub
-Actions — and turns each new error into a pull request on GitHub. For
-log files it must run on the server that writes them; the Sentry and
-GitHub Actions monitors work from anywhere with network access.
+Maajun watches your error sources — local log files and GitHub Actions —
+and turns each new error into a pull request on GitHub. For log files it
+must run on the server that writes them (the usual VPS setup); the
+GitHub Actions monitor works from anywhere with network access.
 
 ## 1. Configure
 
@@ -33,24 +33,25 @@ log_files = [                 # files to tail for errors
 error_pattern = "\\b(ERROR|CRITICAL|FATAL)\\b"   # regex for error lines
 poll_interval = 30            # seconds between polls
 
-# Sentry — poll unresolved issues (optional)
-# sentry_auth_token = "sntrys_..."
-# sentry_org = "my-org"
-# sentry_projects = ["my-project"]
-
 # GitHub Actions — poll failed workflow runs (optional)
 # github_actions_token = "github_pat_..."
 # github_actions_repos = ["owner/name"]
 
 [daemon]
 workdir = "~/.local/share/maajun"   # clones, incident DB, state
-# notify_webhook_urls = [           # Slack-compatible webhooks (optional)
-#   "https://hooks.slack.com/services/...",
-# ]
+
+# Email notifications (optional) — see Notifications below
+# [daemon.email]
+# smtp_host = "smtp.gmail.com"
+# smtp_port = 587                   # 465 for implicit TLS, else STARTTLS
+# username = "you@example.com"
+# password = ""                     # or set MAAJUN_SMTP_PASSWORD
+# from_addr = "you@example.com"
+# to_addrs = ["you@example.com"]
 ```
 
-At least one error source must be configured — log files, Sentry, or
-GitHub Actions; the daemon refuses to start with nothing to watch. Use
+At least one error source must be configured — log files or GitHub
+Actions; the daemon refuses to start with nothing to watch. Use
 `--config /path/to/config.toml` on any command to point somewhere else.
 
 ## Error sources
@@ -63,18 +64,15 @@ Python tracebacks — including ones split across polls — and lines
 matching `error_pattern`. An ERROR line immediately followed by a
 traceback (`logging.exception`) is merged into a single event.
 
-### Sentry
-
-Set `sentry_auth_token`, `sentry_org`, and `sentry_projects` to poll
-each project's unresolved issues. Create the token at
-**Sentry → Settings → Auth Tokens** with the `event:read` and
-`project:read` scopes. Each Sentry issue becomes one incident,
-fingerprinted by its Sentry short id (e.g. `PROJ-1A2B`), and the
-incident details include the event count, users affected, and a link
-back to Sentry.
-
-This is the source to use when your app runs somewhere maajun can't
-read logs — production servers, serverless, browsers.
+This is how maajun catches **request errors on a VPS**: run maajun on
+the same server as your app, and point it at the log your app's
+exceptions land in. A request that 500s is detected as soon as the
+framework logs it — for Django/Flask/FastAPI that's the app's error log
+(any `logging.exception` traceback), and watching the web server's error
+log (e.g. `/var/log/nginx/error.log`, gunicorn's `--error-logfile`)
+works too since `error_pattern` is a plain regex you can adapt to any
+log format. Errors that are swallowed without being logged are invisible
+— make sure unhandled exceptions actually reach a file.
 
 ### GitHub Actions
 
@@ -155,11 +153,26 @@ the PR. Start with `suggest`; switch to `fix` once you trust the reports.
 
 ## Notifications
 
-Add Slack-compatible webhook URLs to `daemon.notify_webhook_urls` to get
-a message whenever maajun opens a PR (with a link) or fails to process
-an incident (with the reason). Discord works too via its
-`/slack`-compatible webhook endpoint. Delivery failures are logged and
-never interrupt the pipeline.
+Configure `[daemon.email]` to get an email whenever maajun opens a PR
+(with a link) or fails to process an incident (with the reason).
+Notifications are enabled when `smtp_host`, `from_addr`, and `to_addrs`
+are all set; leave them out and maajun stays silent. Delivery failures
+are logged and never interrupt the pipeline.
+
+```toml
+[daemon.email]
+smtp_host = "smtp.gmail.com"
+smtp_port = 587                  # 465 uses implicit TLS, anything else STARTTLS
+username = "you@example.com"
+password = ""                    # prefer: export MAAJUN_SMTP_PASSWORD=...
+from_addr = "you@example.com"
+to_addrs = ["you@example.com", "team@example.com"]
+```
+
+Keep the password out of the config file by setting the
+`MAAJUN_SMTP_PASSWORD` environment variable instead (it is used whenever
+`password` is empty). For Gmail, use an app password
+(<https://myaccount.google.com/apppasswords>), not your account password.
 
 ## Deduplication
 
@@ -168,7 +181,6 @@ Every error gets a stable fingerprint before any AI call:
 - **Log errors** — a hash of the error text with volatile parts (line
   numbers, addresses, timestamps, ids) stripped, so the same crash
   repeating looks identical.
-- **Sentry issues** — the Sentry short id.
 - **CI failures** — the commit SHA.
 
 Known fingerprints only increment a counter in the incident database —
@@ -204,6 +216,7 @@ User=deploy
 ExecStart=/home/deploy/.local/bin/maajun watch
 Environment=GITHUB_TOKEN=github_pat_...
 Environment=DEEPSEEK_API_KEY=sk-...
+# Environment=MAAJUN_SMTP_PASSWORD=...   # if email notifications are on
 # Or keep secrets out of the unit file:
 # EnvironmentFile=/etc/maajun/secrets.env
 Restart=on-failure
@@ -223,9 +236,9 @@ incident it is currently processing before exiting, so
 `systemctl stop`/`restart` never leaves a half-pushed branch.
 
 Note: after a restart the daemon re-reads watched logs from the start
-and re-fetches current Sentry issues and CI failures. Deduplication
-makes this harmless — already-processed errors are recognized and
-skipped without any AI calls.
+and re-fetches current CI failures. Deduplication makes this harmless —
+already-processed errors are recognized and skipped without any AI
+calls.
 
 ## Troubleshooting
 
@@ -233,13 +246,17 @@ skipped without any AI calls.
 - **"Token cannot push"** — the fine-grained PAT is missing Contents
   write access or doesn't cover the repo.
 - **"No monitors configured"** — the `[monitor]` section defines no log
-  files, Sentry settings, or GitHub Actions repos.
+  files or GitHub Actions repos.
 - **No PR for an error you expected** — check the fingerprint isn't
   already in `incidents.db` (`status=processed` means a PR exists;
   `failed` means the last attempt errored — check logs, fix the cause,
   delete the row to retry).
 - **Nothing detected** — confirm the log path is right and your log
   format matches `error_pattern`, or that errors are Python tracebacks.
-  For Sentry/GitHub Actions, run with `-v` and check for fetch errors —
-  a monitor that can't reach its API logs the failure and returns
-  nothing rather than crashing.
+  For GitHub Actions, run with `-v` and check for fetch errors — a
+  monitor that can't reach its API logs the failure and returns nothing
+  rather than crashing.
+- **No notification emails** — `[daemon.email]` needs `smtp_host`,
+  `from_addr`, and `to_addrs` all set to be enabled. Send failures are
+  logged (`email notification failed`) — check credentials, and remember
+  Gmail needs an app password.

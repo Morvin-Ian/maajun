@@ -6,11 +6,12 @@ AI-powered developer assistant with two faces:
   tools (it can read, search, and edit files, and run commands — with your
   permission).
 - **Watch** — a monitoring daemon. It watches your error sources — local
-  log files, Sentry issues, failed GitHub Actions runs — and when a new
-  error appears it investigates the code, documents the incident, and
-  opens a pull request on GitHub — either with just the analysis and
-  suggested fix (*suggest* mode) or with the fix applied (*fix* mode).
-  It can ping Slack when a PR opens and records what each analysis cost.
+  log files (e.g. your app's error log on a VPS) and failed GitHub
+  Actions runs — and when a new error appears it investigates the code,
+  documents the incident, and opens a pull request on GitHub — either
+  with just the analysis and suggested fix (*suggest* mode) or with the
+  fix applied (*fix* mode). It can email you when a PR opens and records
+  what each analysis cost.
 
 ## Quick start: chat
 
@@ -33,13 +34,13 @@ maajun watch           # keep monitoring
 ```
 
 Configure at least one error source — `monitor.log_files` to tail your
-app's logs, Sentry credentials to poll unresolved issues, or GitHub
-Actions repos to catch CI failures — and point `github.repo` at the
-repository maajun should open PRs on. Each new error becomes one PR:
+app's logs, or GitHub Actions repos to catch CI failures — and point
+`github.repo` at the repository maajun should open PRs on. Each new
+error becomes one PR:
 
 ```
 error detected ──▶ fingerprint & dedup ──▶ AI analyzes your code
-(logs / Sentry / CI)                            │
+  (logs / CI)                                   │
    PR on GitHub ◀──── branch + incident report ─┘
 ```
 
@@ -50,7 +51,7 @@ The same error never opens two PRs — repeat sightings only bump a counter.
 - [How it works](docs/architecture.md) — components, monitors, and the
   incident pipeline
 - [Monitoring guide](docs/monitoring.md) — config reference, error
-  sources (logs, Sentry, GitHub Actions), notifications, cost tracking,
+  sources (logs, GitHub Actions), email notifications, cost tracking,
   running on a VPS
 - [Command reference](docs/commands.md) — every CLI command and flag
 

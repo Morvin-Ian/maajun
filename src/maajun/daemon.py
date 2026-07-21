@@ -21,7 +21,6 @@ from maajun.monitors import (
     GitHubActionsMonitor,
     LogFileMonitor,
     Monitor,
-    SentryMonitor,
 )
 from maajun.notifications import Notifier
 from maajun.state import IncidentStore
@@ -294,15 +293,6 @@ def build_daemon(config: Config, auth: AuthManager | None = None) -> Daemon:
         LogFileMonitor(path, config.monitor.error_pattern)
         for path in config.monitor.log_files
     ]
-    if config.monitor.sentry_auth_token and config.monitor.sentry_org:
-        for project in config.monitor.sentry_projects or ["default"]:
-            monitors.append(
-                SentryMonitor(
-                    config.monitor.sentry_auth_token,
-                    config.monitor.sentry_org,
-                    project,
-                )
-            )
     if config.monitor.github_actions_token and config.monitor.github_actions_repos:
         for repo in config.monitor.github_actions_repos:
             monitors.append(
@@ -311,7 +301,7 @@ def build_daemon(config: Config, auth: AuthManager | None = None) -> Daemon:
     if not monitors:
         raise RuntimeError(
             "No monitors configured. Add log files under [monitor] "
-            "or Sentry/GitHub Actions settings."
+            "or GitHub Actions settings."
         )
 
     workdir = Path(config.daemon.workdir).expanduser()
@@ -334,5 +324,5 @@ def build_daemon(config: Config, auth: AuthManager | None = None) -> Daemon:
         workspace=workspace,
         github=github,
         agent_factory=agent_factory,
-        notifier=Notifier(config.daemon.notify_webhook_urls),
+        notifier=Notifier(config.daemon.email),
     )
