@@ -122,11 +122,12 @@ class Agent:
             raise
 
     async def chat_stream(self, message: str) -> AsyncIterator[StreamChunk]:
-        """Yield ("thinking" | "content", text) chunks as they arrive.
+        """Yield ("thinking" | "content" | "tool", text) chunks as they arrive.
 
         Tool calls are handled transparently: the provider emits them as a
-        single event once a round's stream ends, the tools run, and the next
-        round starts streaming.
+        single event once a round's stream ends, the tools run and each result
+        preview is yielded as a "tool" chunk, and the next round starts
+        streaming.
         """
         self.history.append({"role": "user", "content": message})
         self._trim_history()
@@ -166,7 +167,7 @@ class Agent:
                     preview = result[:TOOL_RESULT_PREVIEW]
                     if len(result) > TOOL_RESULT_PREVIEW:
                         preview += "..."
-                    yield "thinking", f"\n\n🔧 {name} → {preview}\n\n"
+                    yield "tool", f"🔧 {name} → {preview}"
 
             self.history.append({
                 "role": "assistant",

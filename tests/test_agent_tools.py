@@ -341,8 +341,8 @@ async def test_chat_stream_executes_tools(config):
 
     assert provider.call_count == 2
 
-    # Tool progress is surfaced as thinking chunks
-    progress = [c for c in chunks if c[0] == "thinking" and "🔧" in c[1]]
+    # Tool progress is surfaced as tool chunks
+    progress = [c for c in chunks if c[0] == "tool" and "🔧" in c[1]]
     assert len(progress) == 1
     assert "bash" in progress[0][1]
 
@@ -359,7 +359,7 @@ async def test_chat_stream_multiple_tool_rounds(config):
     chunks = [chunk async for chunk in agent.chat_stream("multi")]
 
     assert provider.call_count == 3
-    progress = [c for c in chunks if c[0] == "thinking" and "🔧" in c[1]]
+    progress = [c for c in chunks if c[0] == "tool" and "🔧" in c[1]]
     assert len(progress) == 3
     assert agent.history[-1]["content"] == "done"
 

@@ -2,14 +2,19 @@ import asyncio
 import getpass
 import json
 import logging
+import random
 import re
+import sys
+import time
 from pathlib import Path
 
 import typer
+from prompt_toolkit import PromptSession
+from prompt_toolkit.shortcuts import prompt as pt_prompt
 from rich.console import Console, Group
 from rich.live import Live
-from rich.markdown import Markdown
 from rich.panel import Panel
+from rich.spinner import Spinner
 from rich.table import Table
 from rich.text import Text
 
@@ -121,6 +126,40 @@ def _build_config(auth: AuthManager, provider: str, thinking: bool = False) -> C
     ))
 
 
+def _input(text: str) -> str:
+    """Paste-safe line prompt.
+
+    prompt_toolkit enables bracketed paste, so a multi-line paste lands in
+    the prompt buffer as one editable input instead of submitting line by
+    line and leaking the rest to the shell after exit. Unbound key combos
+    are ignored rather than inserting escape codes. Falls back to plain
+    input when stdin is not a TTY (tests, pipes).
+    """
+    if sys.stdin.isatty():
+        return pt_prompt(text)
+    return console.input(text)
+
+
+def _secret_input(text: str) -> str:
+    """Paste-safe hidden prompt for keys and tokens (echoes '*').
+
+    Rejects multi-line pastes: no token or API key contains a newline, so
+    one almost always means the wrong thing was pasted — better to re-ask
+    than to send the first line to an API and dump the rest.
+    """
+    while True:
+        if sys.stdin.isatty():
+            value = pt_prompt(text, is_password=True).strip()
+        else:
+            value = getpass.getpass(text).strip()
+        if "\n" not in value:
+            return value
+        console.print(
+            "[yellow]⚠ That paste spans multiple lines — it doesn't look like "
+            "a key or token. Check your clipboard and try again.[/yellow]"
+        )
+
+
 def _pick_provider(configured: list[str]) -> str:
     if len(configured) == 1:
         return configured[0]
@@ -128,7 +167,7 @@ def _pick_provider(configured: list[str]) -> str:
     for i, p in enumerate(configured, 1):
         console.print(f"  [cyan]{i}.[/cyan] {p}")
     while True:
-        choice = console.input("\n> Choice: ").strip()
+        choice = _input("\n> Choice: ").strip()
         if choice.isdigit() and 1 <= int(choice) <= len(configured):
             return configured[int(choice) - 1]
         console.print("[red]Invalid choice.[/red]")
@@ -169,7 +208,7 @@ def login():
         console.print(f"  {status} [cyan]{i}.[/cyan] {p}")
 
     while True:
-        choice = console.input("\n> Choice: ").strip()
+        choice = _input("\n> Choice: ").strip()
         if choice.isdigit() and 1 <= int(choice) <= len(providers):
             provider = providers[int(choice) - 1]
             break
@@ -177,14 +216,14 @@ def login():
 
     if auth.has_api_key(provider):
         console.print(f"\n[yellow]⚠ {provider} already has a key stored.[/yellow]")
-        overwrite = console.input("> Overwrite? (y/N): ").strip().lower()
+        overwrite = _input("> Overwrite? (y/N): ").strip().lower()
         if overwrite != "y":
             console.print("[dim]Cancelled.[/dim]")
             return
 
     console.print(f"\n[bold]Paste your {provider} API key:[/bold]")
     console.print("[dim](input is hidden for security)[/dim]\n")
-    key = getpass.getpass("> API key: ").strip()
+    key = _secret_input("> API key: ")
 
     if not key:
         console.print("[red]No key entered. Cancelled.[/red]")
@@ -234,6 +273,12 @@ def chat(
     # Holds the active Live display so the approval prompt can pause it.
     live_holder: dict = {"live": None}
 
+    # prompt_toolkit reads keys in raw mode: a paste (Ctrl+Shift+V) arrives as
+    # one bracketed-paste event and is inserted literally — a multi-line paste
+    # stays one message instead of submitting line by line — and unbound key
+    # combinations are ignored instead of leaking escape codes into the input.
+    prompt_session = PromptSession() if sys.stdin.isatty() else None
+
     async def approve_always(name: str, args: dict) -> bool:
         return True
 
@@ -248,7 +293,7 @@ def chat(
             border_style="yellow",
         ))
         try:
-            answer = console.input("> Allow this call? (y/N): ").strip().lower()
+            answer = (await _prompt(prompt_session, "> Allow this call? (y/N): ")).strip().lower()
         except EOFError:
             answer = ""
         if live:
@@ -274,29 +319,78 @@ def chat(
     ))
 
     try:
-        asyncio.run(_chat_loop(agent, live_holder))
+        asyncio.run(_chat_loop(agent, live_holder, prompt_session))
     except KeyboardInterrupt:
         console.print("\n[dim]Goodbye![/dim]")
 
 
-def _response_renderable(thinking: str, content: str) -> Group:
+async def _prompt(session: PromptSession | None, text: str) -> str:
+    """Read a line of input, via prompt_toolkit when stdin is a TTY."""
+    if session is not None:
+        return await session.prompt_async(text)
+    return console.input(text)
+
+
+STREAM_TAIL_LINES = 10
+
+STATUS_WORDS = [
+    "Thinking", "Reasoning", "Pondering", "Cogitating", "Mulling",
+    "Musing", "Percolating", "Brewing", "Ruminating", "Deliberating",
+    "Puzzling", "Noodling", "Marinating", "Untangling",
+    "Connecting dots", "Weighing options", "Piecing it together",
+]
+STATUS_WORD_SECONDS = 2.5
+
+
+class _StatusSpinner:
+    """Animated 'Thinking… (3s)' line shown instead of the reasoning text.
+
+    Re-renders on every Live refresh, so the spinner, the elapsed timer, and
+    the periodic word rotation all keep moving even while the stream stalls.
+    """
+
+    def __init__(self):
+        self._started = time.monotonic()
+        self._word = random.choice(STATUS_WORDS)
+        self._word_at = self._started
+        self._spinner = Spinner("dots", style="dim")
+
+    def __rich_console__(self, console, options):
+        now = time.monotonic()
+        if now - self._word_at >= STATUS_WORD_SECONDS:
+            self._word = random.choice([w for w in STATUS_WORDS if w != self._word])
+            self._word_at = now
+        elapsed = int(now - self._started)
+        self._spinner.update(text=Text(f"{self._word}… ({elapsed}s)", style="dim"))
+        yield self._spinner
+
+
+def _tail(text: str, limit: int = STREAM_TAIL_LINES) -> str:
+    lines = text.strip().splitlines()
+    return "\n".join(lines[-limit:])
+
+
+def _stream_renderable(status: _StatusSpinner, content: str) -> Group:
+    """Bounded view of the in-flight response.
+
+    The live region must stay shorter than the terminal — Rich's Live cannot
+    rewrite lines that have scrolled off screen, so an unbounded renderable
+    leaves a stale copy behind on every refresh. Only the tail of the content
+    is shown while streaming; the full response is printed once at the end.
+    """
     parts = []
-    if thinking.strip():
-        parts.append(Panel(
-            Text(thinking.strip(), style="dim"),
-            title="[dim]Thinking[/dim]",
-            border_style="dim",
-        ))
-    if content:
-        parts.append(Markdown(content))
+    if content.strip():
+        parts.append(Text(_tail(content)))
+    parts.append(status)
     return Group(*parts)
 
 
-async def _chat_loop(agent, live_holder=None):
+async def _chat_loop(agent, live_holder=None, prompt_session=None):
     live_holder = live_holder if live_holder is not None else {"live": None}
     while True:
+        console.print()
         try:
-            user_input = console.input("\n> ").strip()
+            user_input = (await _prompt(prompt_session, "> ")).strip()
         except EOFError:
             console.print("\n[dim]Goodbye![/dim]")
             break
@@ -322,27 +416,45 @@ async def _chat_loop(agent, live_holder=None):
                         console.print(f"\n> {msg['content']}")
                     elif msg["role"] == "assistant" and msg.get("content"):
                         console.print()
-                        console.print(Markdown(msg["content"]))
+                        console.print(
+                            msg["content"], markup=False, highlight=False, soft_wrap=True
+                        )
             continue
 
         console.print()
-        thinking, content = "", ""
+        content = ""
+        error = None
+        status = _StatusSpinner()
         try:
-            with Live(console=console, refresh_per_second=8, vertical_overflow="visible") as live:
+            # transient=True: the bounded streaming view is erased on exit and
+            # replaced by a single full print of the response below.
+            with Live(console=console, refresh_per_second=8, transient=True) as live:
                 live_holder["live"] = live
+                live.update(_stream_renderable(status, content))
                 try:
                     async for kind, text in agent.chat_stream(user_input):
-                        if kind == "thinking":
-                            thinking += text
-                        else:
+                        if kind == "tool":
+                            # Printed while Live is active, so it lands above
+                            # the live region and stays there permanently.
+                            console.print(Text(text, style="dim"))
+                        elif kind == "content":
                             content += text
-                        live.update(_response_renderable(thinking, content))
+                            live.update(_stream_renderable(status, content))
+                        # "thinking" chunks are deliberately not shown — the
+                        # animated status stands in for the reasoning text.
                 finally:
                     live_holder["live"] = None
         except ProviderError as e:
-            console.print(f"[red]{e}[/red]")
+            error = str(e)
         except Exception as e:
-            console.print(f"[red]Unexpected error: {e}[/red]")
+            error = f"Unexpected error: {e}"
+
+        if content:
+            # Plain text, unwrapped: what you copy is exactly what the model
+            # wrote, with no table borders, padding, or re-flowed lines.
+            console.print(content, markup=False, highlight=False, soft_wrap=True)
+        if error:
+            console.print(f"[red]{error}[/red]")
 
 
 @app.command()
@@ -376,7 +488,7 @@ def config_set_key(
 ):
     """Store an API key for a provider (prompts if the key is omitted)"""
     if key is None:
-        key = getpass.getpass("API key (input hidden): ").strip()
+        key = _secret_input("API key (input hidden): ")
         if not key:
             console.print("[red]No key entered. Cancelled.[/red]")
             raise typer.Exit(1)
@@ -413,7 +525,7 @@ def init(
     path = path or default_config_path()
     if path.exists():
         console.print(f"[yellow]⚠ {path} already exists.[/yellow]")
-        overwrite = console.input("> Overwrite? (y/N): ").strip().lower()
+        overwrite = _input("> Overwrite? (y/N): ").strip().lower()
         if overwrite != "y":
             console.print("[dim]Cancelled.[/dim]")
             return
@@ -478,7 +590,7 @@ def github_login(
 
     prompt = f"\n> Repository (owner/name) [{current}]: " if current else \
         "\n> Repository (owner/name): "
-    repo = console.input(prompt).strip() or current
+    repo = _input(prompt).strip() or current
     if not repo:
         console.print("[red]No repository entered. Cancelled.[/red]")
         raise typer.Exit(1)
@@ -486,7 +598,7 @@ def github_login(
         console.print(f'[red]✗ "{repo}" is not in owner/name form.[/red]')
         raise typer.Exit(1)
 
-    token = getpass.getpass("> GitHub token (input hidden): ").strip()
+    token = _secret_input("> GitHub token (input hidden): ")
     if not token:
         console.print("[red]No token entered. Cancelled.[/red]")
         raise typer.Exit(1)
