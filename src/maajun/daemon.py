@@ -189,18 +189,19 @@ class Daemon:
 
         if dry_run:
             log.info(
-                "dry-run: would create branch=%s, commit report, push PR for fp=%s",
+                "dry-run: would create branch=%s for fp=%s",
                 branch,
                 event.fingerprint,
             )
-            log.info("dry-run report:\n%s", report[:500])
+            print(f"\n{'='*60}")
+            print(f"DRY RUN — AI analysis for: {event.message[:80]}")
+            print(f"Source: {event.source}  |  Fingerprint: {event.fingerprint}")
+            print(f"{'='*60}\n")
+            print(report)
+            print(f"\n{'='*60}")
+            print(f"Cost: {prompt_tok} prompt + {comp_tok} completion tokens = ${cost:.4f}")
+            print(f"{'='*60}\n")
             self.store.forget(event.fingerprint)
-            log.info(
-                "dry-run cost: prompt=%d completion=%d cost=$%.4f",
-                prompt_tok,
-                comp_tok,
-                cost,
-            )
             return ""
 
         self._write_report(event, report)
