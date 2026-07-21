@@ -5,7 +5,7 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
-from maajun.agent.tools.base import Tool, json_schema
+from maajun.agent.tools.base import Tool, json_schema, resolve_path
 from maajun.providers.base import ToolDefinition
 
 
@@ -24,19 +24,19 @@ def _run_git(args: list[str], cwd: Path) -> str:
 
 
 async def _git_status(path: str = ".") -> str:
-    p = Path(path).expanduser().resolve()
+    p = resolve_path(path)
 
     branch = _run_git(["rev-parse", "--abbrev-ref", "HEAD"], p)
     if branch.startswith("Error") or not branch:
         return f"Not a git repository or git error: {branch}"
 
     status = _run_git(["status", "--short"], p)
-    log = _run_git(["log", "--oneline", "-10"], p)
+    recent_commits = _run_git(["log", "--oneline", "-10"], p)
     parts = [f"Branch: {branch}"]
     if status:
         parts.append(f"Status:\n{status}")
-    if log:
-        parts.append(f"Recent commits:\n{log}")
+    if recent_commits:
+        parts.append(f"Recent commits:\n{recent_commits}")
     return "\n\n".join(parts)
 
 

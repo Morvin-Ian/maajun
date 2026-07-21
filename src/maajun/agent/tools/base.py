@@ -7,9 +7,16 @@ are sent to the LLM; the agent loop calls executors.
 from __future__ import annotations
 
 from collections.abc import Callable, Coroutine, Iterable
+from pathlib import Path
 from typing import Any, NamedTuple
 
 from maajun.providers.base import ToolDefinition
+
+
+def resolve_path(path: str) -> Path:
+    """Expand ~ and resolve to an absolute path."""
+    return Path(path).expanduser().resolve()
+
 
 ToolExecutor = Callable[..., Coroutine[Any, Any, str]]
 

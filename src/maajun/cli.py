@@ -5,7 +5,6 @@ import logging
 import re
 from pathlib import Path
 
-
 import typer
 from rich.console import Console, Group
 from rich.live import Live
@@ -15,14 +14,56 @@ from rich.table import Table
 from rich.text import Text
 
 from maajun.agent.core import Agent
-from maajun.daemon import build_daemon
 from maajun.auth import AuthManager
 from maajun.config import AIProviderConfig, Config, default_config_path
+from maajun.daemon import build_daemon
 from maajun.providers.base import ProviderError, ProviderType
 from maajun.providers.factory import ProviderFactory
+from maajun.vcs import GitHubClient, GitHubError
 
 app = typer.Typer(invoke_without_command=True)
 console = Console()
+
+PLACEHOLDER_REPO = "owner/name"
+
+STARTER_CONFIG = """\
+# Maajun daemon configuration.
+
+[ai]
+provider = "deepseek"
+# thinking_mode = true
+
+[github]
+# Repository the daemon documents errors in and opens PRs against.
+repo = "owner/name"
+base_branch = "main"
+# "suggest": PRs contain only the incident report and suggested fix.
+# "fix": the agent may also change code inside its isolated workspace.
+mode = "suggest"
+
+[monitor]
+# Log files to watch for tracebacks and error lines.
+log_files = ["/var/log/myapp/error.log"]
+error_pattern = "\\\\b(ERROR|CRITICAL|FATAL)\\\\b"
+poll_interval = 30
+
+# GitHub Actions — poll repos for failed workflow runs (optional).
+# github_actions_token = "github_pat_..."
+# github_actions_repos = ["you/another-repo"]
+
+[daemon]
+# Where clones, the incident database, and state live.
+# workdir = "~/.local/share/maajun"
+
+# Email notifications when a PR opens or an incident fails (optional).
+# [daemon.email]
+# smtp_host = "smtp.gmail.com"
+# smtp_port = 587                    # 465 for implicit TLS, else STARTTLS
+# username = "you@example.com"
+# password = ""                      # or set MAAJUN_SMTP_PASSWORD
+# from_addr = "you@example.com"
+# to_addrs = ["you@example.com"]
+"""
 
 
 def _implemented_providers() -> list[str]:
@@ -364,46 +405,6 @@ def config_remove_key(
     console.print(f"[green]✓ API key removed for {provider}[/green]")
 
 
-STARTER_CONFIG = """\
-# Maajun daemon configuration.
-
-[ai]
-provider = "deepseek"
-# thinking_mode = true
-
-[github]
-# Repository the daemon documents errors in and opens PRs against.
-repo = "owner/name"
-base_branch = "main"
-# "suggest": PRs contain only the incident report and suggested fix.
-# "fix": the agent may also change code inside its isolated workspace.
-mode = "suggest"
-
-[monitor]
-# Log files to watch for tracebacks and error lines.
-log_files = ["/var/log/myapp/error.log"]
-error_pattern = "\\\\b(ERROR|CRITICAL|FATAL)\\\\b"
-poll_interval = 30
-
-# GitHub Actions — poll repos for failed workflow runs (optional).
-# github_actions_token = "github_pat_..."
-# github_actions_repos = ["you/another-repo"]
-
-[daemon]
-# Where clones, the incident database, and state live.
-# workdir = "~/.local/share/maajun"
-
-# Email notifications when a PR opens or an incident fails (optional).
-# [daemon.email]
-# smtp_host = "smtp.gmail.com"
-# smtp_port = 587                    # 465 for implicit TLS, else STARTTLS
-# username = "you@example.com"
-# password = ""                      # or set MAAJUN_SMTP_PASSWORD
-# from_addr = "you@example.com"
-# to_addrs = ["you@example.com"]
-"""
-
-
 @app.command()
 def init(
     path: Path | None = typer.Option(None, "--config", "-c", help="Config file location"),
@@ -425,9 +426,6 @@ def init(
         "  2. Run [bold]maajun github-login[/bold] to set the repo and store a token\n"
         "  3. Run [bold]maajun watch[/bold] to start monitoring\n"
     )
-
-
-PLACEHOLDER_REPO = "owner/name"
 
 
 def _save_repo_to_config(path: Path, repo: str) -> None:
@@ -465,8 +463,6 @@ def github_login(
     Use a fine-grained personal access token scoped to the target repo with
     Contents: read/write and Pull requests: read/write permissions.
     """
-    from maajun.vcs import GitHubClient, GitHubError
-
     console.print(Panel(
         "[bold]GitHub Login[/bold]\n\n"
         "Create a fine-grained personal access token at\n"

@@ -2,14 +2,12 @@
 
 from __future__ import annotations
 
-from pathlib import Path
-
-from maajun.agent.tools.base import Tool, json_schema
+from maajun.agent.tools.base import Tool, json_schema, resolve_path
 from maajun.providers.base import ToolDefinition
 
 
 async def _read_file(path: str, offset: int = 0, limit: int = 2000) -> str:
-    p = Path(path).expanduser().resolve()
+    p = resolve_path(path)
     if not p.exists():
         return f"Error: {p} does not exist"
     if p.is_dir():
@@ -55,7 +53,7 @@ READ_FILE: Tool = Tool(
 
 
 async def _edit_file(path: str, old_string: str, new_string: str) -> str:
-    p = Path(path).expanduser().resolve()
+    p = resolve_path(path)
     if not p.exists():
         return f"Error: {p} does not exist"
     try:
@@ -103,7 +101,7 @@ EDIT_FILE: Tool = Tool(
 
 
 async def _write_file(path: str, content: str) -> str:
-    p = Path(path).expanduser().resolve()
+    p = resolve_path(path)
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(content)
     return f"Wrote {len(content)} bytes to {p}"

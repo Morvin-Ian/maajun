@@ -287,6 +287,7 @@ class _FakeGitHubClient:
 
 def test_github_login_sets_repo_and_token(fake_keyring, tmp_path, monkeypatch):
     monkeypatch.setattr("maajun.vcs.GitHubClient", _FakeGitHubClient)
+    monkeypatch.setattr("maajun.cli.GitHubClient", _FakeGitHubClient)
     config_path = tmp_path / "config.toml"
 
     result = runner.invoke(
@@ -304,6 +305,7 @@ def test_github_login_keeps_configured_repo_on_empty_input(
     fake_keyring, tmp_path, monkeypatch
 ):
     monkeypatch.setattr("maajun.vcs.GitHubClient", _FakeGitHubClient)
+    monkeypatch.setattr("maajun.cli.GitHubClient", _FakeGitHubClient)
     config_path = tmp_path / "config.toml"
     config_path.write_text('[github]\nrepo = "owner/real"\n')
 
@@ -320,6 +322,7 @@ def test_github_login_keeps_configured_repo_on_empty_input(
 
 def test_github_login_treats_placeholder_repo_as_unset(fake_keyring, tmp_path, monkeypatch):
     monkeypatch.setattr("maajun.vcs.GitHubClient", _FakeGitHubClient)
+    monkeypatch.setattr("maajun.cli.GitHubClient", _FakeGitHubClient)
     config_path = tmp_path / "config.toml"
     config_path.write_text('[github]\nrepo = "owner/name"\n')
 
@@ -335,6 +338,7 @@ def test_github_login_treats_placeholder_repo_as_unset(fake_keyring, tmp_path, m
 
 def test_github_login_rejects_bad_repo_format(fake_keyring, tmp_path, monkeypatch):
     monkeypatch.setattr("maajun.vcs.GitHubClient", _FakeGitHubClient)
+    monkeypatch.setattr("maajun.cli.GitHubClient", _FakeGitHubClient)
     config_path = tmp_path / "config.toml"
 
     result = runner.invoke(

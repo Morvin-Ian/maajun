@@ -7,7 +7,7 @@ import os
 import re
 from pathlib import Path
 
-from maajun.agent.tools.base import Tool, json_schema
+from maajun.agent.tools.base import Tool, json_schema, resolve_path
 from maajun.providers.base import ToolDefinition
 
 SKIP_DIRS = {
@@ -18,7 +18,7 @@ SKIP_DIRS = {
 
 
 async def _glob(pattern: str, path: str = ".") -> str:
-    root = Path(path).expanduser().resolve()
+    root = resolve_path(path)
     if not root.exists():
         return f"Error: {path} does not exist"
     results = [
@@ -61,7 +61,7 @@ async def _grep(
     include: str | None = None,
     max_results: int = 50,
 ) -> str:
-    root = Path(path).expanduser().resolve()
+    root = resolve_path(path)
     if not root.exists():
         return f"Error: {path} does not exist"
 
@@ -135,7 +135,7 @@ GREP: Tool = Tool(
 
 
 async def _list_dir(path: str = ".") -> str:
-    p = Path(path).expanduser().resolve()
+    p = resolve_path(path)
     if not p.exists():
         return f"Error: {p} does not exist"
     if not p.is_dir():
