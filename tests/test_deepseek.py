@@ -260,3 +260,34 @@ async def test_no_retry_on_auth_error(monkeypatch):
     with pytest.raises(ProviderError):
         await provider.chat_completion(messages=[{"role": "user", "content": "hi"}])
     assert call_count == 1  # no retries
+
+
+def test_prepared_tools_are_cached():
+    from maajun.providers.base import ToolDefinition
+
+    provider = DeepSeekProvider({"api_key": "x"})
+    calls = {"n": 0}
+    real = provider.prepare_tools
+
+    def spy(tools):
+        calls["n"] += 1
+        return real(tools)
+
+    provider.prepare_tools = spy
+    tools = [ToolDefinition("t", "d", {"type": "object", "properties": {}})]
+
+    first = provider._prepared_tools(tools)
+    again = provider._prepared_tools(tools)  # same list object -> cache hit
+    assert first is again
+    assert calls["n"] == 1
+
+    provider._prepared_tools(list(tools))  # different object -> rebuild
+    assert calls["n"] == 2
+
+    assert provider._prepared_tools(None) is None
+
+
+async def test_aclose_is_safe_without_client():
+    provider = DeepSeekProvider({"api_key": "x"})
+    await provider.aclose()  # never initialized -> no error
+    assert provider.client is None

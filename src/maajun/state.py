@@ -32,6 +32,10 @@ class IncidentStore:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._conn = sqlite3.connect(self.path)
         self._conn.row_factory = sqlite3.Row
+        # WAL lets a reader (e.g. the cost-audit query) run without blocking
+        # the daemon's writes, and survives an ungraceful kill more cleanly.
+        self._conn.execute("PRAGMA journal_mode=WAL")
+        self._conn.execute("PRAGMA synchronous=NORMAL")
         self._conn.execute(SCHEMA)
         self._conn.commit()
 

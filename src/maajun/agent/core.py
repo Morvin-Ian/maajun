@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from collections.abc import AsyncIterator, Awaitable, Callable
@@ -76,6 +77,10 @@ class Agent:
 
     def clear_history(self) -> None:
         self.history.clear()
+
+    async def aclose(self) -> None:
+        """Release the provider's HTTP client."""
+        await self.provider.aclose()
 
     async def chat(self, message: str) -> CompletionResponse:
         self.history.append({"role": "user", "content": message})
@@ -190,32 +195,50 @@ class Agent:
         self, messages: list[dict], response: CompletionResponse
     ) -> AsyncIterator[tuple[str, str]]:
         """Execute the response's tool calls, appending the assistant message
-        and each tool result to messages. Yields (tool_name, result)."""
+        and each tool result to messages. Yields (tool_name, result).
+
+        When a round has several calls that all need no approval (read-only
+        tools like read_file/grep/glob), they run concurrently. If any call
+        is permission-gated they run sequentially, so approval prompts stay
+        ordered and interactive.
+        """
         messages.append({
             "role": "assistant",
             "content": response.content or "",
             "tool_calls": self._format_tool_calls(response.tool_calls),
         })
 
-        for tc in response.tool_calls:
-            fn = tc["function"]
-            name = fn["name"]
-            args = self._parse_args(fn)
+        prepared = [
+            (tc, tc["function"]["name"], self._parse_args(tc["function"]))
+            for tc in response.tool_calls
+        ]
+        concurrent = len(prepared) > 1 and not any(
+            self.registry.requires_permission(name) for _, name, _ in prepared
+        )
+        if concurrent:
+            results = await asyncio.gather(
+                *(self._execute_tool(name, args) for _, name, args in prepared)
+            )
+        else:
+            results = [await self._execute_tool(name, args) for _, name, args in prepared]
 
-            log.info("tool_call name=%s args=%s", name, args)
-            if await self._permitted(name, args):
-                result = await self.registry.execute(name, args)
-                log.info("tool_result name=%s len=%d", name, len(result))
-            else:
-                result = PERMISSION_DENIED
-                log.info("tool_denied name=%s", name)
-
+        for (tc, name, _args), result in zip(prepared, results, strict=True):
             messages.append({
                 "role": "tool",
                 "tool_call_id": tc["id"],
                 "content": result,
             })
             yield name, result
+
+    async def _execute_tool(self, name: str, args: dict[str, Any]) -> str:
+        log.info("tool_call name=%s args=%s", name, args)
+        if await self._permitted(name, args):
+            result = await self.registry.execute(name, args)
+            log.info("tool_result name=%s len=%d", name, len(result))
+        else:
+            result = PERMISSION_DENIED
+            log.info("tool_denied name=%s", name)
+        return result
 
     async def _permitted(self, name: str, args: dict[str, Any]) -> bool:
         if not self.registry.requires_permission(name):

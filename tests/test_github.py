@@ -82,3 +82,27 @@ async def test_create_pull_request_error_surfaces_detail():
         await client.create_pull_request(
             "owner/name", head="h", base="main", title="t", body="b"
         )
+
+
+async def test_client_is_reused_across_requests():
+    calls = {"n": 0}
+
+    def handler(request):
+        calls["n"] += 1
+        return httpx.Response(200, json={"login": "morvin"})
+
+    client = make_client(handler)
+    await client.validate_token()
+    first = client._client
+    await client.validate_token()
+
+    assert client._client is first  # same pooled client, not a fresh one
+    assert calls["n"] == 2
+
+
+async def test_aclose_releases_client():
+    client = make_client(lambda request: httpx.Response(200, json={"login": "x"}))
+    await client.validate_token()
+    assert client._client is not None
+    await client.aclose()
+    assert client._client is None

@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from maajun.config import Config, DaemonConfig, GitHubConfig, MonitorConfig
+from maajun.config import Config, DaemonConfig, GitHubConfig, MonitorConfig, RepoConfig
 from maajun.daemon import SHUTDOWN_EVENT, Daemon, make_permission_policy
 from maajun.monitors import LogFileMonitor
 from maajun.providers.base import CompletionResponse
@@ -59,6 +59,7 @@ class FakeAgent:
         self.report = report
         self.edit_path = edit_path
         self.prompts: list[str] = []
+        self.closed = False
 
     async def chat(self, message):
         self.prompts.append(message)
@@ -66,10 +67,14 @@ class FakeAgent:
             self.edit_path.write_text("items = [0]\n")
         return CompletionResponse(content=self.report)
 
+    async def aclose(self):
+        self.closed = True
+
 
 class FakeGitHub:
     def __init__(self):
         self.calls = []
+        self.closed = False
 
     async def create_pull_request(self, repo, *, head, base, title, body):
         self.calls.append(
@@ -77,14 +82,18 @@ class FakeGitHub:
         )
         return f"https://github.com/{repo}/pull/{len(self.calls)}"
 
+    async def aclose(self):
+        self.closed = True
+
 
 @pytest.fixture
 def setup(tmp_path, remote):
     logfile = tmp_path / "app.log"
     logfile.write_text("")
 
+    repo_config = RepoConfig(repo="owner/name", base_branch="main", mode="suggest")
     config = Config(
-        github=GitHubConfig(repo="owner/name", base_branch="main", mode="suggest"),
+        github=GitHubConfig(repos=[repo_config]),
         monitor=MonitorConfig(log_files=[str(logfile)], poll_interval=1),
         daemon=DaemonConfig(workdir=str(tmp_path / "work")),
     )
@@ -92,13 +101,15 @@ def setup(tmp_path, remote):
     store = IncidentStore(tmp_path / "work" / "incidents.db")
     agent = FakeAgent()
     github = FakeGitHub()
+    monitor = LogFileMonitor(logfile)
     daemon = Daemon(
         config,
-        monitors=[LogFileMonitor(logfile)],
+        monitors=[monitor],
         store=store,
-        workspace=workspace,
+        workspaces={"owner/name": workspace},
+        monitor_to_repo={monitor.name: repo_config},
         github=github,
-        agent_factory=lambda: agent,
+        agent_factory_factory=lambda rc, ws: lambda: agent,
     )
     return daemon, logfile, agent, github, store, remote
 
@@ -116,7 +127,8 @@ async def test_error_becomes_pull_request(setup):
 
     # Agent got the error and the workspace path
     assert "IndexError" in agent.prompts[0]
-    assert str(daemon.workspace.path) in agent.prompts[0]
+    workspace = daemon.workspaces["owner/name"]
+    assert str(workspace.path) in agent.prompts[0]
 
     # PR was opened from the incident branch with the report in the body
     assert len(github.calls) == 1
@@ -176,8 +188,11 @@ async def test_failed_incident_is_marked_and_loop_survives(setup):
 
 async def test_fix_mode_commits_agent_changes(setup):
     daemon, logfile, agent, github, store, remote = setup
-    daemon.config.github.mode = "fix"
-    agent.edit_path = daemon.workspace.path / "main.py"
+    # Update the repo config mode to "fix"
+    repo_config = daemon.monitor_to_repo[list(daemon.monitor_to_repo.keys())[0]]
+    repo_config.mode = "fix"
+    workspace = daemon.workspaces["owner/name"]
+    agent.edit_path = workspace.path / "main.py"
 
     with open(logfile, "a") as f:
         f.write(TRACEBACK)
@@ -246,6 +261,88 @@ async def test_dry_run_skips_git_and_pr(setup):
 
 
 # ---------------------------------------------------------------------------
+# Manual reports, progress, and notices
+# ---------------------------------------------------------------------------
+
+
+async def test_manual_report_opens_pr_and_reports_progress(setup):
+    daemon, logfile, agent, github, store, remote = setup
+    repo_config = daemon.monitor_to_repo[next(iter(daemon.monitor_to_repo))]
+    phases: list[str] = []
+
+    pr_url = await daemon.handle_manual_report(
+        "Checkout button does nothing", repo_config, progress=phases.append
+    )
+
+    assert phases == ["Preparing workspace", "Analyzing with AI", "Opening PR"]
+    assert pr_url.endswith("/pull/1")
+    assert "Checkout button" in agent.prompts[0]
+    assert github.calls[0]["head"].startswith("maajun/report-")
+
+
+async def test_manual_report_dry_run_only_analyzes(setup):
+    daemon, logfile, agent, github, store, remote = setup
+    repo_config = daemon.monitor_to_repo[next(iter(daemon.monitor_to_repo))]
+    phases: list[str] = []
+
+    pr_url = await daemon.handle_manual_report(
+        "Something is broken", repo_config, dry_run=True, progress=phases.append
+    )
+
+    assert pr_url == ""
+    assert phases == ["Analyzing with AI"]  # no workspace prep / PR in dry run
+    assert github.calls == []
+
+
+async def test_notices_emitted_for_new_error_and_pr(setup):
+    daemon, logfile, agent, github, store, remote = setup
+    notices: list[tuple[str, str]] = []
+    daemon.on_notice = lambda message, level: notices.append((level, message))
+
+    with open(logfile, "a") as f:
+        f.write(TRACEBACK)
+    await daemon.poll_once()
+
+    levels = [lvl for lvl, _ in notices]
+    assert "info" in levels  # new error detected
+    assert "success" in levels  # PR opened
+    assert any("PR opened" in msg for _, msg in notices)
+
+
+async def test_agent_closed_after_incident(setup):
+    daemon, logfile, agent, github, store, remote = setup
+
+    with open(logfile, "a") as f:
+        f.write(TRACEBACK)
+    await daemon.poll_once()
+
+    assert agent.closed is True  # provider HTTP client freed per incident
+
+
+async def test_aclose_closes_github_and_monitors(setup):
+    daemon, logfile, agent, github, store, remote = setup
+    await daemon.aclose()
+    assert github.closed is True
+
+
+async def test_notice_emitted_on_failure(setup):
+    daemon, logfile, agent, github, store, remote = setup
+    notices: list[tuple[str, str]] = []
+    daemon.on_notice = lambda message, level: notices.append((level, message))
+
+    async def boom(*args, **kwargs):
+        raise RuntimeError("github down")
+
+    github.create_pull_request = boom
+
+    with open(logfile, "a") as f:
+        f.write(TRACEBACK)
+    await daemon.poll_once()
+
+    assert any(lvl == "error" for lvl, _ in notices)
+
+
+# ---------------------------------------------------------------------------
 # Graceful shutdown
 # ---------------------------------------------------------------------------
 
@@ -264,9 +361,10 @@ async def test_shutdown_event_stops_daemon():
         config,
         monitors=[],
         store=store,
-        workspace=workspace,
+        workspaces={"owner/name": workspace},
+        monitor_to_repo={},
         github=None,
-        agent_factory=lambda: None,
+        agent_factory_factory=lambda rc, ws: lambda: None,
     )
 
     async def set_shutdown():

@@ -1,19 +1,25 @@
+"""Small, dependency-light helpers shared across the codebase.
+
+Grouped into themed modules (dates, github, text, repos) and re-exported here
+so callers can keep importing straight from `maajun.utils`.
+"""
+
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from maajun.utils.dates import utcnow_iso
+from maajun.utils.github import (
+    GITHUB_API_VERSION,
+    PLACEHOLDER_REPO,
+    github_headers,
+    is_valid_repo,
+)
+from maajun.utils.text import truncate
 
-GITHUB_API_VERSION = "2022-11-28"
-
-
-def utcnow_iso() -> str:
-    """Current UTC time as an ISO-8601 string with seconds precision."""
-    return datetime.now(UTC).isoformat(timespec="seconds")
-
-
-def github_headers(token: str) -> dict[str, str]:
-    """Standard headers for the GitHub REST API."""
-    return {
-        "Authorization": f"Bearer {token}",
-        "Accept": "application/vnd.github+json",
-        "X-GitHub-Api-Version": GITHUB_API_VERSION,
-    }
+__all__ = [
+    "GITHUB_API_VERSION",
+    "PLACEHOLDER_REPO",
+    "github_headers",
+    "is_valid_repo",
+    "truncate",
+    "utcnow_iso",
+]

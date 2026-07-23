@@ -8,7 +8,17 @@ GitHub Actions monitor works from anywhere with network access.
 ## 1. Configure
 
 ```bash
-maajun init    # writes ~/.config/maajun/config.toml
+maajun init    # interactive: asks for provider, repo, mode, logs, interval
+```
+
+`init` prompts for the essentials and writes the config for you; pass
+`--no-interactive` to drop a commented template and edit it by hand
+instead. Afterwards you can view or change any setting without opening
+the file:
+
+```bash
+maajun config                       # print the whole config
+maajun config github.mode fix       # change one value (validated before save)
 ```
 
 Full config reference:
@@ -53,6 +63,40 @@ workdir = "~/.local/share/maajun"   # clones, incident DB, state
 At least one error source must be configured — log files or GitHub
 Actions; the daemon refuses to start with nothing to watch. Use
 `--config /path/to/config.toml` on any command to point somewhere else.
+
+### Multiple repositories
+
+One daemon can watch several repositories, each with its own branch,
+mode, and log files. Add them with `add-repo`:
+
+```bash
+maajun add-repo team/api -m fix -l /var/log/api/error.log
+maajun add-repo team/web -l /var/log/web/error.log
+```
+
+The first `add-repo` migrates a single-repo config into a
+`[[github.repos]]` list; each entry maps its own log files to its own
+repo:
+
+```toml
+[[github.repos]]
+repo = "team/api"
+base_branch = "main"
+mode = "fix"
+log_files = ["/var/log/api/error.log"]
+
+[[github.repos]]
+repo = "team/web"
+base_branch = "main"
+mode = "suggest"
+log_files = ["/var/log/web/error.log"]
+```
+
+Each monitor's errors open PRs on the repo it's attached to. Any global
+`monitor.log_files` (and a GitHub Actions monitor whose repo isn't in the
+list) attach to the **first** configured repo. Legacy single-repo
+configs keep working unchanged — you only opt into the list by adding a
+second repo.
 
 ## Error sources
 
@@ -100,9 +144,10 @@ maajun github-login        # asks for the repo, then the token
 ```
 
 `github-login` prompts for the target repository (visible input, saved
-to `github.repo` in your config) and the token (hidden input), then
-checks that the token authenticates *and* that it can push to that repo
-— so misconfigured tokens fail here rather than at 3 a.m.
+to your config), the token (hidden input), and the
+[mode](#modes), then checks that the token authenticates *and* that it
+can push to that repo — so misconfigured tokens fail here rather than at
+3 a.m.
 
 On a headless server without a keyring, use the environment instead —
 env vars always take precedence:
@@ -114,10 +159,23 @@ export DEEPSEEK_API_KEY=sk-...
 
 ## 3. Run
 
+Check everything is wired up first:
+
+```bash
+maajun status                # provider key? token? repo push access? logs?
+```
+
+`status` verifies your API key and GitHub token are present, that the
+token can push to each configured repo, and that a monitor is set — so a
+misconfiguration surfaces here rather than at 3 a.m. It exits non-zero on
+failure (handy in a deploy script); add `--no-network` to skip the
+GitHub round-trips.
+
 ```bash
 maajun watch --dry-run       # analyze errors, but skip git/PR — test your config
 maajun watch --once          # single poll cycle, then exit (cron)
 maajun watch                 # continuous monitoring
+maajun watch -m fix          # override the configured mode for this run
 maajun watch -v              # debug logging
 ```
 
@@ -129,6 +187,34 @@ are logged — but no branch, commit, or PR is created, and nothing is
 recorded in the incident database. Drop the flag and the same errors
 are processed for real. It's the safe way to verify a new config or
 error source before letting maajun loose on your repo.
+
+## On-demand reports
+
+You don't have to wait for a monitor to catch something. `maajun report`
+investigates an issue **you describe** and opens a PR with the analysis —
+the same clone → investigate → report → PR pipeline as `watch`, run on
+demand against the same configured repo, mode, and credentials.
+
+```bash
+maajun report "Checkout 500s when the cart is empty"
+maajun report "KeyError: 'discount' in cart totals" -m fix
+maajun report "Investigate the slow /search endpoint" --dry-run
+```
+
+Pass a plain description, a bug-tracker summary, or a pasted stack trace.
+The agent reads the target repo with its safe tools and writes the usual
+*what happened / root cause / suggested fix* report; in `fix` mode it also
+edits the clone. A live spinner shows each phase (preparing the workspace,
+analyzing, opening the PR) and finishes with the PR link. With multiple
+repos configured, `report` prompts you to pick one when `--repo` is
+omitted; pass `--repo owner/name` to skip the prompt in scripts. `--mode`,
+`--base-branch`, and `--dry-run` work the same as on `watch`.
+
+Each report is recorded in the same incident database as detected errors,
+so its tokens and cost are tracked alongside them. Unlike the watch loop,
+`report` is not dedup-gated — running it again on the same description
+re-investigates and updates the existing `maajun/report-<fingerprint>`
+branch and PR rather than skipping it.
 
 ## Modes
 
@@ -144,7 +230,8 @@ the PR. Start with `suggest`; switch to `fix` once you trust the reports.
 
 ## What a PR looks like
 
-- Branch: `maajun/incident-<fingerprint>`
+- Branch: `maajun/incident-<fingerprint>` (detected errors) or
+  `maajun/report-<fingerprint>` (on-demand `maajun report`)
 - Title: `[maajun] KeyError: 'discount'`
 - Body: the incident report — what happened, root cause with file/line
   references, suggested fix — plus the error source and fingerprint
@@ -241,6 +328,9 @@ already-processed errors are recognized and skipped without any AI
 calls.
 
 ## Troubleshooting
+
+Run `maajun status` first — it checks credentials, repo push access, and
+log files in one shot and points at whatever is missing.
 
 - **"No GitHub token"** — run `maajun github-login` or set `GITHUB_TOKEN`.
 - **"Token cannot push"** — the fine-grained PAT is missing Contents

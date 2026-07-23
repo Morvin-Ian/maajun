@@ -35,6 +35,14 @@ class LogFileMonitor(Monitor):
     def name(self) -> str:
         return f"logfile:{self.path}"
 
+    async def flush(self) -> list[ErrorEvent]:
+        """Flush any carried-over pending text."""
+        if not self._pending:
+            return []
+        events, _ = self._parse(self._pending, flush=True)
+        self._pending = ""
+        return events
+
     async def poll(self) -> list[ErrorEvent]:
         text = self._read_new()
         if not text:

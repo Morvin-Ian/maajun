@@ -46,6 +46,17 @@ class DeepSeekProvider(AIProvider):
         if config.get("thinking_mode"):
             self.model = THINKING_MODEL
         self.client: AsyncOpenAI | None = None
+        # Cache the serialized tool schema, keyed by the tools list's identity,
+        # so it isn't rebuilt on every round of a multi-round tool loop.
+        self._tool_cache: tuple[int, list[dict[str, Any]]] | None = None
+
+    def _prepared_tools(self, tools: list[ToolDefinition] | None) -> list[dict[str, Any]] | None:
+        if not tools:
+            return None
+        key = id(tools)
+        if self._tool_cache is None or self._tool_cache[0] != key:
+            self._tool_cache = (key, self.prepare_tools(tools))
+        return self._tool_cache[1]
 
     async def initialize(self) -> None:
         if not self.api_key:
@@ -55,6 +66,12 @@ class DeepSeekProvider(AIProvider):
             api_key=self.api_key,
             base_url=self.base_url,
         )
+
+    async def aclose(self) -> None:
+        """Close the underlying HTTP client so its connection pool is freed."""
+        if self.client is not None:
+            await self.client.close()
+            self.client = None
 
     async def _retryable(self, coro_func, *args, **kwargs):
         """Call coro_func with retries on transient errors (429, 500, 502, 503, connection)."""
@@ -92,7 +109,7 @@ class DeepSeekProvider(AIProvider):
         if not self.client:
             await self.initialize()
 
-        tool_defs = self.prepare_tools(tools) if tools else None
+        tool_defs = self._prepared_tools(tools)
 
         response = await self._retryable(
             self.client.chat.completions.create,
@@ -118,7 +135,7 @@ class DeepSeekProvider(AIProvider):
         if not self.client:
             await self.initialize()
 
-        tool_defs = self.prepare_tools(tools) if tools else None
+        tool_defs = self._prepared_tools(tools)
         tool_calls = _ToolCallAccumulator()
 
         try:

@@ -143,3 +143,33 @@ def test_run_to_event_minimal(monitor):
     event = monitor._to_event(minimal)
     assert "CI" in event.message
     assert event.fingerprint == "1"
+
+
+@pytest.mark.asyncio
+async def test_seen_ids_are_bounded(monkeypatch):
+    """The dedup window evicts oldest ids so it can't grow without bound."""
+    from maajun.monitors import base as base_mod
+
+    monkeypatch.setattr(base_mod, "MAX_SEEN_IDS", 3)
+    monitor = GitHubActionsMonitor(token="t", repo="owner/name")
+
+    def run(i):
+        return {**FAKE_RUN, "id": str(i), "head_sha": f"sha{i}"}
+
+    async def mock_get(url, params=None):
+        class FakeResp:
+            def raise_for_status(self):
+                pass
+
+            def json(self):
+                return {"workflow_runs": [run(i) for i in range(5)]}
+
+        return FakeResp()
+
+    monkeypatch.setattr(monitor._client, "get", mock_get)
+    await monitor.poll()
+
+    assert len(monitor._seen) == 3
+    # Oldest ids evicted, newest kept.
+    assert "0" not in monitor._seen
+    assert "4" in monitor._seen

@@ -21,21 +21,36 @@ class GitHubClient:
         self.api_url = api_url.rstrip("/")
         self._headers = github_headers(token)
         self._transport = transport
+        self._client: httpx.AsyncClient | None = None
 
-    def _client(self) -> httpx.AsyncClient:
-        return httpx.AsyncClient(
-            base_url=self.api_url,
-            headers=self._headers,
-            timeout=30,
-            transport=self._transport,
-        )
+    def _get_client(self) -> httpx.AsyncClient:
+        """Return a shared client, so repeated calls reuse the connection
+        pool and TLS session instead of handshaking anew each request."""
+        if self._client is None or self._client.is_closed:
+            self._client = httpx.AsyncClient(
+                base_url=self.api_url,
+                headers=self._headers,
+                timeout=30,
+                transport=self._transport,
+            )
+        return self._client
 
     async def _request(self, method: str, path: str, **kwargs) -> httpx.Response:
         try:
-            async with self._client() as client:
-                return await client.request(method, path, **kwargs)
+            return await self._get_client().request(method, path, **kwargs)
         except httpx.HTTPError as e:
             raise GitHubError(f"Could not reach GitHub: {e}") from e
+
+    async def aclose(self) -> None:
+        if self._client is not None and not self._client.is_closed:
+            await self._client.aclose()
+        self._client = None
+
+    async def __aenter__(self) -> GitHubClient:
+        return self
+
+    async def __aexit__(self, *exc: object) -> None:
+        await self.aclose()
 
     async def validate_token(self) -> str:
         """Return the authenticated login, or raise GitHubError."""

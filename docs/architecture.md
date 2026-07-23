@@ -1,29 +1,5 @@
 # How Maajun works
 
-## Components
-
-```
-src/maajun/
-├── agent/            The AI agent
-│   ├── core.py         Agent loop: model ⇄ tools until a final answer
-│   └── tools/          read_file, edit_file, write_file, glob, grep,
-│                       bash, list_dir, git_status
-├── providers/        AI backends (DeepSeek today; OpenAI-compatible API)
-├── monitors/         Error sources
-│   ├── base.py         Monitor contract, fingerprinting, HTTPPollMonitor
-│   ├── logfile.py      Tails local log files for tracebacks/error lines
-│   └── github_actions.py  Polls GitHub for failed workflow runs
-├── vcs/              Git workspace + GitHub REST client
-├── daemon.py         The watch pipeline: monitor → analyze → PR
-├── state.py          SQLite incident store (dedup, cost/token totals)
-├── notifications.py  Email alerts (SMTP)
-├── costs.py          Token-count → USD pricing per model
-├── config.py         TOML config (~/.config/maajun/config.toml)
-├── auth.py           Secrets: OS keyring, env-var fallback
-├── utils/            Shared helpers (timestamps, GitHub API headers)
-└── cli.py            Typer CLI
-```
-
 ## The agent loop
 
 The agent sends the conversation plus tool definitions to the model. When
@@ -103,10 +79,14 @@ identify one, convert one to an `ErrorEvent`.
    incident. CI failures use the commit SHA. Fingerprints live in a
    SQLite store; known ones just bump a counter.
 3. **Analyze** — for a new fingerprint, the daemon syncs an isolated
-   clone of your repo, creates a branch `maajun/incident-<fingerprint>`,
-   and asks the agent to investigate. The agent reads the code with its
-   safe tools and writes a structured report (what happened / root cause
-   / suggested fix). In fix mode it may also edit files in the clone.
+   clone of the event's repo, creates a branch
+   `maajun/incident-<fingerprint>`, and asks the agent to investigate.
+   The agent reads the code with its safe tools and writes a structured
+   report (what happened / root cause / suggested fix). In fix mode it
+   may also edit files in the clone. In a
+   [multi-repo](monitoring.md#multiple-repositories) config each monitor
+   is bound to a repo, so its errors are analyzed against — and open PRs
+   on — the right one, each with its own clone, branch, and mode.
 4. **Publish** — the report is committed as
    `docs/incidents/<fingerprint>.md`, the branch is pushed, and a pull
    request is opened with the report as its body. If the branch already
@@ -117,12 +97,36 @@ identify one, convert one to an `ErrorEvent`.
    fails, the incident is marked failed, a failure email is sent, and
    the daemon moves on; one bad incident never kills the loop.
 
+### On-demand reports (`maajun report`)
+
+The same pipeline runs without a monitor. `maajun report "<description>"`
+builds a synthetic `ErrorEvent` (source `manual`, fingerprinted from the
+description) and feeds it through steps 3–5 against a chosen repo, opening
+a PR on a `maajun/report-<fingerprint>` branch. Detected incidents and
+manual reports share the analyze/publish code path, so cost tracking and
+notifications behave identically. The one difference is dedup: the watch
+loop skips a fingerprint it has already processed (step 2), whereas
+`report` always re-investigates and updates its branch — a manual report is
+an explicit request, not a passive observation.
+
+### Progress feedback
+
+Foreground commands that do slow work surface it instead of hanging
+silently. `report` and interactive `watch` drive a Rich `Live` spinner
+(`progress.py`) whose phase label the daemon advances through a `progress`
+callback (*preparing workspace → analyzing with AI → opening PR*), and the
+daemon emits PR-opened / failure lines through an `on_notice` callback the
+CLI styles and prints. Both callbacks are injected, so the daemon core
+stays free of any terminal concerns; `--verbose` and non-interactive runs
+fall back to plain logging.
+
 ### Dry run
 
 `maajun watch --dry-run` runs steps 1–3 but stops before touching git or
 GitHub: the agent analyzes each new error and the report and would-be
 cost are logged, but no branch, commit, or PR is created. Nothing is
 persisted either — a later real run processes the same errors for real.
+`maajun report --dry-run` does the same for a manual report.
 
 ### Graceful shutdown
 

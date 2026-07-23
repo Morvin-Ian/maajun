@@ -1,13 +1,15 @@
 """Tests for the agent tool-calling loop."""
 
+import asyncio
 import json
 
 import pytest
 
 from maajun.agent.core import PERMISSION_DENIED, Agent
 from maajun.agent.tools import BASH, ToolRegistry, default_registry
+from maajun.agent.tools.base import Tool, json_schema
 from maajun.config import AIProviderConfig, Config
-from maajun.providers.base import CompletionResponse, ProviderError
+from maajun.providers.base import CompletionResponse, ProviderError, ToolDefinition
 
 # ---------------------------------------------------------------------------
 # Fake provider that simulates tool-calling rounds
@@ -350,6 +352,67 @@ async def test_chat_stream_executes_tools(config):
     assert "".join(c[1] for c in content_chunks) == "streamed answer"
 
     assert agent.history[-1]["content"] == "streamed answer"
+
+
+class TwoReadToolProvider(StreamsFromChatMixin):
+    """Requests two read-only tool calls in one round, then finishes."""
+
+    def __init__(self):
+        self.call_count = 0
+        self.last_messages = None
+
+    async def chat_completion(self, messages, **kwargs):
+        self.call_count += 1
+        self.last_messages = messages
+        if self.call_count == 1:
+            return CompletionResponse(
+                content="",
+                tool_calls=[
+                    {"id": "c1", "type": "function",
+                     "function": {"name": "read_a", "arguments": "{}"}},
+                    {"id": "c2", "type": "function",
+                     "function": {"name": "read_b", "arguments": "{}"}},
+                ],
+            )
+        return CompletionResponse(content="done")
+
+    async def validate_credentials(self):
+        return True
+
+    def get_provider_name(self):
+        return "fake"
+
+
+def _readonly_tool(name, executor):
+    return Tool(ToolDefinition(name, "", json_schema({})), executor)
+
+
+async def test_read_only_tools_run_concurrently(config):
+    """Two safe tools in one round overlap; if they ran serially the first
+    would deadlock waiting on the second, so completing proves concurrency."""
+    b_started = asyncio.Event()
+
+    async def read_a(**kwargs):
+        await asyncio.wait_for(b_started.wait(), timeout=1)
+        return "a-done"
+
+    async def read_b(**kwargs):
+        b_started.set()
+        return "b-done"
+
+    provider = TwoReadToolProvider()
+    agent = _make_agent(config, provider)
+    agent.registry = ToolRegistry([
+        _readonly_tool("read_a", read_a),
+        _readonly_tool("read_b", read_b),
+    ])
+
+    response = await agent.chat("read both")
+
+    assert response.content == "done"
+    tool_msgs = [m for m in provider.last_messages if m["role"] == "tool"]
+    contents = {m["content"] for m in tool_msgs}
+    assert contents == {"a-done", "b-done"}  # both completed, no deadlock
 
 
 async def test_chat_stream_multiple_tool_rounds(config):

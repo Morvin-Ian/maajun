@@ -6,6 +6,7 @@ import hashlib
 import logging
 import re
 from abc import ABC, abstractmethod
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -48,10 +49,24 @@ class Monitor(ABC):
     async def poll(self) -> list[ErrorEvent]:
         """Return error events observed since the last poll."""
 
+    async def flush(self) -> list[ErrorEvent]:
+        """Flush any carried-over state and return remaining events.
+
+        Called before the daemon exits in --once mode to ensure no
+        pending errors are lost.
+        """
+        return []
+
     @property
     @abstractmethod
     def name(self) -> str:
         pass
+
+
+# Cap on remembered item ids. The APIs return only the most recent items
+# per poll, so a bounded window is enough to dedup — and it stops _seen from
+# growing without limit over a long-running daemon.
+MAX_SEEN_IDS = 5000
 
 
 class HTTPPollMonitor(Monitor):
@@ -63,7 +78,9 @@ class HTTPPollMonitor(Monitor):
 
     def __init__(self, client: httpx.AsyncClient):
         self._client = client
-        self._seen: set[str] = set()
+        # OrderedDict as an insertion-ordered set, so the oldest ids can be
+        # evicted once the window is full.
+        self._seen: OrderedDict[str, None] = OrderedDict()
 
     async def poll(self) -> list[ErrorEvent]:
         try:
@@ -77,8 +94,11 @@ class HTTPPollMonitor(Monitor):
             item_id = self._item_id(item)
             if item_id in self._seen:
                 continue
-            self._seen.add(item_id)
+            self._seen[item_id] = None
             events.append(self._to_event(item))
+
+        while len(self._seen) > MAX_SEEN_IDS:
+            self._seen.popitem(last=False)
         return events
 
     async def aclose(self) -> None:

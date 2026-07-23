@@ -84,6 +84,9 @@ class AIProvider(ABC):
     def get_provider_name(self) -> str:
         pass
 
+    async def aclose(self) -> None:  # noqa: B027 - optional hook, no-op by default
+        """Release any held resources (e.g. HTTP clients). Override if needed."""
+
     def prepare_tools(self, tools: list[ToolDefinition]) -> list[dict[str, Any]]:
         return [
             {

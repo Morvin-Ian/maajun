@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+
 from maajun.agent.tools.base import Tool, json_schema, resolve_path
 from maajun.providers.base import ToolDefinition
 
@@ -13,7 +15,7 @@ async def _read_file(path: str, offset: int = 0, limit: int = 2000) -> str:
     if p.is_dir():
         return f"Error: {p} is a directory, not a file"
     try:
-        text = p.read_text(errors="replace")
+        text = await asyncio.to_thread(p.read_text, errors="replace")
     except Exception as e:
         return f"Error reading {p}: {e}"
     lines = text.splitlines()
@@ -57,7 +59,7 @@ async def _edit_file(path: str, old_string: str, new_string: str) -> str:
     if not p.exists():
         return f"Error: {p} does not exist"
     try:
-        text = p.read_text(errors="replace")
+        text = await asyncio.to_thread(p.read_text, errors="replace")
     except Exception as e:
         return f"Error reading {p}: {e}"
     count = text.count(old_string)
@@ -68,7 +70,7 @@ async def _edit_file(path: str, old_string: str, new_string: str) -> str:
             f"Error: old_string found {count} times in {p}. "
             "Provide more surrounding context to make it unique."
         )
-    p.write_text(text.replace(old_string, new_string, 1))
+    await asyncio.to_thread(p.write_text, text.replace(old_string, new_string, 1))
     return f"Edited {p}"
 
 
@@ -100,10 +102,14 @@ EDIT_FILE: Tool = Tool(
 )
 
 
-async def _write_file(path: str, content: str) -> str:
-    p = resolve_path(path)
+def _write_file_sync(p, content: str) -> None:
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(content)
+
+
+async def _write_file(path: str, content: str) -> str:
+    p = resolve_path(path)
+    await asyncio.to_thread(_write_file_sync, p, content)
     return f"Wrote {len(content)} bytes to {p}"
 
 

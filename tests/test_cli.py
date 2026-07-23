@@ -167,7 +167,8 @@ def test_sign_out(fake_keyring):
 
 def test_init_writes_config(tmp_path):
     config_path = tmp_path / "config.toml"
-    result = runner.invoke(app, ["init", "--config", str(config_path)])
+    # Non-interactive mode
+    result = runner.invoke(app, ["init", "--config", str(config_path), "--no-interactive"])
     assert result.exit_code == 0
     assert config_path.exists()
     content = config_path.read_text()
@@ -187,7 +188,10 @@ def test_init_refuses_overwrite(tmp_path):
 def test_init_overwrites_on_confirm(tmp_path):
     config_path = tmp_path / "config.toml"
     config_path.write_text("old")
-    result = runner.invoke(app, ["init", "--config", str(config_path)], input="y\n")
+    # Non-interactive mode with overwrite confirmation
+    result = runner.invoke(
+        app, ["init", "--config", str(config_path), "--no-interactive"], input="y\n"
+    )
     assert result.exit_code == 0
     assert "[ai]" in config_path.read_text()
 
@@ -284,16 +288,19 @@ class _FakeGitHubClient:
     async def can_push(self, repo):
         return True
 
+    async def aclose(self):
+        pass
+
 
 def test_github_login_sets_repo_and_token(fake_keyring, tmp_path, monkeypatch):
     monkeypatch.setattr("maajun.vcs.GitHubClient", _FakeGitHubClient)
-    monkeypatch.setattr("maajun.cli.GitHubClient", _FakeGitHubClient)
+    monkeypatch.setattr("maajun.cli.setup.GitHubClient", _FakeGitHubClient)
     config_path = tmp_path / "config.toml"
 
     result = runner.invoke(
         app,
         ["github-login", "--config", str(config_path)],
-        input="Morvin-Ian/maajun\nghp_token\n",
+        input="Morvin-Ian/maajun\nghp_token\n1\n",  # repo, token, mode (1=suggest)
     )
 
     assert result.exit_code == 0
@@ -305,14 +312,14 @@ def test_github_login_keeps_configured_repo_on_empty_input(
     fake_keyring, tmp_path, monkeypatch
 ):
     monkeypatch.setattr("maajun.vcs.GitHubClient", _FakeGitHubClient)
-    monkeypatch.setattr("maajun.cli.GitHubClient", _FakeGitHubClient)
+    monkeypatch.setattr("maajun.cli.setup.GitHubClient", _FakeGitHubClient)
     config_path = tmp_path / "config.toml"
     config_path.write_text('[github]\nrepo = "owner/real"\n')
 
     result = runner.invoke(
         app,
         ["github-login", "--config", str(config_path)],
-        input="\nghp_token\n",
+        input="\nghp_token\n1\n",  # empty (keep repo), token, mode (1=suggest)
     )
 
     assert result.exit_code == 0
@@ -322,7 +329,7 @@ def test_github_login_keeps_configured_repo_on_empty_input(
 
 def test_github_login_treats_placeholder_repo_as_unset(fake_keyring, tmp_path, monkeypatch):
     monkeypatch.setattr("maajun.vcs.GitHubClient", _FakeGitHubClient)
-    monkeypatch.setattr("maajun.cli.GitHubClient", _FakeGitHubClient)
+    monkeypatch.setattr("maajun.cli.setup.GitHubClient", _FakeGitHubClient)
     config_path = tmp_path / "config.toml"
     config_path.write_text('[github]\nrepo = "owner/name"\n')
 
@@ -338,7 +345,7 @@ def test_github_login_treats_placeholder_repo_as_unset(fake_keyring, tmp_path, m
 
 def test_github_login_rejects_bad_repo_format(fake_keyring, tmp_path, monkeypatch):
     monkeypatch.setattr("maajun.vcs.GitHubClient", _FakeGitHubClient)
-    monkeypatch.setattr("maajun.cli.GitHubClient", _FakeGitHubClient)
+    monkeypatch.setattr("maajun.cli.setup.GitHubClient", _FakeGitHubClient)
     config_path = tmp_path / "config.toml"
 
     result = runner.invoke(
@@ -352,49 +359,120 @@ def test_github_login_rejects_bad_repo_format(fake_keyring, tmp_path, monkeypatc
 
 
 # ---------------------------------------------------------------------------
-# _save_repo_to_config
+# config / add-repo / status commands
 # ---------------------------------------------------------------------------
 
 
-def test_save_repo_replaces_line_and_keeps_comments(tmp_path):
-    from maajun.cli import _save_repo_to_config
+def test_config_set_persists_and_validates(tmp_path):
+    config_path = tmp_path / "config.toml"
+    config_path.write_text('[github]\nrepo = "owner/name"\nmode = "suggest"\n')
 
+    result = runner.invoke(app, ["config", "github.mode", "fix", "--config", str(config_path)])
+    assert result.exit_code == 0
+    assert 'mode = "fix"' in config_path.read_text()
+
+    bad = runner.invoke(app, ["config", "github.mode", "yolo", "--config", str(config_path)])
+    assert bad.exit_code == 1
+    assert 'mode = "fix"' in config_path.read_text()  # unchanged
+
+
+def test_config_show_masks_secrets(tmp_path):
+    config_path = tmp_path / "config.toml"
+    config_path.write_text("[daemon]\n[daemon.email]\npassword = \"hunter2\"\n")
+    result = runner.invoke(
+        app, ["config", "daemon.email.password", "--config", str(config_path)]
+    )
+    assert result.exit_code == 0
+    assert "hunter2" not in result.output
+    assert "***" in result.output
+
+
+def test_status_reports_missing_credentials(fake_keyring, tmp_path):
+    config_path = tmp_path / "config.toml"
+    config_path.write_text('[github]\nrepo = "owner/name"\n[monitor]\nlog_files = []\n')
+
+    result = runner.invoke(app, ["status", "--config", str(config_path)])
+    assert result.exit_code == 1  # missing API key + token
+    assert "maajun login" in result.output
+    assert "github-login" in result.output.lower() or "GITHUB_TOKEN" in result.output
+
+
+def test_status_all_green(fake_keyring, tmp_path, monkeypatch):
+    monkeypatch.setattr("maajun.cli.monitor.GitHubClient", _FakeGitHubClient)
+    monkeypatch.setenv("GITHUB_TOKEN", "ghp_test")
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test")
+
+    logf = tmp_path / "app.log"
+    logf.write_text("")
     config_path = tmp_path / "config.toml"
     config_path.write_text(
-        "[github]\n"
-        "# Repository the daemon opens PRs against.\n"
-        'repo = "owner/name"\n'
-        'base_branch = "main"\n'
+        f'[ai]\nprovider = "deepseek"\n'
+        f'[github]\nrepo = "owner/name"\n'
+        f'[monitor]\nlog_files = ["{logf}"]\n'
     )
 
-    _save_repo_to_config(config_path, "me/app")
-
-    content = config_path.read_text()
-    assert 'repo = "me/app"' in content
-    assert "# Repository the daemon opens PRs against." in content
-    assert 'base_branch = "main"' in content
+    result = runner.invoke(app, ["status", "--config", str(config_path)])
+    assert result.exit_code == 0
+    assert "Ready" in result.output
 
 
-def test_save_repo_adds_line_to_existing_github_section(tmp_path):
-    from maajun.cli import _save_repo_to_config
-
+def test_add_repo_migrates_and_appends(tmp_path):
     config_path = tmp_path / "config.toml"
-    config_path.write_text('[github]\nbase_branch = "main"\n')
+    config_path.write_text('[github]\nrepo = "owner/first"\nmode = "suggest"\n')
 
-    _save_repo_to_config(config_path, "me/app")
+    r1 = runner.invoke(
+        app, ["add-repo", "owner/second", "-m", "fix", "--config", str(config_path)]
+    )
+    assert r1.exit_code == 0
 
-    content = config_path.read_text()
-    assert '[github]\nrepo = "me/app"' in content
-    assert 'base_branch = "main"' in content
+    from maajun.config import Config
+
+    cfg = Config.load(config_path)
+    assert [rc.repo for rc in cfg.github.repos] == ["owner/first", "owner/second"]
+    assert cfg.github.repo == ""  # legacy scalar cleared
+
+    bad = runner.invoke(app, ["add-repo", "not-a-repo", "--config", str(config_path)])
+    assert bad.exit_code == 1
 
 
-def test_save_repo_creates_config_from_template(tmp_path):
-    from maajun.cli import _save_repo_to_config
+def test_reset_removes_everything(fake_keyring, tmp_path, monkeypatch):
+    cfg_home = tmp_path / "cfg"
+    data_home = tmp_path / "data"
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(cfg_home))
+    monkeypatch.setenv("XDG_DATA_HOME", str(data_home))
+    # Env vars take precedence over the keyring — clear any that leaked in.
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
 
-    config_path = tmp_path / "config.toml"
-    _save_repo_to_config(config_path, "me/app")
+    from maajun.auth import AuthManager
 
-    content = config_path.read_text()
-    assert 'repo = "me/app"' in content
-    assert "owner/name" not in content
-    assert "[monitor]" in content
+    auth = AuthManager()
+    auth.set_api_key("deepseek", "sk-test")
+    auth.set_github_token("ghp_test")
+
+    (cfg_home / "maajun").mkdir(parents=True)
+    (cfg_home / "maajun" / "config.toml").write_text('[github]\nrepo = "owner/name"\n')
+    (data_home / "maajun").mkdir(parents=True)
+    (data_home / "maajun" / "incidents.db").write_text("")
+
+    result = runner.invoke(app, ["reset", "--force"])
+    assert result.exit_code == 0
+    assert not (cfg_home / "maajun").exists()
+    assert not (data_home / "maajun").exists()
+    # A fresh manager reflects the cleared keyring (the old instance caches).
+    fresh = AuthManager()
+    assert not fresh.has_api_key("deepseek")
+    assert not fresh.has_github_token()
+
+
+def test_reset_cancels_without_confirmation(fake_keyring, tmp_path, monkeypatch):
+    cfg_home = tmp_path / "cfg"
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(cfg_home))
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
+    (cfg_home / "maajun").mkdir(parents=True)
+    (cfg_home / "maajun" / "config.toml").write_text("[github]\n")
+
+    result = runner.invoke(app, ["reset"], input="no\n")
+    assert result.exit_code == 0
+    assert "Cancelled" in result.output
+    assert (cfg_home / "maajun").exists()  # nothing deleted

@@ -199,6 +199,47 @@ async def test_grep_invalid_regex(tmp_path):
     assert "invalid regex" in result
 
 
+async def test_grep_skips_binary_files(tmp_path):
+    (tmp_path / "code.py").write_text("target here\n")
+    (tmp_path / "blob.bin").write_bytes(b"target\x00\x00more target\n")
+    executor = GREP.executor
+    result = await executor(pattern="target", path=str(tmp_path))
+    assert "code.py" in result
+    assert "blob.bin" not in result
+    assert "1 files searched" in result  # only the text file was scanned
+
+
+async def test_grep_skips_oversized_files(tmp_path, monkeypatch):
+    from maajun.agent.tools import search
+
+    monkeypatch.setattr(search, "MAX_FILE_SIZE", 16)
+    (tmp_path / "small.py").write_text("target\n")
+    (tmp_path / "big.py").write_text("target " * 100 + "\n")
+    result = await search._grep(pattern="target", path=str(tmp_path))
+    assert "small.py" in result
+    assert "big.py" not in result
+
+
+async def test_grep_skips_vendored_dirs(tmp_path):
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "a.py").write_text("target\n")
+    (tmp_path / "node_modules").mkdir()
+    (tmp_path / "node_modules" / "dep.py").write_text("target\n")
+    result = await GREP.executor(pattern="target", path=str(tmp_path))
+    assert "a.py" in result
+    assert "node_modules" not in result
+
+
+async def test_glob_skips_vendored_dirs(tmp_path):
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "keep.py").write_text("")
+    (tmp_path / "node_modules").mkdir()
+    (tmp_path / "node_modules" / "skip.py").write_text("")
+    result = await GLOB.executor(pattern="**/*.py", path=str(tmp_path))
+    assert "keep.py" in result
+    assert "node_modules" not in result
+
+
 # ---------------------------------------------------------------------------
 # bash
 # ---------------------------------------------------------------------------

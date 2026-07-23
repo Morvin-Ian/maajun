@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import fnmatch
 import os
 import re
@@ -16,15 +17,30 @@ SKIP_DIRS = {
     "dist", "build", ".next", ".nuxt",
 }
 
+# grep skips files bigger than this — a lockfile or a bundled asset is
+# rarely what a code search wants, and reading it wastes time and memory.
+MAX_FILE_SIZE = 5 * 1024 * 1024
+
+
+def _in_skip_dir(rel: Path) -> bool:
+    return any(part in SKIP_DIRS for part in rel.parts)
+
+
+def _glob_sync(root: Path, pattern: str) -> list[str]:
+    results = []
+    for match in sorted(root.glob(pattern)):
+        rel = match.relative_to(root)
+        if _in_skip_dir(rel):
+            continue
+        results.append(str(rel) + ("/" if match.is_dir() else ""))
+    return results
+
 
 async def _glob(pattern: str, path: str = ".") -> str:
     root = resolve_path(path)
     if not root.exists():
         return f"Error: {path} does not exist"
-    results = [
-        str(match.relative_to(root)) + ("/" if match.is_dir() else "")
-        for match in sorted(root.glob(pattern))
-    ]
+    results = await asyncio.to_thread(_glob_sync, root, pattern)
     if not results:
         return f"No files matched pattern: {pattern}"
     return "\n".join(results)
@@ -35,7 +51,8 @@ GLOB: Tool = Tool(
         name="glob",
         description=(
             "Find files by glob pattern. Returns matching paths relative to the search root. "
-            "Use ** for recursive matching (e.g. src/**/*.py)."
+            "Use ** for recursive matching (e.g. src/**/*.py). "
+            "Skips .git, node_modules, __pycache__, .venv, etc."
         ),
         parameters=json_schema(
             {
@@ -55,6 +72,40 @@ GLOB: Tool = Tool(
 )
 
 
+def _is_probably_binary(data: bytes) -> bool:
+    return b"\x00" in data[:8192]
+
+
+def _grep_sync(
+    root: Path, regex: re.Pattern[str], include: str | None, max_results: int
+) -> tuple[list[str], int]:
+    results: list[str] = []
+    files_searched = 0
+
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [d for d in dirnames if d not in SKIP_DIRS]
+        for fname in filenames:
+            if include and not fnmatch.fnmatch(fname, include):
+                continue
+            fpath = Path(dirpath) / fname
+            try:
+                if fpath.stat().st_size > MAX_FILE_SIZE:
+                    continue
+                data = fpath.read_bytes()
+            except OSError:
+                continue
+            if _is_probably_binary(data):
+                continue
+            files_searched += 1
+            for i, line in enumerate(data.decode(errors="replace").splitlines(), 1):
+                if regex.search(line):
+                    rel = fpath.relative_to(root)
+                    results.append(f"{rel}:{i}: {line.strip()}")
+                    if len(results) >= max_results:
+                        return results, files_searched
+    return results, files_searched
+
+
 async def _grep(
     pattern: str,
     path: str = ".",
@@ -70,30 +121,9 @@ async def _grep(
     except re.error as e:
         return f"Error: invalid regex: {e}"
 
-    results: list[str] = []
-    files_searched = 0
-
-    for dirpath, dirnames, filenames in os.walk(root):
-        dirnames[:] = [d for d in dirnames if d not in SKIP_DIRS]
-        for fname in filenames:
-            if include and not fnmatch.fnmatch(fname, include):
-                continue
-            fpath = Path(dirpath) / fname
-            try:
-                text = fpath.read_text(errors="replace")
-            except Exception:
-                continue
-            files_searched += 1
-            for i, line in enumerate(text.splitlines(), 1):
-                if regex.search(line):
-                    rel = fpath.relative_to(root)
-                    results.append(f"{rel}:{i}: {line.strip()}")
-                    if len(results) >= max_results:
-                        break
-            if len(results) >= max_results:
-                break
-        if len(results) >= max_results:
-            break
+    results, files_searched = await asyncio.to_thread(
+        _grep_sync, root, regex, include, max_results
+    )
 
     if not results:
         return f"No matches for /{pattern}/ (searched {files_searched} files)"
@@ -106,7 +136,7 @@ GREP: Tool = Tool(
         name="grep",
         description=(
             "Search file contents using regex. Returns file:line: content matches. "
-            "Skips .git, node_modules, __pycache__, .venv, etc."
+            "Skips .git, node_modules, __pycache__, .venv, binaries, and large files."
         ),
         parameters=json_schema(
             {
@@ -134,6 +164,13 @@ GREP: Tool = Tool(
 )
 
 
+def _list_dir_sync(p: Path) -> list[str]:
+    return [
+        entry.name + ("/" if entry.is_dir() else "")
+        for entry in sorted(p.iterdir())
+    ]
+
+
 async def _list_dir(path: str = ".") -> str:
     p = resolve_path(path)
     if not p.exists():
@@ -141,10 +178,7 @@ async def _list_dir(path: str = ".") -> str:
     if not p.is_dir():
         return f"Error: {p} is not a directory"
 
-    entries = [
-        entry.name + ("/" if entry.is_dir() else "")
-        for entry in sorted(p.iterdir())
-    ]
+    entries = await asyncio.to_thread(_list_dir_sync, p)
     if not entries:
         return f"Directory {p} is empty"
     return "\n".join(entries)

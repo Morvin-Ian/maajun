@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import subprocess
 
 from maajun.agent.tools.base import Tool, json_schema
@@ -10,18 +11,22 @@ from maajun.providers.base import ToolDefinition
 MAX_OUTPUT = 10_000
 
 
+def _run(command: str, timeout: int) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        command,
+        shell=True,
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+    )
+
+
 async def _bash(command: str, timeout: int = 30) -> str:
     if not command.strip():
         return "Error: empty command"
 
     try:
-        proc = subprocess.run(
-            command,
-            shell=True,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-        )
+        proc = await asyncio.to_thread(_run, command, timeout)
     except subprocess.TimeoutExpired:
         return f"Error: command timed out after {timeout}s"
 

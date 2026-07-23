@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import subprocess
 from pathlib import Path
 
@@ -9,7 +10,7 @@ from maajun.agent.tools.base import Tool, json_schema, resolve_path
 from maajun.providers.base import ToolDefinition
 
 
-def _run_git(args: list[str], cwd: Path) -> str:
+def _run_git_sync(args: list[str], cwd: Path) -> str:
     try:
         r = subprocess.run(
             ["git", *args],
@@ -23,15 +24,19 @@ def _run_git(args: list[str], cwd: Path) -> str:
         return f"Error: {e}"
 
 
+async def _run_git(args: list[str], cwd: Path) -> str:
+    return await asyncio.to_thread(_run_git_sync, args, cwd)
+
+
 async def _git_status(path: str = ".") -> str:
     p = resolve_path(path)
 
-    branch = _run_git(["rev-parse", "--abbrev-ref", "HEAD"], p)
+    branch = await _run_git(["rev-parse", "--abbrev-ref", "HEAD"], p)
     if branch.startswith("Error") or not branch:
         return f"Not a git repository or git error: {branch}"
 
-    status = _run_git(["status", "--short"], p)
-    recent_commits = _run_git(["log", "--oneline", "-10"], p)
+    status = await _run_git(["status", "--short"], p)
+    recent_commits = await _run_git(["log", "--oneline", "-10"], p)
     parts = [f"Branch: {branch}"]
     if status:
         parts.append(f"Status:\n{status}")
