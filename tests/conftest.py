@@ -20,6 +20,18 @@ def _getpass_reads_stdin(monkeypatch):
     monkeypatch.setattr(getpass, "getpass", lambda prompt="": input(prompt))
 
 
+@pytest.fixture(autouse=True)
+def _cli_output_is_uncolored(monkeypatch):
+    """Rich calls itself a terminal when it sees GITHUB_ACTIONS, so that build
+    logs come out colored. That styles each option name in two spans, turning
+    "--once" into "-\x1b[0m\x1b[1;36m-once" — a substring assertion on any
+    rendered CLI text then fails on CI and nowhere else. Keep it plain."""
+    for var in ("GITHUB_ACTIONS", "FORCE_COLOR", "TF_BUILD"):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setenv("TERM", "dumb")
+    monkeypatch.setenv("NO_COLOR", "1")
+
+
 # ---------------------------------------------------------------------------
 # Keyring mock
 # ---------------------------------------------------------------------------
