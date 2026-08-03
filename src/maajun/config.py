@@ -84,6 +84,9 @@ class AIProviderConfig(_Base):
     provider: str = ProviderType.DEEPSEEK.value
     model: str | None = None  # None -> provider default
     api_key: str | None = None
+    # Override the provider's endpoint, for an OpenAI-compatible gateway
+    # (a proxy, a self-hosted server, a router). None -> the provider's own.
+    base_url: str | None = None
     temperature: float = 0.3
     max_tokens: int = 4096
     thinking_mode: bool = False
@@ -261,6 +264,7 @@ class Config(_Base):
         ai = _table(doc, "ai")
         ai["provider"] = self.ai.provider
         _set_or_del(ai, "model", self.ai.model)
+        _set_or_del(ai, "base_url", self.ai.base_url)
         ai["temperature"] = self.ai.temperature
         ai["max_tokens"] = self.ai.max_tokens
         ai["thinking_mode"] = self.ai.thinking_mode

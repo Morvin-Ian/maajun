@@ -77,3 +77,23 @@ async def test_request_window_is_capped(agent):
 # ---------------------------------------------------------------------------
 # Chat UI: /history replay
 # ---------------------------------------------------------------------------
+
+
+def test_base_url_reaches_the_provider(monkeypatch):
+    """`ai.base_url` is documented as the gateway switch — it must be wired."""
+    captured = {}
+
+    def fake_create(provider_type, provider_config):
+        captured.update(provider_config)
+        return object()
+
+    monkeypatch.setattr(ProviderFactory, "create_provider", fake_create)
+    config = Config(
+        ai=AIProviderConfig(
+            provider="deepseek", api_key="x", base_url="https://gateway.internal/v1"
+        )
+    )
+
+    Agent(config)
+
+    assert captured["base_url"] == "https://gateway.internal/v1"

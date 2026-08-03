@@ -115,8 +115,12 @@ def _step(number: int, total: int, title: str, optional: bool = False) -> None:
 # ---------------------------------------------------------------------------
 
 
-def _validate_api_key(provider: str, key: str) -> bool:
-    instance = ProviderFactory.create_provider(ProviderType(provider), {"api_key": key})
+def _validate_api_key(provider: str, key: str, base_url: str | None = None) -> bool:
+    # Honor a configured gateway: validating against the vendor's own endpoint
+    # would reject a key that is only valid at the proxy.
+    instance = ProviderFactory.create_provider(
+        ProviderType(provider), {"api_key": key, "base_url": base_url}
+    )
 
     async def check() -> bool:
         try:
@@ -129,7 +133,11 @@ def _validate_api_key(provider: str, key: str) -> bool:
 
 
 def _setup_provider(
-    auth: AuthManager, ask: _Asker, requested: str | None, reconfigure: bool
+    auth: AuthManager,
+    ask: _Asker,
+    requested: str | None,
+    reconfigure: bool,
+    base_url: str | None = None,
 ) -> str:
     """Choose a provider and make sure a key is stored. Exits if none is."""
     implemented = implemented_providers()
@@ -169,7 +177,7 @@ def _setup_provider(
             console.print("[red]✗ An API key is required — nothing else works "
                           "without it.[/red]")
             raise typer.Exit(1)
-        if _validate_api_key(provider, key):
+        if _validate_api_key(provider, key, base_url):
             _store_api_key(auth, provider, key)
             console.print("  [green]✓[/green] Key validated and stored")
             return provider
@@ -463,7 +471,9 @@ def setup(
 
     total = 3
     _step(1, total, "AI provider")
-    config.ai.provider = _setup_provider(auth, ask, provider, reconfigure)
+    config.ai.provider = _setup_provider(
+        auth, ask, provider, reconfigure, config.ai.base_url
+    )
 
     _step(2, total, "GitHub", optional=True)
     _setup_github(

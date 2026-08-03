@@ -26,6 +26,7 @@ Full config reference:
 [ai]
 provider = "deepseek"
 # model = "deepseek-v4-flash"  # provider default if omitted
+# base_url = "https://gateway.internal/v1"  # OpenAI-compatible gateway
 # thinking_mode = true         # use the reasoning model (deepseek-v4-pro)
 # temperature = 0.3
 # max_tokens = 4096
@@ -64,6 +65,12 @@ workdir = "~/.local/share/maajun"   # clones, incident DB, state
 At least one error source must be configured — log files or GitHub
 Actions; the daemon refuses to start with nothing to watch. Use
 `--config /path/to/config.toml` on any command to point somewhere else.
+
+`ai.base_url` points maajun at any endpoint that speaks the OpenAI
+`/chat/completions` protocol — a corporate proxy, a router, a self-hosted
+server — while `ai.provider` still selects the request dialect and model
+defaults. Setup validates your key against the gateway rather than the
+vendor when it is set.
 
 `github.repo` is optional. Left empty, maajun runs in **local mode**: it
 still detects and analyzes errors, but writes each incident report to

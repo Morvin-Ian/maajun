@@ -25,7 +25,8 @@ def _validate_key(auth: AuthManager, provider: str) -> None:
 
     config = build_agent_config(auth, provider)
     instance = ProviderFactory.create_provider(
-        ProviderType(provider), {"api_key": config.ai.api_key},
+        ProviderType(provider),
+        {"api_key": config.ai.api_key, "base_url": config.ai.base_url},
     )
 
     async def validate() -> bool:
