@@ -275,3 +275,30 @@ def test_load_and_save_accept_a_string_path(tmp_path):
     config.save(path)
 
     assert Config.load(path).github.repo == "acme/webapp"
+
+
+def test_base_url_round_trips(tmp_path):
+    """Documented as the way to point at an OpenAI-compatible gateway."""
+    path = tmp_path / "config.toml"
+    config = Config()
+    config.ai.base_url = "https://gateway.internal/v1"
+    config.save(path)
+
+    assert 'base_url = "https://gateway.internal/v1"' in path.read_text()
+    assert Config.load(path).ai.base_url == "https://gateway.internal/v1"
+
+
+def test_base_url_is_absent_when_unset(tmp_path):
+    path = tmp_path / "config.toml"
+    Config().save(path)
+
+    assert "base_url" not in path.read_text()
+    assert Config.load(path).ai.base_url is None
+
+
+def test_base_url_is_settable_by_dot_notation(tmp_path):
+    config = Config()
+    config.set("ai.base_url", "https://gateway.internal/v1")
+
+    assert config.ai.base_url == "https://gateway.internal/v1"
+    assert config.get("ai.base_url") == "https://gateway.internal/v1"

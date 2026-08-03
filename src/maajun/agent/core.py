@@ -90,6 +90,7 @@ class Agent:
             {
                 "api_key": config.ai.api_key,
                 "model": config.ai.model,
+                "base_url": config.ai.base_url,
                 "thinking_mode": config.ai.thinking_mode,
             },
         )
