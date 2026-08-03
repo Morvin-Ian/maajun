@@ -13,7 +13,9 @@ import sys
 from prompt_toolkit import PromptSession
 from rich.console import Console, Group
 from rich.live import Live
+from rich.markdown import CodeBlock, Markdown
 from rich.panel import Panel
+from rich.syntax import Syntax
 from rich.text import Text
 
 from maajun.agent.core import Agent
@@ -23,6 +25,36 @@ from maajun.providers.base import ProviderError
 from maajun.utils import truncate
 
 STREAM_TAIL_LINES = 10
+
+
+class _UnpaddedCodeBlock(CodeBlock):
+    """A fenced code block you can copy out of the terminal intact.
+
+    Rich's default pads code blocks by one column, which prefixes every line
+    with a space — copy a shell command out of it and you paste something that
+    won't run. Wrapping is kept (it re-flows long lines but loses no
+    characters); only the injected padding goes away.
+    """
+
+    def __rich_console__(self, console, options):
+        yield Syntax(
+            str(self.text).rstrip(),
+            self.lexer_name,
+            theme=self.theme,
+            word_wrap=True,
+            padding=0,
+        )
+
+
+def _rendered(content: str) -> Markdown:
+    """Render markdown prose, keeping code blocks copy-safe."""
+    markdown = Markdown(content)
+    markdown.elements = {
+        **markdown.elements,
+        "fence": _UnpaddedCodeBlock,
+        "code_block": _UnpaddedCodeBlock,
+    }
+    return markdown
 
 
 def _format_tool_args(args: dict) -> str:
@@ -143,9 +175,7 @@ async def _chat_loop(agent, console, live_holder=None, prompt_session=None):
                         console.print(f"\n> {msg['content']}")
                     elif msg["role"] == "assistant" and msg.get("content"):
                         console.print()
-                        console.print(
-                            msg["content"], markup=False, highlight=False, soft_wrap=True
-                        )
+                        console.print(_rendered(msg["content"]))
             continue
 
         console.print()
@@ -177,8 +207,6 @@ async def _chat_loop(agent, console, live_holder=None, prompt_session=None):
             error = f"Unexpected error: {e}"
 
         if content:
-            # Plain text, unwrapped: what you copy is exactly what the model
-            # wrote, with no table borders, padding, or re-flowed lines.
-            console.print(content, markup=False, highlight=False, soft_wrap=True)
+            console.print(_rendered(content))
         if error:
             console.print(f"[red]{error}[/red]")

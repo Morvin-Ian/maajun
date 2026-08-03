@@ -223,3 +223,76 @@ def test_render_config_marks_unconfigured_repo():
 
     out = render_config(Config())
     assert "(not configured)" in out
+
+
+# ---------------------------------------------------------------------------
+# Monitor tuning round-trips through save/load
+# ---------------------------------------------------------------------------
+
+
+def test_monitor_tuning_survives_save_and_reload(tmp_path):
+    """Regression: `maajun config monitor.<field>` reported success but the
+    save path only wrote four keys, silently dropping everything else."""
+    path = tmp_path / "config.toml"
+    config = Config.load(path)
+    config.set("monitor.burst_threshold", "5")
+    config.set("monitor.burst_window_seconds", "120")
+    config.set("monitor.json_level_field", "level")
+    config.set("monitor.json_level_values", "error,fatal")
+    config.set("monitor.use_watchdog", "true")
+    config.save(path)
+
+    reloaded = Config.load(path)
+    assert reloaded.monitor.burst_threshold == 5
+    assert reloaded.monitor.burst_window_seconds == 120
+    assert reloaded.monitor.json_level_field == "level"
+    assert reloaded.monitor.json_level_value_set == frozenset({"error", "fatal"})
+    assert reloaded.monitor.use_watchdog is True
+
+
+def test_default_monitor_tuning_is_not_written(tmp_path):
+    """An untouched config stays readable — no wall of default tuning keys."""
+    path = tmp_path / "config.toml"
+    Config.load(path).save(path)
+
+    text = path.read_text()
+    assert "burst_threshold" not in text
+    assert "json_level_field" not in text
+    assert "use_watchdog" not in text
+
+
+def test_monitor_instances_round_trip(tmp_path):
+    from maajun.config import MonitorInstanceConfig
+
+    path = tmp_path / "config.toml"
+    config = Config.load(path)
+    config.monitor.instances = [
+        MonitorInstanceConfig(type="logfile", path="/var/log/a.log"),
+        MonitorInstanceConfig(type="sentry", repo="owner/name", org="acme",
+                              project="web"),
+    ]
+    config.save(path)
+
+    reloaded = Config.load(path)
+    assert [i.type for i in reloaded.monitor.instances] == ["logfile", "sentry"]
+    assert reloaded.monitor.instances[0].monitor_kwargs() == {"path": "/var/log/a.log"}
+    assert reloaded.monitor.instances[1].repo == "owner/name"
+    assert reloaded.monitor.instances[1].monitor_kwargs() == {
+        "org": "acme", "project": "web",
+    }
+
+
+def test_json_level_values_parse_to_a_lowercased_set():
+    config = Config()
+    config.set("monitor.json_level_values", " Error , FATAL ,, warn ")
+    assert config.monitor.json_level_value_set == frozenset({"error", "fatal", "warn"})
+
+
+def test_logfile_kwargs_match_the_monitor_signature():
+    """The wiring dict must stay in step with LogFileMonitor's constructor."""
+    import inspect
+
+    from maajun.monitors import LogFileMonitor
+
+    accepted = set(inspect.signature(LogFileMonitor.__init__).parameters)
+    assert set(Config().monitor.logfile_kwargs()) <= accepted

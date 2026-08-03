@@ -19,6 +19,9 @@ dependencies = [
     "tomlkit>=0.15.1",
 ]
 
+[project.optional-dependencies]
+watchdog = ["watchdog>=4.0.0"]
+
 [dependency-groups]
 dev = [
     "pytest>=8.0",

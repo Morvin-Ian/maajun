@@ -1,9 +1,8 @@
-"""Setup & configuration commands: the welcome callback, init, github-login,
+"""Setup & configuration commands: the welcome callback, init,
 config, and reset."""
 
 from __future__ import annotations
 
-import asyncio
 import shutil
 from pathlib import Path
 
@@ -16,7 +15,6 @@ from maajun.cli._shared import (
     _implemented_providers,
     _input,
     _prompt_mode,
-    _secret_input,
     app,
     console,
 )
@@ -26,13 +24,11 @@ from maajun.config import (
     Config,
     GitHubConfig,
     MonitorConfig,
-    RepoConfig,
     default_config_path,
     default_data_dir,
     render_config,
 )
 from maajun.utils import PLACEHOLDER_REPO, is_valid_repo
-from maajun.vcs import GitHubClient, GitHubError
 
 
 @app.callback(invoke_without_command=True)
@@ -64,7 +60,6 @@ def main(ctx: typer.Context):
         ))
         console.print("\n[bold]Commands:[/bold]\n")
         console.print("  [cyan]init[/cyan]               Set up daemon config interactively")
-        console.print("  [cyan]github-login[/cyan]       Store a GitHub token for PRs")
         console.print("  [cyan]add-repo[/cyan]           Watch an additional repository")
         console.print("  [cyan]status[/cyan]             Check credentials, repos, and log files")
         console.print("  [cyan]watch[/cyan]              Monitor for errors, open PRs")
@@ -206,9 +201,8 @@ def init(
         console.print(
             "\n[bold]Next steps:[/bold]\n"
             "  1. Run [bold]maajun login[/bold] if you haven't stored an API key\n"
-            "  2. Run [bold]maajun github-login[/bold] to store a GitHub token\n"
-            "  3. Run [bold]maajun status[/bold] to check everything is wired up\n"
-            "  4. Run [bold]maajun watch[/bold] to start monitoring\n"
+            "  2. Run [bold]maajun setup[/bold] to connect GitHub and error sources\n"
+            "  3. Run [bold]maajun watch[/bold] to start monitoring\n"
             "\n[dim]Tips: 'maajun config' views/changes settings; "
             "'maajun add-repo' watches more repos.[/dim]"
         )
@@ -216,108 +210,10 @@ def init(
         console.print(
             "\n[bold]Next steps:[/bold]\n"
             "  1. Edit the config: set [cyan]monitor.log_files[/cyan] (or GitHub Actions)\n"
-            "  2. Run [bold]maajun github-login[/bold] to set the repo and store a token\n"
+            "  2. Run [bold]maajun setup[/bold] to connect GitHub and error sources\n"
             "  3. Run [bold]maajun watch[/bold] to start monitoring\n"
         )
 
-
-@app.command(name="github-login")
-def github_login(
-    config_path: Path | None = typer.Option(None, "--config", "-c", help="Config file location"),
-):
-    """Set the target repository and store a GitHub token, in one step.
-
-    Use a fine-grained personal access token scoped to the target repo with
-    Contents: read/write and Pull requests: read/write permissions.
-    """
-    console.print(Panel(
-        "[bold]GitHub Login[/bold]\n\n"
-        "Create a fine-grained personal access token at\n"
-        "[cyan]https://github.com/settings/personal-access-tokens[/cyan]\n\n"
-        "Scope it to the repository maajun will open PRs on, with:\n"
-        "  • Contents: [bold]read and write[/bold]\n"
-        "  • Pull requests: [bold]read and write[/bold]",
-        border_style="blue",
-    ))
-
-    config = Config.load(config_path)
-    current = config.github.repo if config.github.repo != PLACEHOLDER_REPO else ""
-
-    prompt = f"\n> Repository (owner/name) [{current}]: " if current else \
-        "\n> Repository (owner/name): "
-    repo = _input(prompt).strip() or current
-    if not repo:
-        console.print("[red]No repository entered. Cancelled.[/red]")
-        raise typer.Exit(1)
-    if not is_valid_repo(repo):
-        console.print(f'[red]✗ "{repo}" is not in owner/name form.[/red]')
-        raise typer.Exit(1)
-
-    token = _secret_input("> GitHub token (input hidden): ")
-    if not token:
-        console.print("[red]No token entered. Cancelled.[/red]")
-        raise typer.Exit(1)
-
-    client = GitHubClient(token)
-
-    async def validate() -> tuple[str, bool]:
-        try:
-            login = await client.validate_token()
-            push = await client.can_push(repo)
-            return login, push
-        finally:
-            await client.aclose()
-
-    try:
-        with console.status("[dim]Validating token...[/dim]"):
-            login, push = asyncio.run(validate())
-    except GitHubError as e:
-        console.print(f"[red]✗ {e}[/red]")
-        raise typer.Exit(1) from e
-
-    console.print(f"[green]✓ Authenticated as {login}.[/green]")
-    if push:
-        console.print(f"[green]✓ Token can push to {repo}.[/green]")
-    else:
-        console.print(
-            f"[yellow]⚠ Token cannot push to {repo} — "
-            "the daemon will fail to create branches. Check the token's "
-            "repository access and Contents permission.[/yellow]"
-        )
-
-    current_mode = config.github.mode if config.github.mode in ("suggest", "fix") else "suggest"
-    mode = _prompt_mode(current_mode)
-
-    # Save config. In multi-repo setups, update the matching repo entry so we
-    # don't silently create a conflicting legacy scalar alongside the list.
-    path = config_path or default_config_path()
-    if config.github.repos:
-        match = next((rc for rc in config.github.repos if rc.repo == repo), None)
-        if match:
-            match.mode = mode
-        else:
-            config.add_repo(RepoConfig(repo=repo, mode=mode))
-    else:
-        config.github.repo = repo
-        config.github.mode = mode
-    config.save(path)
-    console.print(f"[green]✓ Saved github.repo = {repo} and mode = {mode} in {path}.[/green]")
-
-    auth = AuthManager()
-    try:
-        auth.set_github_token(token)
-        console.print("[green]✓ Token stored.[/green]")
-    except RuntimeError as e:
-        console.print(
-            f"[yellow]⚠ Could not store in keyring: {e}\n"
-            "On a server, export it instead: [bold]GITHUB_TOKEN=...[/bold][/yellow]"
-        )
-
-    console.print(
-        "\n[bold]Next step:[/bold]\n"
-        "  Run [bold]maajun watch[/bold] to start monitoring\n"
-        "\n[dim]Tip: Use 'maajun config github.mode fix' to change mode anytime.[/dim]"
-    )
 
 
 @app.command()

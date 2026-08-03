@@ -19,12 +19,8 @@ from maajun.agent.core import Agent, PermissionCallback
 from maajun.auth import AuthManager
 from maajun.config import AIProviderConfig, Config, RepoConfig
 from maajun.costs import extract_usage
-from maajun.monitors import (
-    ErrorEvent,
-    GitHubActionsMonitor,
-    LogFileMonitor,
-    Monitor,
-)
+from maajun.monitors import ErrorEvent, Monitor
+from maajun.monitors.registry import MonitorRegistry
 from maajun.notifications import Notifier
 from maajun.state import IncidentStore
 from maajun.vcs import GitHubClient, GitWorkspace
@@ -482,7 +478,7 @@ class _DaemonDeps:
         token = auth.get_github_token()
         if not token:
             raise RuntimeError(
-                "No GitHub token. Run `maajun github-login` or set GITHUB_TOKEN."
+                "No GitHub token. Export GITHUB_TOKEN or run `gh auth login`."
             )
 
         repos = config.github.get_all_repos()
@@ -527,26 +523,68 @@ def _build_monitors(
     config: Config, repos: list[RepoConfig]
 ) -> tuple[list[Monitor], dict[str, RepoConfig]]:
     """Build monitors and map each to the repo whose PRs it should open."""
+    monitor_cfg = config.monitor
     monitors: list[Monitor] = []
     monitor_to_repo: dict[str, RepoConfig] = {}
+    default_repo = repos[0] if repos else None
 
-    def add(monitor: Monitor, repo_config: RepoConfig) -> None:
+    def attach(monitor: Monitor, repo_config: RepoConfig | None) -> None:
         monitors.append(monitor)
-        monitor_to_repo[monitor.name] = repo_config
+        if repo_config is not None:
+            monitor_to_repo[monitor.name] = repo_config
 
-    # Global monitor.log_files attach to the first configured repo.
-    for path in config.monitor.log_files:
-        add(LogFileMonitor(path, config.monitor.error_pattern), repos[0])
+    def create(monitor_type: str, **kwargs) -> Monitor:
+        """Build a monitor, turning config mistakes into readable errors.
 
-    # Per-repo log_files attach to their own repo, in addition to the above.
+        A bad `type` or a stray key in [[monitor.instances]] otherwise
+        surfaces as a bare ValueError/TypeError traceback at startup.
+        """
+        try:
+            return MonitorRegistry.create(monitor_type, **kwargs)
+        except ValueError as e:
+            raise RuntimeError(str(e)) from e
+        except TypeError as e:
+            raise RuntimeError(
+                f"Invalid settings for monitor type {monitor_type!r}: {e}"
+            ) from e
+
+    # Shorthand: global log_files attach to the first repo.
+    for path in monitor_cfg.log_files:
+        attach(create("logfile", path=path, **monitor_cfg.logfile_kwargs()), default_repo)
+
+    # Shorthand: per-repo log_files attach to their own repo, in addition
+    # to the above.
     for repo_config in repos:
         for path in repo_config.log_files:
-            add(LogFileMonitor(path, config.monitor.error_pattern), repo_config)
+            attach(
+                create("logfile", path=path, **monitor_cfg.logfile_kwargs()),
+                repo_config,
+            )
 
-    if config.monitor.github_actions_token and config.monitor.github_actions_repos:
-        for repo in config.monitor.github_actions_repos:
-            matched = next((rc for rc in repos if rc.repo == repo), repos[0])
-            add(GitHubActionsMonitor(config.monitor.github_actions_token, repo), matched)
+    # Shorthand: GitHub Actions.
+    if monitor_cfg.github_actions_token and monitor_cfg.github_actions_repos:
+        for repo in monitor_cfg.github_actions_repos:
+            matched = next((rc for rc in repos if rc.repo == repo), default_repo)
+            attach(create(
+                "github-actions",
+                token=monitor_cfg.github_actions_token,
+                repo=repo,
+                burst_threshold=monitor_cfg.burst_threshold,
+                burst_window_seconds=monitor_cfg.burst_window_seconds,
+            ), matched)
+
+    # Declarative instances — any registered monitor type.
+    for instance in monitor_cfg.instances:
+        repo_config = default_repo
+        if instance.repo:
+            repo_config = next((rc for rc in repos if rc.repo == instance.repo), None)
+            if repo_config is None:
+                log.warning(
+                    "monitor instance %r targets repo %r, which is not configured; "
+                    "its events will be analyzed but will not open PRs",
+                    instance.type, instance.repo,
+                )
+        attach(create(instance.type, **instance.monitor_kwargs()), repo_config)
 
     return monitors, monitor_to_repo
 
