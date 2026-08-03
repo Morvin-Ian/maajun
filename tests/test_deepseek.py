@@ -5,13 +5,16 @@ import pytest
 from openai import APIStatusError, RateLimitError
 
 from maajun.providers.base import ProviderError
-from maajun.providers.deepseek import (
-    DEFAULT_MODEL,
-    MAX_RETRIES,
-    THINKING_MODEL,
-    DeepSeekProvider,
-    _strip_dsml,
-)
+from maajun.providers.chat_completions import MAX_RETRIES
+from maajun.providers.deepseek import DeepSeekProvider
+
+DEFAULT_MODEL = DeepSeekProvider.default_model
+THINKING_MODEL = DeepSeekProvider.thinking_model
+
+
+def _strip_dsml(text: str) -> str:
+    """DSML stripping is now a provider method, not a module function."""
+    return DeepSeekProvider({"api_key": "k"}).clean_content(text)
 
 
 def _fake_httpx_response(status_code):
@@ -58,9 +61,13 @@ def test_custom_model_override():
 
 
 def test_thinking_mode_does_not_override_custom_model():
+    """Naming a model is specific; thinking_mode is only a shorthand.
+
+    This test's name always said so, but it used to assert the opposite with
+    a comment conceding the behavior was wrong.
+    """
     provider = DeepSeekProvider({"api_key": "x", "model": "my-custom", "thinking_mode": True})
-    # thinking_mode overrides even explicit model — this is current behavior
-    assert provider.model == THINKING_MODEL
+    assert provider.model == "my-custom"
 
 
 def test_parse_response_basic():
@@ -193,7 +200,7 @@ async def test_retry_succeeds_after_rate_limit(monkeypatch):
     """Retries on 429 and eventually succeeds."""
     async def _no_sleep(_delay):
         pass
-    monkeypatch.setattr("maajun.providers.deepseek.asyncio.sleep", _no_sleep)
+    monkeypatch.setattr("maajun.providers.chat_completions.asyncio.sleep", _no_sleep)
     provider = DeepSeekProvider({"api_key": "x"})
     provider.client = SimpleNamespace(
         chat=SimpleNamespace(completions=SimpleNamespace(create=_fail_then_succeed(
@@ -210,7 +217,7 @@ async def test_retry_gives_up_after_max_retries(monkeypatch):
     """Exhausts retries and raises ProviderError."""
     async def _no_sleep(_delay):
         pass
-    monkeypatch.setattr("maajun.providers.deepseek.asyncio.sleep", _no_sleep)
+    monkeypatch.setattr("maajun.providers.chat_completions.asyncio.sleep", _no_sleep)
     provider = DeepSeekProvider({"api_key": "x"})
     errors = [_make_rate_limit_error() for _ in range(MAX_RETRIES + 1)]
     provider.client = SimpleNamespace(
@@ -227,7 +234,7 @@ async def test_retry_on_server_error(monkeypatch):
     """Retries on 500 and succeeds."""
     async def _no_sleep(_delay):
         pass
-    monkeypatch.setattr("maajun.providers.deepseek.asyncio.sleep", _no_sleep)
+    monkeypatch.setattr("maajun.providers.chat_completions.asyncio.sleep", _no_sleep)
     provider = DeepSeekProvider({"api_key": "x"})
     provider.client = SimpleNamespace(
         chat=SimpleNamespace(completions=SimpleNamespace(create=_fail_then_succeed(
@@ -244,7 +251,7 @@ async def test_no_retry_on_auth_error(monkeypatch):
     """Auth errors (401) are not retried."""
     async def _no_sleep(_delay):
         pass
-    monkeypatch.setattr("maajun.providers.deepseek.asyncio.sleep", _no_sleep)
+    monkeypatch.setattr("maajun.providers.chat_completions.asyncio.sleep", _no_sleep)
     provider = DeepSeekProvider({"api_key": "x"})
     call_count = 0
 

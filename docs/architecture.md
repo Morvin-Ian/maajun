@@ -11,6 +11,21 @@ Every response carries the model that produced it and its token usage, so
 the daemon can price each incident accurately (see
 [Cost tracking](monitoring.md#cost-tracking)).
 
+### Providers
+
+Every supported provider speaks the `/chat/completions` protocol, so
+`ChatCompletionsProvider` holds all the behavior — retries, streaming, tool
+serialization, response parsing — and a vendor module is only an endpoint, a
+pair of model names, and any content quirks to strip: `deepseek.py` removes
+DeepSeek's DSML tool-call markup, `openai.py` has nothing to strip. Point
+`ai.base_url` at a gateway to use any other compatible endpoint.
+
+Pricing costs each response by model, matching names as prefixes so dated ids
+(`gpt-4o-2024-08-06`) resolve to their family. It is load-bearing: the
+[spend cap](monitoring.md#capping-spend) decides whether to analyze the next
+incident from these numbers, and an unpriced model logs a warning rather than
+silently costing at the fallback rate.
+
 ### Provider resilience
 
 API calls to the provider retry automatically on transient failures —
