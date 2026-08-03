@@ -98,3 +98,79 @@ def test_github_actions_shorthand_uses_the_registry():
 
     assert monitors[0].name == "gh-actions:owner/name"
     assert monitor_to_repo[monitors[0].name].repo == "owner/name"
+
+
+# -- Sentry -----------------------------------------------------------------
+
+
+ISSUE = {
+    "id": "4507",
+    "title": "ValueError: invalid literal for int()",
+    "culprit": "shop.views in checkout",
+    "level": "error",
+    "count": 12,
+    "firstSeen": "2026-07-01T10:00:00Z",
+    "lastSeen": "2026-07-18T09:30:00Z",
+    "permalink": "https://acme.sentry.io/issues/4507/",
+}
+
+
+def _sentry():
+    return SentryMonitor(token="t", org="acme", project="web")
+
+
+def test_sentry_name_identifies_the_project():
+    assert _sentry().name == "sentry:acme/web"
+
+
+def test_sentry_event_carries_title_and_details():
+    event = _sentry()._to_event(ISSUE)
+    assert event.message == "Sentry: ValueError: invalid literal for int()"
+    assert "shop.views in checkout" in event.details
+    assert "Events: 12" in event.details
+    assert ISSUE["permalink"] in event.details
+    assert event.fingerprint == "4507"
+    assert event.source == "sentry:acme/web"
+
+
+def test_sentry_event_survives_a_sparse_issue():
+    """The API omits fields on some issue kinds; that must not raise."""
+    event = _sentry()._to_event({"id": "1"})
+    assert event.message == "Sentry: Unknown issue"
+    assert "Link:" not in event.details
+
+
+def test_sentry_dedups_by_issue_id_across_polls():
+    monitor = _sentry()
+    assert monitor._item_id(ISSUE) == "4507"
+
+
+def test_sentry_base_url_supports_self_hosted():
+    monitor = SentryMonitor(
+        token="t", org="acme", project="web", base_url="https://sentry.internal/",
+    )
+    assert monitor.base_url == "https://sentry.internal"
+
+
+async def test_sentry_poll_converts_and_dedups(monkeypatch):
+    monitor = _sentry()
+    monkeypatch.setattr(monitor, "_fetch", lambda: _async_value([ISSUE]))
+
+    first = await monitor.poll()
+    assert len(first) == 1
+    assert await monitor.poll() == []  # same id, second sighting
+
+
+async def test_sentry_poll_survives_a_failing_api(monkeypatch, caplog):
+    monitor = _sentry()
+
+    async def boom():
+        raise RuntimeError("sentry is down")
+
+    monkeypatch.setattr(monitor, "_fetch", boom)
+    assert await monitor.poll() == []
+    assert "failed to fetch" in caplog.text
+
+
+async def _async_value(value):
+    return value
