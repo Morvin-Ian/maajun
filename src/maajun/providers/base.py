@@ -7,8 +7,6 @@ from typing import Any
 
 class ProviderType(Enum):
     DEEPSEEK = "deepseek"
-    OPENAI = "openai"
-    ANTHROPIC = "anthropic"
 
 
 class ProviderError(Exception):

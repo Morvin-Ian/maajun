@@ -26,17 +26,15 @@ Tools are split into two classes:
 | Class | Tools | Behavior |
 |-------|-------|----------|
 | Safe (read-only) | `read_file`, `glob`, `grep`, `list_dir`, `git_status` | Always allowed |
-| Gated | `bash`, `edit_file`, `write_file` | Need approval per call |
+| Gated | `edit_file`, `write_file` | Need approval per call |
 
 Approval is an injectable async callback. Each context supplies its own
 policy:
 
-- **`maajun chat`** — asks you interactively before each gated call
-  (`--auto-approve` skips the prompts).
 - **`maajun watch`, suggest mode** — no callback, so every gated call is
   denied: the agent is strictly read-only.
 - **`maajun watch`, fix mode** — file edits are approved only for paths
-  inside the daemon's isolated workspace clone; `bash` is always denied.
+  inside the daemon's isolated workspace clone.
 
 A denied call is not an error: the model receives a message telling it
 the user refused and not to retry, so it adapts (e.g. writes the fix as
@@ -61,27 +59,13 @@ pipeline doesn't care where an error came from.
   workflow runs, turning CI breakage into incidents. Failures are
   fingerprinted by commit SHA, so several red workflows on the same
   commit collapse into a single incident.
-- **Sentry** (`monitors/sentry_monitor.py`) — polls a project for
-  unresolved issues, fingerprinted by Sentry issue id.
 
-The HTTP-based monitors are built on `HTTPPollMonitor`, which owns the
+The GitHub Actions monitor is built on `HTTPPollMonitor`, which owns the
 HTTP client, remembers which item ids it has already emitted, and
 swallows (but logs) fetch failures — a monitor that can't reach its API
 returns no events rather than crashing the daemon. Adding a new
-HTTP-polled source means implementing three methods (fetch the items,
-identify one, convert one to an `ErrorEvent`) and registering the class:
-
-```python
-@MonitorRegistry.register("my-source")
-class MySourceMonitor(HTTPPollMonitor):
-    ...
-```
-
-`MonitorRegistry` (`monitors/registry.py`) is what lets
-[`[[monitor.instances]]`](monitoring.md#any-monitor-type-monitorinstances)
-name a `type` in config: the daemon looks the type up and passes the
-remaining keys to the constructor, so a new monitor becomes configurable
-without touching the daemon's wiring.
+HTTP-polled source means implementing three methods: fetch the items,
+identify one, convert one to an `ErrorEvent`.
 
 Every monitor also inherits **burst thresholding** from the base class:
 with `burst_threshold > 1`, events are buffered until N of them land
@@ -115,11 +99,9 @@ blip never becomes a pull request.
    [local mode](monitoring.md#1-configure) instead: steps 1–3 are
    unchanged, but the report is written to `<workdir>/reports/` and no
    git or GitHub operation runs at all.
-5. **Record & notify** — the incident is marked processed with its PR
-   URL, token counts, and USD cost. If email notifications are
-   configured, an email is sent with a link to the PR. If any step
-   fails, the incident is marked failed, a failure email is sent, and
-   the daemon moves on; one bad incident never kills the loop.
+5. **Record** — the incident is marked processed with its PR URL, token
+   counts, and USD cost. If any step fails, the incident is marked failed
+   and the daemon moves on; one bad incident never kills the loop.
 
 ### On-demand reports (`maajun report`)
 
@@ -127,8 +109,8 @@ The same pipeline runs without a monitor. `maajun report "<description>"`
 builds a synthetic `ErrorEvent` (source `manual`, fingerprinted from the
 description) and feeds it through steps 3–5 against a chosen repo, opening
 a PR on a `maajun/report-<fingerprint>` branch. Detected incidents and
-manual reports share the analyze/publish code path, so cost tracking and
-notifications behave identically. The one difference is dedup: the watch
+manual reports share the analyze/publish code path, so cost tracking
+behaves identically. The one difference is dedup: the watch
 loop skips a fingerprint it has already processed (step 2), whereas
 `report` always re-investigates and updates its branch — a manual report is
 an explicit request, not a passive observation.

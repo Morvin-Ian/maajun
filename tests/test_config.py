@@ -159,13 +159,6 @@ def test_get_unknown_key_raises():
         config.get("bogus.field")
 
 
-def test_get_masks_secrets():
-    config = Config()
-    config.daemon.email.password = "hunter2"
-    assert config.get("daemon.email.password") == "***"
-    assert config.get("daemon.email.smtp_host") == ""
-
-
 # ---------------------------------------------------------------------------
 # add_repo()
 # ---------------------------------------------------------------------------
@@ -239,7 +232,6 @@ def test_monitor_tuning_survives_save_and_reload(tmp_path):
     config.set("monitor.burst_window_seconds", "120")
     config.set("monitor.json_level_field", "level")
     config.set("monitor.json_level_values", "error,fatal")
-    config.set("monitor.use_watchdog", "true")
     config.save(path)
 
     reloaded = Config.load(path)
@@ -247,7 +239,6 @@ def test_monitor_tuning_survives_save_and_reload(tmp_path):
     assert reloaded.monitor.burst_window_seconds == 120
     assert reloaded.monitor.json_level_field == "level"
     assert reloaded.monitor.json_level_value_set == frozenset({"error", "fatal"})
-    assert reloaded.monitor.use_watchdog is True
 
 
 def test_default_monitor_tuning_is_not_written(tmp_path):
@@ -258,28 +249,6 @@ def test_default_monitor_tuning_is_not_written(tmp_path):
     text = path.read_text()
     assert "burst_threshold" not in text
     assert "json_level_field" not in text
-    assert "use_watchdog" not in text
-
-
-def test_monitor_instances_round_trip(tmp_path):
-    from maajun.config import MonitorInstanceConfig
-
-    path = tmp_path / "config.toml"
-    config = Config.load(path)
-    config.monitor.instances = [
-        MonitorInstanceConfig(type="logfile", path="/var/log/a.log"),
-        MonitorInstanceConfig(type="sentry", repo="owner/name", org="acme",
-                              project="web"),
-    ]
-    config.save(path)
-
-    reloaded = Config.load(path)
-    assert [i.type for i in reloaded.monitor.instances] == ["logfile", "sentry"]
-    assert reloaded.monitor.instances[0].monitor_kwargs() == {"path": "/var/log/a.log"}
-    assert reloaded.monitor.instances[1].repo == "owner/name"
-    assert reloaded.monitor.instances[1].monitor_kwargs() == {
-        "org": "acme", "project": "web",
-    }
 
 
 def test_json_level_values_parse_to_a_lowercased_set():

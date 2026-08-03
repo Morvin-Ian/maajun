@@ -4,8 +4,6 @@ from __future__ import annotations
 
 import asyncio
 
-import typer
-from rich.panel import Panel
 from rich.table import Table
 
 from maajun.auth import AuthManager
@@ -14,8 +12,6 @@ from maajun.cli._shared import (
     build_agent_config,
     console,
     implemented_providers,
-    prompt_line,
-    prompt_secret,
 )
 from maajun.providers.base import ProviderType
 from maajun.providers.factory import ProviderFactory
@@ -50,47 +46,6 @@ def _validate_key(auth: AuthManager, provider: str) -> None:
 
 
 @app.command()
-def login():
-    """Set up an API key interactively"""
-    auth = AuthManager()
-    providers = list(auth.SUPPORTED_PROVIDERS.keys())
-
-    console.print(Panel("[bold]Maajun Login[/bold]", border_style="blue"))
-
-    console.print("\n[bold]Select a provider:[/bold]\n")
-    for i, p in enumerate(providers, 1):
-        status = "[green]✓[/green]" if auth.has_api_key(p) else "[dim]○[/dim]"
-        console.print(f"  {status} [cyan]{i}.[/cyan] {p}")
-
-    while True:
-        choice = prompt_line("\n> Choice: ").strip()
-        if choice.isdigit() and 1 <= int(choice) <= len(providers):
-            provider = providers[int(choice) - 1]
-            break
-        console.print("[red]Invalid choice.[/red]")
-
-    if auth.has_api_key(provider):
-        console.print(f"\n[yellow]⚠ {provider} already has a key stored.[/yellow]")
-        overwrite = prompt_line("> Overwrite? (y/N): ").strip().lower()
-        if overwrite != "y":
-            console.print("[dim]Cancelled.[/dim]")
-            return
-
-    console.print(f"\n[bold]Paste your {provider} API key:[/bold]")
-    console.print("[dim](input is hidden for security)[/dim]\n")
-    key = prompt_secret("> API key: ")
-
-    if not key:
-        console.print("[red]No key entered. Cancelled.[/red]")
-        raise typer.Exit(1)
-
-    auth.set_api_key(provider, key)
-    console.print(f"\n[green]✓ {provider} key saved.[/green]")
-    _validate_key(auth, provider)
-    console.print("\n[dim]Run [bold]maajun chat[/bold] to start chatting.[/dim]")
-
-
-@app.command()
 def provider_list():
     """Show status of all providers"""
     auth = AuthManager()
@@ -112,42 +67,6 @@ def provider_list():
         table.add_row(name, support, key)
 
     console.print(table)
-
-
-@app.command()
-def config_set_key(
-    provider: str = typer.Argument(help="Provider name (e.g. deepseek, openai)"),
-    key: str | None = typer.Argument(None, help="API key (omit to be prompted securely)"),
-):
-    """Store an API key for a provider (prompts if the key is omitted)"""
-    if key is None:
-        key = prompt_secret("API key (input hidden): ")
-        if not key:
-            console.print("[red]No key entered. Cancelled.[/red]")
-            raise typer.Exit(1)
-    else:
-        console.print(
-            "[yellow]⚠ Passing the key as an argument leaves it in shell history. "
-            "Prefer omitting it to be prompted, or use [bold]maajun login[/bold].[/yellow]"
-        )
-
-    auth = AuthManager()
-    try:
-        auth.set_api_key(provider, key)
-        console.print(f"[green]✓ API key saved for {provider}[/green]")
-    except ValueError as e:
-        console.print(f"[red]✗ {e}[/red]")
-        raise typer.Exit(1) from e
-
-
-@app.command()
-def config_remove_key(
-    provider: str = typer.Argument(help="Provider name"),
-):
-    """Remove stored API key for a provider"""
-    auth = AuthManager()
-    auth.clear_provider_key(provider)
-    console.print(f"[green]✓ API key removed for {provider}[/green]")
 
 
 @app.command(name="sign-out")

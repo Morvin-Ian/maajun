@@ -67,43 +67,6 @@ def test_main_shows_providers_when_configured(fake_keyring, monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def test_login_stores_key(fake_keyring, monkeypatch):
-    """login with a single configured provider auto-selects it."""
-    # No providers have keys yet — login should prompt for provider choice
-    # and then accept the key.
-    result = runner.invoke(app, ["login"], input="1\nsk-test-key\n")
-    assert result.exit_code == 0
-    assert "saved" in result.output.lower() or "key" in result.output.lower()
-
-
-def test_login_rejects_empty_key(fake_keyring):
-    result = runner.invoke(app, ["login"], input="1\n\n")
-    assert result.exit_code == 1
-    assert "No key entered" in result.output
-
-
-def test_login_overwrite_prompt(fake_keyring):
-    """When a key already exists, login asks to overwrite."""
-    from maajun.auth import AuthManager
-
-    auth = AuthManager()
-    auth.set_api_key("deepseek", "old-key")
-
-    result = runner.invoke(app, ["login"], input="1\ny\nnew-key\n")
-    assert result.exit_code == 0
-
-
-def test_login_cancel_on_no_overwrite(fake_keyring):
-    from maajun.auth import AuthManager
-
-    auth = AuthManager()
-    auth.set_api_key("deepseek", "old-key")
-
-    result = runner.invoke(app, ["login"], input="1\nn\n")
-    assert result.exit_code == 0
-    assert "Cancelled" in result.output
-
-
 # ---------------------------------------------------------------------------
 # provider-list
 # ---------------------------------------------------------------------------
@@ -113,8 +76,6 @@ def test_provider_list(fake_keyring):
     result = runner.invoke(app, ["provider-list"])
     assert result.exit_code == 0
     assert "deepseek" in result.output.lower()
-    assert "openai" in result.output.lower()
-    assert "anthropic" in result.output.lower()
 
 
 # ---------------------------------------------------------------------------
@@ -122,40 +83,9 @@ def test_provider_list(fake_keyring):
 # ---------------------------------------------------------------------------
 
 
-def test_config_set_key_interactive(fake_keyring):
-    result = runner.invoke(app, ["config-set-key", "deepseek"], input="sk-test\n")
-    assert result.exit_code == 0
-    assert "saved" in result.output.lower()
-
-
-def test_config_set_key_cli_arg(fake_keyring):
-    result = runner.invoke(app, ["config-set-key", "deepseek", "sk-cli-test"])
-    assert result.exit_code == 0
-    assert "saved" in result.output.lower()
-    # Should warn about shell history
-    assert "history" in result.output.lower()
-
-
-def test_config_set_key_empty_input(fake_keyring):
-    result = runner.invoke(app, ["config-set-key", "deepseek"], input="\n")
-    assert result.exit_code == 1
-    assert "No key entered" in result.output
-
-
 # ---------------------------------------------------------------------------
 # config-remove-key
 # ---------------------------------------------------------------------------
-
-
-def test_config_remove_key(fake_keyring):
-    from maajun.auth import AuthManager
-
-    auth = AuthManager()
-    auth.set_api_key("deepseek", "sk-test")
-
-    result = runner.invoke(app, ["config-remove-key", "deepseek"])
-    assert result.exit_code == 0
-    assert "removed" in result.output.lower()
 
 
 # ---------------------------------------------------------------------------
@@ -177,37 +107,6 @@ def test_sign_out(fake_keyring):
 # ---------------------------------------------------------------------------
 # init
 # ---------------------------------------------------------------------------
-
-
-def test_init_writes_config(tmp_path):
-    config_path = tmp_path / "config.toml"
-    # Non-interactive mode
-    result = runner.invoke(app, ["init", "--config", str(config_path), "--no-interactive"])
-    assert result.exit_code == 0
-    assert config_path.exists()
-    content = config_path.read_text()
-    assert "[ai]" in content
-    assert "[github]" in content
-    assert "[monitor]" in content
-
-
-def test_init_refuses_overwrite(tmp_path):
-    config_path = tmp_path / "config.toml"
-    config_path.write_text("existing")
-    result = runner.invoke(app, ["init", "--config", str(config_path)], input="n\n")
-    assert result.exit_code == 0
-    assert config_path.read_text() == "existing"
-
-
-def test_init_overwrites_on_confirm(tmp_path):
-    config_path = tmp_path / "config.toml"
-    config_path.write_text("old")
-    # Non-interactive mode with overwrite confirmation
-    result = runner.invoke(
-        app, ["init", "--config", str(config_path), "--no-interactive"], input="y\n"
-    )
-    assert result.exit_code == 0
-    assert "[ai]" in config_path.read_text()
 
 
 # ---------------------------------------------------------------------------
@@ -256,12 +155,6 @@ def test_watch_without_a_repo_runs_in_local_mode(fake_keyring, tmp_path, monkeyp
 # ---------------------------------------------------------------------------
 
 
-def test_chat_fails_without_providers(fake_keyring):
-    result = runner.invoke(app, ["chat"])
-    assert result.exit_code == 1
-    assert "No providers configured" in result.output
-
-
 # ---------------------------------------------------------------------------
 # --help
 # ---------------------------------------------------------------------------
@@ -273,24 +166,12 @@ def test_root_help():
     assert "Maajun" in result.output
 
 
-def test_chat_help():
-    result = runner.invoke(app, ["chat", "--help"])
-    assert result.exit_code == 0
-    assert "--provider" in result.output or "provider" in result.output.lower()
-
-
 def test_watch_help():
     result = runner.invoke(app, ["watch", "--help"])
     assert result.exit_code == 0
     assert "--once" in result.output
     assert "--dry-run" in result.output
     assert "--verbose" in result.output
-
-
-def test_init_help():
-    result = runner.invoke(app, ["init", "--help"])
-    assert result.exit_code == 0
-    assert "--config" in result.output
 
 
 # ---------------------------------------------------------------------------
@@ -322,17 +203,6 @@ def test_config_set_persists_and_validates(tmp_path):
     bad = runner.invoke(app, ["config", "github.mode", "yolo", "--config", str(config_path)])
     assert bad.exit_code == 1
     assert 'mode = "fix"' in config_path.read_text()  # unchanged
-
-
-def test_config_show_masks_secrets(tmp_path):
-    config_path = tmp_path / "config.toml"
-    config_path.write_text("[daemon]\n[daemon.email]\npassword = \"hunter2\"\n")
-    result = runner.invoke(
-        app, ["config", "daemon.email.password", "--config", str(config_path)]
-    )
-    assert result.exit_code == 0
-    assert "hunter2" not in result.output
-    assert "***" in result.output
 
 
 def test_status_reports_missing_credentials(fake_keyring, tmp_path):

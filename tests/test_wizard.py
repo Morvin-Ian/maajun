@@ -184,65 +184,6 @@ def test_setup_preserves_a_second_repo(fake_keyring, api_key, tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# Sentry
-# ---------------------------------------------------------------------------
-
-
-def test_setup_writes_a_sentry_instance(fake_keyring, api_key, tmp_path):
-    config_path = tmp_path / "config.toml"
-    result = runner.invoke(app, [
-        "setup", "--non-interactive", "--config", str(config_path),
-        "--sentry", "acme/web",
-    ])
-    assert result.exit_code == 0, result.output
-
-    instances = Config.load(config_path).monitor.instances
-    assert [i.type for i in instances] == ["sentry"]
-    assert instances[0].monitor_kwargs() == {"org": "acme", "project": "web"}
-
-
-def test_sentry_token_is_never_written_to_the_config(fake_keyring, api_key, tmp_path):
-    """[[monitor.instances]] is plaintext, so the token belongs in the keyring."""
-    config_path = tmp_path / "config.toml"
-    auth = AuthManager()
-    auth.set_monitor_secret("sentry", "sntrys_secret")
-
-    runner.invoke(app, [
-        "setup", "--non-interactive", "--config", str(config_path),
-        "--sentry", "acme/web",
-    ])
-    assert "sntrys_secret" not in config_path.read_text()
-    assert auth.get_monitor_secret("sentry") == "sntrys_secret"
-
-
-def test_malformed_sentry_target_is_skipped(fake_keyring, api_key, tmp_path):
-    config_path = tmp_path / "config.toml"
-    result = runner.invoke(app, [
-        "setup", "--non-interactive", "--config", str(config_path),
-        "--sentry", "just-a-project",
-    ])
-    assert result.exit_code == 0
-    assert "org/project form" in result.output
-    assert Config.load(config_path).monitor.instances == []
-
-
-def test_sentry_token_reaches_the_monitor_from_the_keyring(fake_keyring, tmp_path):
-    from maajun.config import GitHubConfig, MonitorConfig, MonitorInstanceConfig, RepoConfig
-    from maajun.daemon import _build_monitors
-
-    auth = AuthManager()
-    auth.set_monitor_secret("sentry", "sntrys_secret")
-    config = Config(
-        github=GitHubConfig(repos=[RepoConfig(repo="owner/name")]),
-        monitor=MonitorConfig(instances=[
-            MonitorInstanceConfig(type="sentry", org="acme", project="web"),
-        ]),
-    )
-    monitors, _ = _build_monitors(config, config.github.get_all_repos(), auth)
-    assert monitors[0].name == "sentry:acme/web"
-
-
-# ---------------------------------------------------------------------------
 # GitHub Actions
 # ---------------------------------------------------------------------------
 

@@ -1,11 +1,10 @@
-"""Tests for agent tools (read_file, edit_file, glob, grep, bash, etc.)."""
+"""Tests for agent tools (read_file, edit_file, glob, grep, etc.)."""
 
 import os
 
 import pytest
 
 from maajun.agent.tools import (
-    BASH,
     EDIT_FILE,
     GIT_STATUS,
     GLOB,
@@ -241,41 +240,6 @@ async def test_glob_skips_vendored_dirs(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# bash
-# ---------------------------------------------------------------------------
-
-
-async def test_bash_echo():
-    executor = BASH.executor
-    result = await executor(command="echo hello")
-    assert "hello" in result
-
-
-async def test_bash_returns_stderr():
-    executor = BASH.executor
-    result = await executor(command="python3 -c 'import sys; sys.stderr.write(\"err\\n\")'")
-    assert "err" in result
-
-
-async def test_bash_exit_code():
-    executor = BASH.executor
-    result = await executor(command="exit 42")
-    assert "exit code: 42" in result
-
-
-async def test_bash_timeout(tmp_path):
-    executor = BASH.executor
-    result = await executor(command="sleep 10", timeout=1)
-    assert "timed out" in result
-
-
-async def test_bash_empty_command():
-    executor = BASH.executor
-    result = await executor(command="")
-    assert "empty command" in result
-
-
-# ---------------------------------------------------------------------------
 # list_dir
 # ---------------------------------------------------------------------------
 
@@ -329,14 +293,15 @@ def test_default_registry_has_all_tools():
     names = {d.name for d in reg.definitions()}
     expected = {
         "read_file", "edit_file", "write_file", "glob",
-        "grep", "bash", "list_dir", "git_status",
+        "grep", "list_dir", "git_status",
     }
     assert names == expected
 
 
-async def test_registry_execute_known_tool():
+async def test_registry_execute_known_tool(tmp_path):
+    (tmp_path / "hello.txt").write_text("registry_works")
     reg = default_registry()
-    result = await reg.execute("bash", {"command": "echo registry_works"})
+    result = await reg.execute("read_file", {"path": str(tmp_path / "hello.txt")})
     assert "registry_works" in result
 
 
@@ -348,7 +313,7 @@ async def test_registry_execute_unknown_tool():
 
 def test_dangerous_tools_require_permission():
     reg = default_registry()
-    for name in ("bash", "edit_file", "write_file"):
+    for name in ("edit_file", "write_file"):
         assert reg.requires_permission(name)
     for name in ("read_file", "glob", "grep", "list_dir", "git_status"):
         assert not reg.requires_permission(name)

@@ -2,24 +2,6 @@
 
 Run `maajun <command> --help` for the authoritative options list.
 
-## Chat
-
-### `maajun chat`
-
-Interactive chat session with tool use and streamed responses.
-
-| Flag | Meaning |
-|------|---------|
-| `-p, --provider NAME` | AI provider to use (default: pick from configured) |
-| `--thinking` | Use the provider's reasoning model |
-| `--auto-approve` | Run gated tools (bash, file edits) without asking |
-
-In-chat commands: `/clear` (new session), `/history`, `/quit`.
-
-By default you're prompted before every `bash`, `edit_file`, or
-`write_file` call, with the tool's arguments shown. Denying is safe —
-the model is told and adapts.
-
 ## Monitoring
 
 ### `maajun setup`
@@ -27,7 +9,7 @@ the model is told and adapts.
 The one command that configures everything. Writes
 `~/.config/maajun/config.toml` (`-c/--config` for another location).
 
-Four steps, of which only the first is required:
+Three steps, of which only the first is required:
 
 1. **AI provider** — picks the provider (skipped when only one is
    implemented) and stores a validated API key in the keyring.
@@ -37,9 +19,8 @@ Four steps, of which only the first is required:
    the keyring, or `gh auth login`. Checks that the token authenticates
    *and* can push, so a misconfigured token fails here rather than at
    3 a.m.
-3. **Error sources** *(optional)* — log files, GitHub Actions (reusing
-   the GitHub token rather than asking for a second one), and Sentry.
-4. **Email notifications** *(optional)*.
+3. **Error sources** *(optional)* — log files, and GitHub Actions
+   (reusing the GitHub token rather than asking for a second one).
 
 Press Enter to skip any optional step. Re-running is safe: every answer
 defaults to your current configuration, and stored credentials are not
@@ -55,19 +36,12 @@ instruction.
 | `-m, --mode MODE` | `suggest` or `fix` |
 | `-l, --logs PATHS` | Comma-separated log files to watch |
 | `--github-actions` | Watch the configured repos for failed workflow runs |
-| `--sentry ORG/PROJECT` | Sentry project to monitor |
 | `--non-interactive` | Never prompt; use flags and the environment |
 | `--reconfigure` | Ask again for credentials that are already stored |
 
 In `--non-interactive` mode secrets are read from the environment
-(`DEEPSEEK_API_KEY`, `GITHUB_TOKEN`, `MAAJUN_SENTRY_TOKEN`) rather than
-from flags, so they never land in shell history.
-
-### `maajun init`
-
-Writes a starter config without the credential steps. `maajun setup` is
-the recommended entry point; `init --no-interactive` is still useful to
-drop a fully commented template and edit it by hand.
+(`DEEPSEEK_API_KEY`, `GITHUB_TOKEN`) rather than from flags, so they never
+land in shell history.
 
 ### `maajun add-repo REPO`
 
@@ -110,7 +84,7 @@ maajun config monitor.log_files /var/log/a.log,/var/log/b.log
 ```
 
 Keys use dot notation (`ai.*`, `github.repo/base_branch/mode`,
-`monitor.*`, `daemon.workdir`, `daemon.email.*`). Values are type-checked
+`monitor.*`, `daemon.workdir`). Values are type-checked
 and validated before saving — an invalid value (e.g. an unknown mode) is
 rejected and the file is left unchanged. Setting `github.mode` also
 updates every repo in a multi-repo config. Writes are comment-preserving:
@@ -173,23 +147,9 @@ key); run `maajun status` first if unsure.
 
 ## Credentials
 
-### `maajun login`
-
-Store an AI provider API key interactively (input hidden), then validate
-it against the provider's API.
-
 ### `maajun provider-list`
 
 Show each provider's support status and whether a key is stored.
-
-### `maajun config-set-key PROVIDER [KEY]`
-
-Non-interactive key storage. Omit `KEY` to be prompted securely —
-passing it as an argument leaves it in your shell history.
-
-### `maajun config-remove-key PROVIDER`
-
-Remove a stored provider key.
 
 ### `maajun sign-out`
 

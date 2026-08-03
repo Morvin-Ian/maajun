@@ -3,16 +3,11 @@
 from __future__ import annotations
 
 import json
-import logging
 import re
-import threading
 from pathlib import Path
 from typing import Any
 
 from maajun.monitors.base import ErrorEvent, Monitor
-from maajun.monitors.registry import MonitorRegistry
-
-log = logging.getLogger(__name__)
 
 # Only genuine failures by default. Warnings are common and mostly benign, and
 # every matched line costs an AI call and a pull request — opt in explicitly
@@ -47,16 +42,6 @@ TRACEBACK_LOOKAHEAD_LINES = 3
 # Cap on carried-over text for tracebacks split across polls.
 MAX_PENDING = 64 * 1024
 
-try:
-    from watchdog.events import FileSystemEventHandler
-    from watchdog.observers import Observer
-
-    HAS_WATCHDOG = True
-except ImportError:
-    HAS_WATCHDOG = False
-
-
-@MonitorRegistry.register("logfile")
 class LogFileMonitor(Monitor):
     """Incrementally reads a log file, surviving rotation and truncation.
 
@@ -81,7 +66,6 @@ class LogFileMonitor(Monitor):
         traceback_lookahead: int = TRACEBACK_LOOKAHEAD_LINES,
         burst_threshold: int = 1,
         burst_window_seconds: float = 60.0,
-        use_watchdog: bool = False,
     ):
         super().__init__(
             burst_threshold=burst_threshold,
@@ -103,67 +87,11 @@ class LogFileMonitor(Monitor):
         self._inode: int | None = None
         self._carryover_text = ""
 
-        # Watchdog turns polling into "check only when the file changed", which
-        # saves a stat+read per interval on quiet logs. It is an optional extra,
-        # so fall back to plain polling rather than failing when it's absent.
-        self._use_watchdog = use_watchdog and HAS_WATCHDOG
-        if use_watchdog and not HAS_WATCHDOG:
-            log.warning(
-                "%s: use_watchdog is set but the watchdog package is not "
-                "installed; falling back to interval polling. "
-                "Install it with: pip install 'maajun[watchdog]'",
-                self.name,
-            )
-        self._file_changed = threading.Event()
-        self._observer: Any = None
-        self._has_polled = False
-
-        if self._use_watchdog:
-            self._start_watching()
-
-    # -- watchdog -------------------------------------------------------
-
-    def _start_watching(self) -> None:
-        monitor_path = str(self.path)
-        file_changed = self._file_changed
-
-        class _ChangeHandler(FileSystemEventHandler):
-            """Sets a flag when the watched path changes in any way.
-
-            Every event type matters, not just on_modified: rotation replaces
-            or moves the file, and the monitor has to re-open it to keep
-            reading. The directory is watched (not the file) so the handler
-            still fires when the log does not exist yet.
-            """
-
-            def on_any_event(self, event: Any) -> None:
-                paths = (
-                    getattr(event, "src_path", None),
-                    getattr(event, "dest_path", None),
-                )
-                if monitor_path in paths:
-                    file_changed.set()
-
-        self._observer = Observer()
-        self._observer.schedule(
-            _ChangeHandler(), str(self.path.parent), recursive=False
-        )
-        self._observer.start()
-
-    def _stop_watching(self) -> None:
-        if self._observer is not None:
-            self._observer.stop()
-            self._observer.join(timeout=5)
-            self._observer = None
-
     # -- Monitor interface ----------------------------------------------
 
     @property
     def name(self) -> str:
         return f"logfile:{self.path}"
-
-    async def aclose(self) -> None:
-        self._stop_watching()
 
     async def flush(self) -> list[ErrorEvent]:
         """Emit carried-over text plus any incomplete burst, unconditionally."""
@@ -173,11 +101,6 @@ class LogFileMonitor(Monitor):
         return self._drain_burst_buffer()
 
     async def poll(self) -> list[ErrorEvent]:
-        if self._can_skip_read():
-            return []
-        self._has_polled = True
-        self._file_changed.clear()
-
         text = self._read_new()
         if not text:
             if self._carryover_text:
@@ -193,20 +116,6 @@ class LogFileMonitor(Monitor):
             self._carryover_text = self._carryover_text[-MAX_PENDING:]
 
         return self._apply_burst_threshold(events)
-
-    def _can_skip_read(self) -> bool:
-        """Whether this poll can return without touching the file.
-
-        Only in watchdog mode, and only once the first read has established a
-        baseline. Carried-over text still needs a poll to flush it, so a
-        pending buffer always forces the read path.
-        """
-        return (
-            self._use_watchdog
-            and self._has_polled
-            and not self._carryover_text
-            and not self._file_changed.is_set()
-        )
 
     # -- file I/O -------------------------------------------------------
 
