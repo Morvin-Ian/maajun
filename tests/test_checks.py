@@ -137,3 +137,50 @@ def test_no_monitors_at_all_still_fails():
     )
     assert ok is False
     assert "At least one monitor configured" in _labels(sections)
+
+
+def test_sentry_without_a_token_fails_the_preflight(fake_keyring, monkeypatch):
+    """status must not say "Ready" for a config that crashes watch at startup."""
+    from maajun.auth import AuthManager
+    from maajun.checks import gather_monitor_secrets
+    from maajun.config import MonitorInstanceConfig
+
+    monkeypatch.delenv("MAAJUN_SENTRY_TOKEN", raising=False)
+    config = Config(
+        github=GitHubConfig(repo="owner/name"),
+        monitor=MonitorConfig(instances=[
+            MonitorInstanceConfig(type="sentry", org="acme", project="web"),
+        ]),
+    )
+    sections, ok = build_status(
+        config, provider="deepseek", has_key=True, has_token=True,
+        repos=[RepoConfig(repo="owner/name")], network=None,
+        monitor_secrets=gather_monitor_secrets(AuthManager(), config),
+    )
+    assert ok is False
+    detail = next(
+        c.detail for s in sections for c in s.checks if c.label.startswith("sentry")
+    )
+    assert "MAAJUN_SENTRY_TOKEN" in detail
+
+
+def test_sentry_with_a_stored_token_passes(fake_keyring, monkeypatch):
+    from maajun.auth import AuthManager
+    from maajun.checks import gather_monitor_secrets
+    from maajun.config import MonitorInstanceConfig
+
+    monkeypatch.delenv("MAAJUN_SENTRY_TOKEN", raising=False)
+    auth = AuthManager()
+    auth.set_monitor_secret("sentry", "sntrys_x")
+    config = Config(
+        github=GitHubConfig(repo="owner/name"),
+        monitor=MonitorConfig(instances=[
+            MonitorInstanceConfig(type="sentry", org="acme", project="web"),
+        ]),
+    )
+    _, ok = build_status(
+        config, provider="deepseek", has_key=True, has_token=True,
+        repos=[RepoConfig(repo="owner/name")], network=None,
+        monitor_secrets=gather_monitor_secrets(auth, config),
+    )
+    assert ok is True

@@ -9,6 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
+from maajun.auth import MONITOR_SECRET_TYPES, AuthManager
 from maajun.config import Config, RepoConfig
 from maajun.vcs import GitHubClient, GitHubError
 
@@ -28,6 +29,15 @@ class Check:
 class Section:
     title: str
     checks: list[Check]
+
+
+def gather_monitor_secrets(auth: AuthManager, config: Config) -> dict[str, bool]:
+    """Which configured monitor types have an auth token available."""
+    return {
+        instance.type: auth.get_monitor_secret(instance.type) is not None
+        for instance in config.monitor.instances
+        if instance.type in MONITOR_SECRET_TYPES
+    }
 
 
 async def gather_github(
@@ -61,12 +71,17 @@ def build_status(
     has_token: bool,
     repos: list[RepoConfig],
     network: tuple[str | None, dict[str, bool]] | None,
+    monitor_secrets: dict[str, bool] | None = None,
 ) -> tuple[list[Section], bool]:
     """Assemble the status sections and the overall pass/fail.
 
     `network` is the gather_github result when a probe ran, or None when it was
     skipped (no token, --no-network, or no repos configured).
+
+    `monitor_secrets` maps a monitor type to whether its auth token was found.
+    Passed in rather than looked up here so this stays free of I/O.
     """
+    monitor_secrets = monitor_secrets or {}
     ai = Section("AI provider", [
         Check(f"API key for {provider}", has_key, "" if has_key else "run 'maajun setup'"),
     ])
@@ -132,7 +147,17 @@ def build_status(
         details = instance.monitor_kwargs()
         if instance.type == "sentry":
             label = f"sentry: {details.get('org', '?')}/{details.get('project', '?')}"
-        monitors.checks.append(Check(label, True, counts=False))
+        # A monitor whose token is missing fails the daemon at startup, so it
+        # must fail here too rather than reporting "Ready".
+        needs_token = instance.type in monitor_secrets and "token" not in details
+        if needs_token and not monitor_secrets[instance.type]:
+            monitors.checks.append(Check(
+                label, False,
+                f"no auth token — set {AuthManager.monitor_env_var(instance.type)} "
+                f"or run 'maajun setup --{instance.type} ...'",
+            ))
+        else:
+            monitors.checks.append(Check(label, True, counts=False))
     if watches_actions:
         monitors.checks.append(Check(
             f"GitHub Actions: {', '.join(config.monitor.github_actions_repos)}",

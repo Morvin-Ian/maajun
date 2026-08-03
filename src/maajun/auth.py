@@ -168,7 +168,8 @@ class AuthManager:
     # -- Monitor secrets ----------------------------------------------
 
     @staticmethod
-    def _monitor_env_var(monitor_type: str) -> str:
+    def monitor_env_var(monitor_type: str) -> str:
+        """Environment variable holding a monitor's auth token."""
         return f"MAAJUN_{monitor_type.upper().replace('-', '_')}_TOKEN"
 
     def get_monitor_secret(self, monitor_type: str) -> str | None:
@@ -177,7 +178,7 @@ class AuthManager:
         Keeps third-party tokens (Sentry, …) out of the plaintext config file,
         which is otherwise the only place [[monitor.instances]] could hold them.
         """
-        env_token = os.environ.get(self._monitor_env_var(monitor_type), "").strip()
+        env_token = os.environ.get(self.monitor_env_var(monitor_type), "").strip()
         if env_token:
             return env_token
         return _keyring_get(f"{monitor_type}_token")
