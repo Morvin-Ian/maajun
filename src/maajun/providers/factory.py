@@ -2,28 +2,22 @@ from typing import Any
 
 from .base import AIProvider, ProviderType
 from .deepseek import DeepSeekProvider
-
-# from .openai import OpenAIProvider
-# from .anthropic import AnthropicProvider
+from .openai import OpenAIProvider
 
 
 class ProviderFactory:
     _providers = {
         ProviderType.DEEPSEEK: DeepSeekProvider,
-        # ProviderType.OPENAI: OpenAIProvider,
-        # ProviderType.ANTHROPIC: AnthropicProvider,
+        ProviderType.OPENAI: OpenAIProvider,
     }
 
     @classmethod
     def create_provider(
-        cls,
-        provider_type: ProviderType,
-        config: dict[str, Any]
+        cls, provider_type: ProviderType, config: dict[str, Any]
     ) -> AIProvider:
         provider_class = cls._providers.get(provider_type)
         if not provider_class:
             raise ValueError(f"Unsupported provider: {provider_type}")
-
         return provider_class(config)
 
     @classmethod

@@ -78,6 +78,12 @@ The same error is never reported twice — repeat sightings only bump a counter.
   sources (logs, GitHub Actions), cost tracking, running on a VPS
 - [Command reference](docs/commands.md) — every CLI command and flag
 
+## Supported AI providers
+
+DeepSeek and OpenAI. Both speak the same wire protocol, so any compatible
+gateway works too — point `ai.base_url` at it. Pick one during
+`maajun setup`, or switch later with `maajun config ai.provider openai`.
+
 ## Development
 
 ```bash
