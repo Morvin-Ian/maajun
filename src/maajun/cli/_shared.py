@@ -46,10 +46,13 @@ def _input(text: str) -> str:
     line and leaking the rest to the shell after exit. Unbound key combos
     are ignored rather than inserting escape codes. Falls back to plain
     input when stdin is not a TTY (tests, pipes).
+
+    markup=False on the fallback: prompts show defaults as "[main]", which
+    Rich would otherwise parse as a style tag and render as nothing.
     """
     if sys.stdin.isatty():
         return pt_prompt(text)
-    return console.input(text)
+    return console.input(text, markup=False)
 
 
 def _secret_input(text: str) -> str:
@@ -73,8 +76,7 @@ def _secret_input(text: str) -> str:
 
 
 def _prompt_mode(current: str = "suggest") -> str:
-    """Prompt for suggest/fix mode, defaulting to `current`. Shared by init
-    and github-login so the wording stays in one place."""
+    """Prompt for suggest/fix mode, defaulting to `current`."""
     console.print("\n[bold]Mode[/bold]")
     console.print(
         "  [cyan]1.[/cyan] suggest — PRs contain only the incident report and suggested fix"

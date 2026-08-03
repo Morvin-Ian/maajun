@@ -39,14 +39,29 @@ def test_missing_credentials_fail(tmp_path):
     assert ok is False
 
 
-def test_no_repo_configured_fails():
+def test_no_repo_configured_is_a_warning_not_a_failure():
+    """GitHub is optional — without a repo, reports are written to disk."""
     config = Config(github=GitHubConfig(), monitor=MonitorConfig(log_files=["/x.log"]))
     sections, ok = build_status(
         config, provider="deepseek", has_key=True, has_token=True,
         repos=[], network=None,
     )
-    assert ok is False
+    assert ok is True
     assert "Repository configured" in _labels(sections)
+
+
+def test_missing_token_fails_once_a_repo_is_configured():
+    """Asking for PRs without a token is a real misconfiguration."""
+    config = Config(
+        github=GitHubConfig(repo="owner/name"),
+        monitor=MonitorConfig(log_files=["/x.log"]),
+    )
+    sections, ok = build_status(
+        config, provider="deepseek", has_key=True, has_token=False,
+        repos=[RepoConfig(repo="owner/name")], network=None,
+    )
+    assert ok is False
+    assert "GitHub token stored" in _labels(sections)
 
 
 def test_missing_log_file_is_warning_not_failure(tmp_path):

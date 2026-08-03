@@ -78,7 +78,17 @@ def watch(
     repos = config.github.get_all_repos()
     dry_note = "\n[yellow]Dry run — no branches/PRs will be created[/yellow]" if dry_run else ""
     mode_source = " (override)" if mode else ""
-    if len(repos) > 1:
+    if daemon.local_mode:
+        console.print(Panel(
+            f"[bold]Maajun watch[/bold] [dim](local — no GitHub repo configured)[/dim]\n\n"
+            f"Analyzing: [cyan]{daemon.workspaces[''].path}[/cyan]\n"
+            f"Reports:   [cyan]{daemon.report_dir}[/cyan]\n"
+            f"Monitors:  {', '.join(m.name for m in daemon.monitors)}\n"
+            f"Interval:  {config.monitor.poll_interval}s" + dry_note
+            + "\n\n[dim]Run 'maajun setup' to connect a repo and open PRs instead.[/dim]",
+            border_style="blue",
+        ))
+    elif len(repos) > 1:
         repos_text = "\n".join(
             f"  • [cyan]{rc.repo}[/cyan] (base: {rc.base_branch}, mode: {rc.mode})"
             for rc in repos
@@ -156,11 +166,19 @@ def report(
         for rc in config.github.repos:
             rc.mode = mode
 
-    repos = config.github.get_all_repos()
-    if not repos:
-        console.print("[red]✗ No repository configured. Run 'maajun init' first.[/red]")
-        raise typer.Exit(1)
+    try:
+        daemon = build_daemon_for_report(config)
+    except RuntimeError as e:
+        console.print(f"[red]✗ {e}[/red]")
+        raise typer.Exit(1) from e
 
+    repos = daemon.repo_configs
+    if repo and daemon.local_mode:
+        console.print(
+            f"[red]✗ --repo {repo} given but no GitHub repo is configured. "
+            "Run 'maajun setup' first.[/red]"
+        )
+        raise typer.Exit(1)
     if repo:
         target = next((rc for rc in repos if rc.repo == repo), None)
         if not target:
@@ -183,15 +201,19 @@ def report(
     if base_branch:
         target.base_branch = base_branch
 
-    try:
-        daemon = build_daemon_for_report(config)
-    except RuntimeError as e:
-        console.print(f"[red]✗ {e}[/red]")
-        raise typer.Exit(1) from e
-
+    if daemon.local_mode:
+        destination = (
+            f"Analyzing: [cyan]{daemon.workspaces[''].path}[/cyan]\n"
+            f"Report:    [cyan]{daemon.report_dir}[/cyan]"
+        )
+    else:
+        destination = (
+            f"Repo:  [cyan]{target.repo}[/cyan] "
+            f"(base: {target.base_branch}, mode: {target.mode})"
+        )
     console.print(Panel(
         f"[bold]Maajun report[/bold]\n\n"
-        f"Repo:  [cyan]{target.repo}[/cyan] (base: {target.base_branch}, mode: {target.mode})\n"
+        f"{destination}\n"
         f"Issue: {truncate(description, 120, '...')}"
         + ("\n[yellow]Dry run — no branches/PRs will be created[/yellow]" if dry_run else ""),
         border_style="blue",
@@ -213,8 +235,9 @@ def report(
                 console.print("\n[dim]Dry run complete.[/dim]")
         else:
             with working(console, "Preparing workspace") as status:
-                pr_url = asyncio.run(run_report(status.set))
-            console.print(f"\n[green]✓ PR opened:[/green] {pr_url}")
+                result = asyncio.run(run_report(status.set))
+            label = "Report written" if daemon.local_mode else "PR opened"
+            console.print(f"\n[green]✓ {label}:[/green] {result}")
     except KeyboardInterrupt:
         console.print("\n[dim]Cancelled.[/dim]")
     except Exception as e:

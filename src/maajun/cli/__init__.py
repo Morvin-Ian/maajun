@@ -5,7 +5,13 @@ Typer `app`, so the CLI stays flat (`maajun login`, `maajun watch`, …).
 pulls in every command module for its `@app.command()` side effects.
 """
 
-from maajun.cli import auth, chat, monitor, setup  # noqa: F401,E402  register commands
+from maajun.cli import (  # noqa: F401,E402  register commands
+    auth,
+    chat,
+    monitor,
+    setup,
+    wizard,
+)
 from maajun.cli._shared import app, console
 
 __all__ = ["app", "console"]

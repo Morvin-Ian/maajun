@@ -11,6 +11,9 @@ SERVICE_NAME = "maajun"
 GITHUB_KEY_NAME = "github_token"
 GITHUB_TOKEN_ENV = "GITHUB_TOKEN"
 
+# Monitor types whose auth token maajun can store, so `reset` knows what to clear.
+MONITOR_SECRET_TYPES = ("sentry",)
+
 # Distinguishes "not looked up yet" from a cached "gh has no token".
 _UNSET = object()
 
@@ -162,10 +165,35 @@ class AuthManager:
         _keyring_delete(GITHUB_KEY_NAME)
         self._gh_cli_token = _UNSET
 
+    # -- Monitor secrets ----------------------------------------------
+
+    @staticmethod
+    def _monitor_env_var(monitor_type: str) -> str:
+        return f"MAAJUN_{monitor_type.upper().replace('-', '_')}_TOKEN"
+
+    def get_monitor_secret(self, monitor_type: str) -> str | None:
+        """Auth token for a monitor: env var first, then keyring.
+
+        Keeps third-party tokens (Sentry, …) out of the plaintext config file,
+        which is otherwise the only place [[monitor.instances]] could hold them.
+        """
+        env_token = os.environ.get(self._monitor_env_var(monitor_type), "").strip()
+        if env_token:
+            return env_token
+        return _keyring_get(f"{monitor_type}_token")
+
+    def set_monitor_secret(self, monitor_type: str, token: str) -> None:
+        _keyring_set(f"{monitor_type}_token", token.strip())
+
+    def clear_monitor_secret(self, monitor_type: str) -> None:
+        _keyring_delete(f"{monitor_type}_token")
+
     def clear_all(self) -> None:
         """Clear all stored credentials"""
         for provider in self.SUPPORTED_PROVIDERS:
             self.clear_provider_key(provider)
         self.clear_github_token()
+        for monitor_type in MONITOR_SECRET_TYPES:
+            self.clear_monitor_secret(monitor_type)
         self._cache = {}
         self._gh_cli_token = _UNSET

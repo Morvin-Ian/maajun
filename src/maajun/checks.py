@@ -68,35 +68,43 @@ def build_status(
     skipped (no token, --no-network, or no repos configured).
     """
     ai = Section("AI provider", [
-        Check(f"API key for {provider}", has_key, "" if has_key else "run 'maajun login'"),
+        Check(f"API key for {provider}", has_key, "" if has_key else "run 'maajun setup'"),
     ])
 
-    github = Section("GitHub", [
-        Check(
-            "GitHub token stored", has_token,
-            "" if has_token else "run 'maajun github-login' or set GITHUB_TOKEN",
-        ),
-    ])
+    # GitHub is optional: without a repo, maajun still analyzes errors and
+    # writes reports to disk, so an absent repo is a note rather than a failure.
+    # Once a repo *is* configured, a working token becomes required.
+    github = Section("GitHub", [])
     if not repos:
-        github.checks.append(Check("Repository configured", False, "run 'maajun init'"))
-    elif network is None:
-        for rc in repos:
-            github.checks.append(Check(
-                f"Repository {rc.repo}", True,
-                "(reachability not checked)", warn=True, counts=False,
-            ))
+        github.checks.append(Check(
+            "Repository configured", False,
+            "not set — reports go to disk instead of PRs; run 'maajun setup'",
+            warn=True, counts=False,
+        ))
     else:
-        login, pushable = network
-        if login is None:
-            github.checks.append(Check("Token valid", False, "authentication failed"))
-        else:
-            github.checks.append(Check(f"Authenticated as {login}", True, counts=False))
+        github.checks.append(Check(
+            "GitHub token stored", has_token,
+            "" if has_token else "run 'maajun setup', export GITHUB_TOKEN, "
+                                "or run 'gh auth login'",
+        ))
+        if network is None:
             for rc in repos:
-                pushes = pushable.get(rc.repo, False)
                 github.checks.append(Check(
-                    f"Can push to {rc.repo}", pushes,
-                    "" if pushes else "check token repo access / Contents perm",
+                    f"Repository {rc.repo}", True,
+                    "(reachability not checked)", warn=True, counts=False,
                 ))
+        else:
+            login, pushable = network
+            if login is None:
+                github.checks.append(Check("Token valid", False, "authentication failed"))
+            else:
+                github.checks.append(Check(f"Authenticated as {login}", True, counts=False))
+                for rc in repos:
+                    pushes = pushable.get(rc.repo, False)
+                    github.checks.append(Check(
+                        f"Can push to {rc.repo}", pushes,
+                        "" if pushes else "check token repo access / Contents perm",
+                    ))
 
     monitors = Section("Monitors", [])
     log_paths = list(config.monitor.log_files)

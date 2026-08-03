@@ -22,24 +22,52 @@ the model is told and adapts.
 
 ## Monitoring
 
+### `maajun setup`
+
+The one command that configures everything. Writes
+`~/.config/maajun/config.toml` (`-c/--config` for another location).
+
+Four steps, of which only the first is required:
+
+1. **AI provider** — picks the provider (skipped when only one is
+   implemented) and stores a validated API key in the keyring.
+2. **GitHub** *(optional)* — target repo, base branch, and
+   [mode](monitoring.md#modes). Suggests the repo from your `origin`
+   remote, and reports whether a token already exists in `$GITHUB_TOKEN`,
+   the keyring, or `gh auth login`. Checks that the token authenticates
+   *and* can push, so a misconfigured token fails here rather than at
+   3 a.m.
+3. **Error sources** *(optional)* — log files, GitHub Actions (reusing
+   the GitHub token rather than asking for a second one), and Sentry.
+4. **Email notifications** *(optional)*.
+
+Press Enter to skip any optional step. Re-running is safe: every answer
+defaults to your current configuration, and stored credentials are not
+re-requested unless you pass `--reconfigure`. Setup ends by running the
+`status` checks inline, so you see a verdict rather than another
+instruction.
+
+| Flag | Meaning |
+|------|---------|
+| `--provider NAME` | AI provider to use |
+| `--repo OWNER/NAME` | Repository to open PRs on |
+| `-b, --base-branch NAME` | Branch to open PRs against |
+| `-m, --mode MODE` | `suggest` or `fix` |
+| `-l, --logs PATHS` | Comma-separated log files to watch |
+| `--github-actions` | Watch the configured repos for failed workflow runs |
+| `--sentry ORG/PROJECT` | Sentry project to monitor |
+| `--non-interactive` | Never prompt; use flags and the environment |
+| `--reconfigure` | Ask again for credentials that are already stored |
+
+In `--non-interactive` mode secrets are read from the environment
+(`DEEPSEEK_API_KEY`, `GITHUB_TOKEN`, `MAAJUN_SENTRY_TOKEN`) rather than
+from flags, so they never land in shell history.
+
 ### `maajun init`
 
-Set up `~/.config/maajun/config.toml` (`-c/--config` for another
-location). Asks before overwriting.
-
-Interactive by default — it prompts for the AI provider, target
-repository, base branch, [mode](monitoring.md#modes), log files, and
-poll interval, then writes the config. Pass `--no-interactive` to drop a
-fully commented starter template instead and edit it by hand.
-
-### `maajun github-login`
-
-Set up GitHub access in one step: prompts for the target repository
-(`owner/name`, shown as you type; the configured value is offered as the
-default), a personal access token (input hidden), and the
-[mode](monitoring.md#modes). Validates that the token authenticates and
-can push to that repo, saves the repo and mode to the config file, and
-stores the token in the keyring.
+Writes a starter config without the credential steps. `maajun setup` is
+the recommended entry point; `init --no-interactive` is still useful to
+drop a fully commented template and edit it by hand.
 
 ### `maajun add-repo REPO`
 
@@ -173,7 +201,7 @@ Wipe everything and start fresh: the config directory
 (`~/.config/maajun`), the data directory (clones, the incident database,
 and state — the configured `daemon.workdir` if you changed it), and all
 credentials. Prompts for a typed `yes` first; `-f/--force` skips the
-confirmation. This cannot be undone — run `maajun init` afterwards to set
+confirmation. This cannot be undone — run `maajun setup` afterwards to set
 up again.
 
 | Flag | Meaning |

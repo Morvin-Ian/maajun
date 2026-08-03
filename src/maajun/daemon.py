@@ -98,6 +98,22 @@ code involved. Then respond with ONLY a markdown report in this format:
 """
 
 
+LOCAL_REPO_LABEL = "(local)"
+
+
+class LocalWorkspace:
+    """Stands in for GitWorkspace when no GitHub repo is configured.
+
+    Only `path` is used: in local mode the pipeline analyzes a checkout that
+    is already on disk and writes its report beside the incident database, so
+    there is nothing to clone, branch, commit, or push.
+    """
+
+    def __init__(self, path: Path):
+        self.path = path
+        self.repo = LOCAL_REPO_LABEL
+
+
 def make_permission_policy(mode: str, workspace: Path) -> PermissionCallback | None:
     """suggest -> None (all gated tools denied, agent is read-only).
     fix     -> file edits allowed inside the workspace only; bash denied."""
@@ -126,8 +142,11 @@ class Daemon:
         store: IncidentStore,
         workspaces: dict[str, GitWorkspace],
         monitor_to_repo: dict[str, RepoConfig],
-        github: GitHubClient,
-        agent_factory_factory,
+        github: GitHubClient | None,
+        agent_factory_for_repo,
+        repo_configs: list[RepoConfig] | None = None,
+        report_dir: Path | None = None,
+        local_mode: bool = False,
         notifier: Notifier | None = None,
         progress: ProgressCallback | None = None,
         on_notice: NoticeCallback | None = None,
@@ -138,10 +157,14 @@ class Daemon:
             config: Global configuration
             monitors: List of monitors to poll
             store: Incident deduplication store
-            workspaces: Map of repo name -> GitWorkspace
+            workspaces: Map of repo name -> GitWorkspace (or LocalWorkspace)
             monitor_to_repo: Map of monitor name -> RepoConfig
-            github: GitHub API client
-            agent_factory_factory: Function that returns an agent_factory for a repo config
+            github: GitHub API client, or None in local mode
+            agent_factory_for_repo: (repo_config, workspace) -> () -> Agent
+            repo_configs: Repos to act on, already normalized by _DaemonDeps
+            report_dir: Where local-mode reports are written
+            local_mode: No GitHub configured — analyze and write reports to
+                disk instead of opening pull requests
             notifier: Email notifier
             progress: Advances a UI spinner's phase label while an incident runs
             on_notice: Emits user-facing lines (new error, PR opened, failure)
@@ -152,7 +175,10 @@ class Daemon:
         self.workspaces = workspaces
         self.monitor_to_repo = monitor_to_repo
         self.github = github
-        self.agent_factory_factory = agent_factory_factory
+        self.agent_factory_for_repo = agent_factory_for_repo
+        self.repo_configs = repo_configs or config.github.get_all_repos()
+        self.report_dir = report_dir or Path(config.daemon.workdir).expanduser() / "reports"
+        self.local_mode = local_mode
         self.notifier = notifier or Notifier()
         self.progress = progress or _noop
         self.on_notice = on_notice
@@ -164,7 +190,7 @@ class Daemon:
     def _get_repo_for_monitor(self, monitor_name: str) -> tuple[RepoConfig, GitWorkspace]:
         """Get the repo config and workspace for a given monitor."""
         repo_config = self.monitor_to_repo.get(monitor_name)
-        if not repo_config:
+        if repo_config is None:
             raise ValueError(f"No repo configured for monitor: {monitor_name}")
         workspace = self.workspaces.get(repo_config.repo)
         if not workspace:
@@ -172,12 +198,12 @@ class Daemon:
         return repo_config, workspace
 
     async def run(self, *, once: bool = False, dry_run: bool = False) -> None:
-        repos = [rc.repo for rc in self.config.github.get_all_repos()]
         log.info(
-            "daemon started repos=%s monitors=%s dry_run=%s",
-            repos,
+            "daemon started repos=%s monitors=%s dry_run=%s local=%s",
+            [rc.repo or LOCAL_REPO_LABEL for rc in self.repo_configs],
             [m.name for m in self.monitors],
             dry_run,
+            self.local_mode,
         )
         loop = asyncio.get_running_loop()
         for sig in (signal.SIGTERM, signal.SIGINT):
@@ -258,19 +284,20 @@ class Daemon:
             log.info("new error fp=%s: %s", event.fingerprint, event.message)
             self._notice(f"New error: {event.message[:80]}", "info")
             try:
-                pr_url = await self.handle_incident(
+                destination = await self.handle_incident(
                     event, dry_run=dry_run, progress=self.progress
                 )
                 handled.append(event.fingerprint)
-                if pr_url:
-                    self._notice(f"PR opened: {pr_url}", "success")
+                if destination:
+                    label = "Report written" if self.local_mode else "PR opened"
+                    self._notice(f"{label}: {destination}", "success")
             except Exception as exc:
                 log.exception("incident fp=%s failed", event.fingerprint)
                 self._notice(f"Incident failed: {exc}", "error")
                 self.store.mark_failed(event.fingerprint)
                 repo_config = self.monitor_to_repo.get(monitor.name)
                 await self.notifier.notify_incident_failed(
-                    repo=repo_config.repo if repo_config else "unknown",
+                    repo=(repo_config.repo or LOCAL_REPO_LABEL) if repo_config else "unknown",
                     error_message=event.message,
                     fingerprint=event.fingerprint,
                     reason=str(exc),
@@ -357,8 +384,9 @@ class Daemon:
         progress: ProgressCallback,
     ) -> str:
         """Shared pipeline for incident and manual reports: prepare workspace,
-        run the agent, then either print (dry run) or commit/push/open a PR."""
-        if not dry_run:
+        run the agent, then either print (dry run), write a local report, or
+        commit/push/open a PR."""
+        if not dry_run and not self.local_mode:
             progress("Preparing workspace")
             await workspace.sync(repo_config.base_branch)
             await workspace.create_branch(branch, repo_config.base_branch)
@@ -367,7 +395,7 @@ class Daemon:
             prompt += FIX_PROMPT_SUFFIX.format(workspace=workspace.path)
 
         progress("Analyzing with AI")
-        agent = self.agent_factory_factory(repo_config, workspace)()
+        agent = self.agent_factory_for_repo(repo_config, workspace)()
         try:
             response = await agent.chat(prompt)
         finally:
@@ -381,12 +409,17 @@ class Daemon:
 
         if dry_run:
             self._print_dry_run(
-                dry_run_header, repo_config.repo, report,
+                dry_run_header, repo_config.repo or LOCAL_REPO_LABEL, report,
                 (prompt_tok, comp_tok, cost), dry_run_extra,
             )
             if forget_on_dry_run:
                 self.store.forget(event.fingerprint)
             return ""
+
+        if self.local_mode:
+            return self._save_local_report(
+                event, report, (prompt_tok, comp_tok, cost), progress
+            )
 
         progress("Opening PR")
         self._write_report(workspace, event, report)
@@ -421,6 +454,43 @@ class Daemon:
             fingerprint=event.fingerprint,
         )
         return pr_url
+
+    def _save_local_report(
+        self,
+        event: ErrorEvent,
+        report: str,
+        usage: tuple[int, int, float],
+        progress: ProgressCallback,
+    ) -> str:
+        """Write an incident report to disk. Returns the report path.
+
+        The local-mode counterpart to opening a PR: same analysis, same
+        recorded cost, but nothing leaves the machine.
+        """
+        progress("Writing report")
+        prompt_tok, comp_tok, cost = usage
+        self.report_dir.mkdir(parents=True, exist_ok=True)
+        report_path = self.report_dir / f"{event.fingerprint}.md"
+        report_path.write_text(
+            f"{report}\n\n---\n\n"
+            f"## Error details\n\n```\n{event.details}\n```\n\n"
+            f"- Source: `{event.source}`\n"
+            f"- First seen: {event.timestamp}\n"
+            f"- Fingerprint: `{event.fingerprint}`\n"
+        )
+        self.store.mark_processed(
+            event.fingerprint,
+            branch="",
+            pr_url=str(report_path),
+            cost_usd=cost,
+            prompt_tokens=prompt_tok,
+            completion_tokens=comp_tok,
+        )
+        log.info(
+            "wrote local report %s for fp=%s (cost: $%.4f, tokens: %d/%d)",
+            report_path, event.fingerprint, cost, prompt_tok, comp_tok,
+        )
+        return str(report_path)
 
     @staticmethod
     def _print_dry_run(
@@ -475,40 +545,46 @@ class _DaemonDeps:
     """Credentials and shared state common to every Daemon wiring."""
 
     def __init__(self, config: Config, auth: AuthManager):
-        token = auth.get_github_token()
-        if not token:
-            raise RuntimeError(
-                "No GitHub token. Export GITHUB_TOKEN or run `gh auth login`."
-            )
-
-        repos = config.github.get_all_repos()
-        if not repos:
-            raise RuntimeError(
-                "No github.repo configured. Run `maajun init` and edit the config."
-            )
-
         api_key = auth.get_api_key(config.ai.provider)
         if not api_key:
             raise RuntimeError(
-                f"No API key for {config.ai.provider}. Run `maajun login` "
+                f"No API key for {config.ai.provider}. Run `maajun setup` "
                 f"or set {config.ai.provider.upper()}_API_KEY."
             )
 
         workdir = Path(config.daemon.workdir).expanduser()
-        self.token = token
-        self.repos = repos
-        self.workspaces: dict[str, GitWorkspace] = {}
-        for repo_config in repos:
-            if repo_config.repo not in self.workspaces:
-                self.workspaces[repo_config.repo] = GitWorkspace(
+        self.store = IncidentStore(workdir / "incidents.db")
+        self.report_dir = workdir / "reports"
+
+        repos = config.github.get_all_repos()
+        # GitHub is optional. With no repo configured, errors are still
+        # detected and analyzed — the report lands on disk instead of in a PR.
+        self.local_mode = not repos
+        if self.local_mode:
+            self.token = None
+            self.github = None
+            self.repos = [RepoConfig(mode="suggest")]
+            self.workspaces = {"": LocalWorkspace(_local_repo_path(config))}
+        else:
+            token = auth.get_github_token()
+            if not token:
+                raise RuntimeError(
+                    "A repo is configured but there is no GitHub token. "
+                    "Run `maajun setup`, export GITHUB_TOKEN, or run `gh auth login`."
+                )
+            self.token = token
+            self.github = GitHubClient(token)
+            self.repos = repos
+            self.workspaces = {
+                repo_config.repo: GitWorkspace(
                     workdir / "workspaces", repo_config.repo, token
                 )
-        self.store = IncidentStore(workdir / "incidents.db")
-        self.github = GitHubClient(token)
+                for repo_config in repos
+            }
 
         ai = config.ai.model_copy(update={"api_key": api_key})
 
-        def agent_factory_factory(repo_config: RepoConfig, workspace: GitWorkspace):
+        def agent_factory_for_repo(repo_config: RepoConfig, workspace) -> Callable[[], Agent]:
             def factory() -> Agent:
                 return Agent(
                     Config(ai=AIProviderConfig(**ai.model_dump())),
@@ -516,13 +592,29 @@ class _DaemonDeps:
                 )
             return factory
 
-        self.agent_factory_factory = agent_factory_factory
+        self.agent_factory_for_repo = agent_factory_for_repo
+
+
+def _local_repo_path(config: Config) -> Path:
+    """The checkout local mode analyzes: daemon.repo_path, else the cwd."""
+    path = Path(config.daemon.repo_path or Path.cwd()).expanduser().resolve()
+    if not path.is_dir():
+        raise RuntimeError(
+            f"daemon.repo_path is not a directory: {path}. "
+            "Point it at a local checkout, or configure a GitHub repo."
+        )
+    return path
 
 
 def _build_monitors(
-    config: Config, repos: list[RepoConfig]
+    config: Config, repos: list[RepoConfig], auth: AuthManager | None = None
 ) -> tuple[list[Monitor], dict[str, RepoConfig]]:
-    """Build monitors and map each to the repo whose PRs it should open."""
+    """Build monitors and map each to the repo whose PRs it should open.
+
+    `auth` supplies monitor tokens that are stored in the keyring rather than
+    written into the config file.
+    """
+    auth = auth or AuthManager()
     monitor_cfg = config.monitor
     monitors: list[Monitor] = []
     monitor_to_repo: dict[str, RepoConfig] = {}
@@ -575,6 +667,12 @@ def _build_monitors(
 
     # Declarative instances — any registered monitor type.
     for instance in monitor_cfg.instances:
+        kwargs = instance.monitor_kwargs()
+        # A token kept in the keyring rather than in the config file.
+        if "token" not in kwargs:
+            stored = auth.get_monitor_secret(instance.type)
+            if stored:
+                kwargs["token"] = stored
         repo_config = default_repo
         if instance.repo:
             repo_config = next((rc for rc in repos if rc.repo == instance.repo), None)
@@ -584,7 +682,7 @@ def _build_monitors(
                     "its events will be analyzed but will not open PRs",
                     instance.type, instance.repo,
                 )
-        attach(create(instance.type, **instance.monitor_kwargs()), repo_config)
+        attach(create(instance.type, **kwargs), repo_config)
 
     return monitors, monitor_to_repo
 
@@ -594,8 +692,9 @@ def build_daemon(config: Config, auth: AuthManager | None = None) -> Daemon:
 
     Supports both legacy single-repo and new multi-repo configuration.
     """
-    deps = _DaemonDeps(config, auth or AuthManager())
-    monitors, monitor_to_repo = _build_monitors(config, deps.repos)
+    auth = auth or AuthManager()
+    deps = _DaemonDeps(config, auth)
+    monitors, monitor_to_repo = _build_monitors(config, deps.repos, auth)
     if not monitors:
         raise RuntimeError(
             "No monitors configured. Add log files under [monitor] "
@@ -609,7 +708,10 @@ def build_daemon(config: Config, auth: AuthManager | None = None) -> Daemon:
         workspaces=deps.workspaces,
         monitor_to_repo=monitor_to_repo,
         github=deps.github,
-        agent_factory_factory=deps.agent_factory_factory,
+        agent_factory_for_repo=deps.agent_factory_for_repo,
+        repo_configs=deps.repos,
+        report_dir=deps.report_dir,
+        local_mode=deps.local_mode,
         notifier=Notifier(config.daemon.email),
     )
 
@@ -624,6 +726,9 @@ def build_daemon_for_report(config: Config, auth: AuthManager | None = None) -> 
         workspaces=deps.workspaces,
         monitor_to_repo={},
         github=deps.github,
-        agent_factory_factory=deps.agent_factory_factory,
+        agent_factory_for_repo=deps.agent_factory_for_repo,
+        repo_configs=deps.repos,
+        report_dir=deps.report_dir,
+        local_mode=deps.local_mode,
         notifier=Notifier(config.daemon.email),
     )
