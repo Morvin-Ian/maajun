@@ -1,6 +1,6 @@
 # Maajun
 
-[![CI](https://github.com/Morvin-Ian/maajun/actions/workflows/ci.yml/badge.svg)](https://github.com/Morvin-Ian/maajun/actions/workflows/ci.yml)
+[![CI](https://github.com/Morvin-Ian/maajun/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/Morvin-Ian/maajun/actions/workflows/ci.yml?query=branch%3Amain)
 [![PyPI](https://img.shields.io/pypi/v/maajun.svg)](https://pypi.org/project/maajun/)
 [![Python](https://img.shields.io/pypi/pyversions/maajun.svg)](https://pypi.org/project/maajun/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
