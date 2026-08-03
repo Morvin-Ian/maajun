@@ -711,3 +711,167 @@ async def test_cap_warning_reports_the_configured_amount(setup):
     warning = next(msg for lvl, msg in notices if lvl == "warn")
     assert "$0.005" in warning
     assert "$0.01" not in warning
+
+
+# ---------------------------------------------------------------------------
+# Deploy blame
+# ---------------------------------------------------------------------------
+
+
+async def test_prompt_offers_recent_commits_for_blame(setup):
+    """The clone is already on disk; naming the likely commit is nearly free."""
+    daemon, logfile, agent, github, store, remote = setup
+
+    with open(logfile, "a") as f:
+        f.write(TRACEBACK)
+    await daemon.poll_once()
+
+    prompt = agent.prompts[0]
+    assert "Likely cause commit" in prompt
+    assert "Recent commits on main" in prompt
+    assert "initial" in prompt  # the seed commit's subject
+
+
+async def test_local_mode_without_git_history_omits_the_section(tmp_path):
+    """A plain directory has no commits; don't invite the model to invent one."""
+    from maajun.daemon import LocalWorkspace
+
+    logfile = tmp_path / "app.log"
+    logfile.write_text("")
+    checkout = tmp_path / "plain"
+    checkout.mkdir()
+
+    repo_config = RepoConfig(mode="suggest")
+    config = Config(
+        monitor=MonitorConfig(log_files=[str(logfile)]),
+        daemon=DaemonConfig(workdir=str(tmp_path / "work")),
+    )
+    agent = FakeAgent()
+    monitor = LogFileMonitor(logfile)
+    daemon = Daemon(
+        config,
+        monitors=[monitor],
+        store=IncidentStore(tmp_path / "work" / "i.db"),
+        workspaces={"": LocalWorkspace(checkout)},
+        monitor_to_repo={monitor.name: repo_config},
+        github=None,
+        agent_factory_for_repo=lambda rc, ws: lambda: agent,
+        repo_configs=[repo_config],
+        report_dir=tmp_path / "work" / "reports",
+        local_mode=True,
+    )
+
+    with open(logfile, "a") as f:
+        f.write(TRACEBACK)
+    await daemon.poll_once()
+
+    assert "Recent commits" not in agent.prompts[0]
+
+
+async def test_unreadable_git_history_does_not_break_the_incident(setup):
+    """History is a nice-to-have; failing to read it must not abort analysis."""
+    daemon, logfile, agent, github, store, remote = setup
+    workspace = daemon.workspaces["owner/name"]
+
+    async def boom(limit=0):
+        raise RuntimeError("git exploded")
+
+    workspace.recent_commits = boom
+
+    with open(logfile, "a") as f:
+        f.write(TRACEBACK)
+    handled = await daemon.poll_once()
+
+    assert len(handled) == 1
+    assert "Recent commits" not in agent.prompts[0]
+
+
+# ---------------------------------------------------------------------------
+# Per-cycle incident bound
+# ---------------------------------------------------------------------------
+
+
+_DISTINCT_WORDS = ("alpha", "bravo", "charlie", "delta", "echo", "foxtrot")
+
+
+def _distinct_errors(count: int) -> str:
+    """Errors with genuinely different fingerprints.
+
+    Numbered messages ("failure 1", "failure 2") all collapse to one incident,
+    because fingerprinting strips digits so the same crash at a different line
+    number stays one error.
+    """
+    lines = [f"ERROR {word} subsystem broke" for word in _DISTINCT_WORDS[:count]]
+    return "\n".join([*lines, "INFO end", ""])
+
+
+async def test_cycle_limit_bounds_a_burst_of_novel_errors(setup):
+    """The daily cap bounds the day; this bounds one poll."""
+    daemon, logfile, agent, github, store, remote = setup
+    daemon.config.daemon.max_incidents_per_cycle = 2
+
+    with open(logfile, "a") as f:
+        f.write(_distinct_errors(5))
+
+    handled = await daemon.poll_once()
+    assert len(handled) == 2
+    assert len(github.issues) == 2
+
+
+async def test_errors_beyond_the_cycle_limit_are_picked_up_next_poll(setup):
+    daemon, logfile, agent, github, store, remote = setup
+    daemon.config.daemon.max_incidents_per_cycle = 2
+
+    with open(logfile, "a") as f:
+        f.write(_distinct_errors(5))
+    await daemon.poll_once()
+
+    # Same lines re-read on the next poll (the deferred ones were forgotten).
+    with open(logfile, "a") as f:
+        f.write(_distinct_errors(5))
+    handled = await daemon.poll_once()
+
+    assert len(handled) == 2
+    assert len(github.issues) == 4
+
+
+async def test_cycle_limit_resets_each_poll(setup):
+    daemon, logfile, agent, github, store, remote = setup
+    daemon.config.daemon.max_incidents_per_cycle = 1
+
+    for word in ("alpha", "beta", "gamma"):
+        with open(logfile, "a") as f:
+            f.write(f"ERROR {word} broke\nINFO end\n")
+        assert len(await daemon.poll_once()) == 1
+
+
+async def test_zero_means_unlimited(setup):
+    daemon, logfile, agent, github, store, remote = setup
+    daemon.config.daemon.max_incidents_per_cycle = 0
+
+    with open(logfile, "a") as f:
+        f.write(_distinct_errors(4))
+
+    assert len(await daemon.poll_once()) == 4
+
+
+async def test_cycle_limit_counts_failed_attempts_too(setup):
+    """A failed incident still made an AI call, so it must count.
+
+    Regression: the counter incremented only on success, so a run where every
+    incident failed analyzed an unbounded number of errors.
+    """
+    daemon, logfile, agent, github, store, remote = setup
+    daemon.config.daemon.max_incidents_per_cycle = 2
+
+    async def boom(*args, **kwargs):
+        raise RuntimeError("provider rejected the key")
+
+    github.create_issue = boom
+
+    with open(logfile, "a") as f:
+        f.write(_distinct_errors(5))
+    await daemon.poll_once()
+
+    attempted = [row for row in store.all() if row["status"] == "failed"]
+    assert len(attempted) == 2

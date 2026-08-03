@@ -58,8 +58,9 @@ DEEPSEEK_API_KEY=... GITHUB_TOKEN=... \
 ```
 
 Tweak any setting later with `maajun config <key> <value>`, watch more
-than one repo with `maajun add-repo <owner/name>`, and re-check your
-wiring with `maajun status`. Each new error becomes one artifact:
+than one repo with `maajun add-repo <owner/name>`, re-check your wiring
+with `maajun status`, and review what it did with `maajun incidents`.
+Each new error becomes one artifact:
 
 ```
 error detected ──▶ fingerprint & dedup ──▶ AI analyzes your code

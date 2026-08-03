@@ -126,6 +126,22 @@ class GitWorkspace:
     async def diff_stat(self) -> str:
         return await self._git("diff", "--stat", "HEAD~1")
 
+    async def recent_commits(self, limit: int = 10) -> list[str]:
+        """The newest commits on the checked-out branch, as "sha subject".
+
+        Feeds deploy blame: an error that started after a specific commit is
+        the single most useful thing to tell whoever is on call, and the clone
+        is already on disk when the analysis runs.
+        """
+        try:
+            output = await self._git(
+                "log", f"-{limit}", "--no-merges", "--format=%h %s",
+            )
+        except GitError:
+            # A shallow or freshly-initialized clone has no history to show.
+            return []
+        return [line for line in output.splitlines() if line.strip()]
+
     def _run_shell(self, command: str, timeout: float) -> CommandResult:
         try:
             proc = subprocess.run(

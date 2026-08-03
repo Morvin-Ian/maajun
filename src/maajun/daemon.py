@@ -61,8 +61,22 @@ code involved. Then respond with ONLY a markdown report in this format:
 ## Root cause
 <your analysis, referencing files and lines in the repo>
 
+## Likely cause commit
+<the commit below that most plausibly introduced this, with one line of
+reasoning; write "Unclear" if none of them touch the code involved>
+
 ## Suggested fix
 <concrete change(s), with code snippets where helpful>
+"""
+
+RECENT_COMMITS_SECTION = """
+Recent commits on {branch}, newest first — one of these may have introduced
+the error. Use git_status and read_file to check what they touched; do not
+guess from the subject line alone.
+
+```
+{commits}
+```
 """
 
 FIX_PROMPT_SUFFIX = """
@@ -96,6 +110,9 @@ code involved. Then respond with ONLY a markdown report in this format:
 <concrete change(s), with code snippets where helpful>
 """
 
+
+# How many commits of history to offer the model for deploy blame.
+RECENT_COMMIT_LIMIT = 15
 
 LOCAL_REPO_LABEL = "(local)"
 
@@ -180,6 +197,8 @@ class Daemon:
         self.on_notice = on_notice
         # UTC day we have already warned about hitting the spend cap on.
         self._budget_warned_for = ""
+        # Incidents analyzed so far in the current poll cycle.
+        self._handled_this_cycle = 0
 
     def _notice(self, message: str, level: str = "info") -> None:
         if self.on_notice:
@@ -210,6 +229,46 @@ class Daemon:
             log.warning(message)
             self._notice(message, "warn")
         return True
+
+    def _cycle_full(self) -> bool:
+        """Whether this poll cycle has already analyzed its allowance.
+
+        The daily cap bounds the day; this bounds the burst. Fifty novel
+        fingerprints in one cycle would otherwise be fifty AI calls back to
+        back. The remainder is picked up on the next poll.
+        """
+        limit = self.config.daemon.max_incidents_per_cycle
+        if limit <= 0 or self._handled_this_cycle < limit:
+            return False
+        log.info(
+            "reached max_incidents_per_cycle (%d); remaining errors will be "
+            "picked up on the next poll", limit,
+        )
+        return True
+
+    async def _recent_commits_section(
+        self, repo_config: RepoConfig, workspace
+    ) -> str:
+        """Commit history for the prompt, so the report can blame a deploy.
+
+        Empty when there is no history to offer (a bare local directory, a
+        shallow clone) — the report simply omits the section rather than the
+        model inventing a commit.
+        """
+        getter = getattr(workspace, "recent_commits", None)
+        if getter is None:
+            return ""
+        try:
+            commits = await getter(limit=RECENT_COMMIT_LIMIT)
+        except Exception:
+            log.debug("could not read recent commits", exc_info=True)
+            return ""
+        if not commits:
+            return ""
+        return RECENT_COMMITS_SECTION.format(
+            branch=repo_config.base_branch or "the checked-out branch",
+            commits="\n".join(commits),
+        )
 
     def _artifact_label(self, monitor: Monitor) -> str:
         """What this monitor's incidents produce, for user-facing lines."""
@@ -292,6 +351,7 @@ class Daemon:
                 log.exception("monitor %s failed to poll", monitor.name)
                 return None
 
+        self._handled_this_cycle = 0
         results = await asyncio.gather(*(poll(m) for m in self.monitors))
 
         handled: list[str] = []
@@ -314,13 +374,17 @@ class Daemon:
             if not self.store.record(event):
                 log.debug("known error fp=%s", event.fingerprint)
                 continue
-            if not dry_run and self._over_budget():
-                # Forget it so tomorrow's poll treats the error as new rather
+            if not dry_run and (self._over_budget() or self._cycle_full()):
+                # Forget it so a later poll treats the error as new rather
                 # than silently dropping it forever.
                 self.store.forget(event.fingerprint)
                 continue
             log.info("new error fp=%s: %s", event.fingerprint, event.message)
             self._notice(f"New error: {event.message[:80]}", "info")
+            # Counted before the attempt, not after it succeeds: the limit
+            # exists to bound AI calls, and a failed incident has already
+            # made (and paid for) one.
+            self._handled_this_cycle += 1
             try:
                 destination = await self.handle_incident(
                     event, dry_run=dry_run, progress=self.progress
@@ -367,6 +431,7 @@ class Daemon:
                 f"Source: {event.source}  |  Fingerprint: {event.fingerprint}",
             ),
             forget_on_dry_run=True,
+            blame_deploy=True,
             dry_run=dry_run,
             progress=progress,
         )
@@ -412,6 +477,7 @@ class Daemon:
         dry_run_header: str,
         dry_run_extra: tuple[str, ...] = (),
         forget_on_dry_run: bool = False,
+        blame_deploy: bool = False,
         dry_run: bool,
         progress: ProgressCallback,
     ) -> str:
@@ -426,6 +492,11 @@ class Daemon:
             await workspace.sync(repo_config.base_branch)
             if opens_pull_request:
                 await workspace.create_branch(branch, repo_config.base_branch)
+
+        # Appended after sync, not when the prompt was built: the clone has to
+        # exist before there is any history to read.
+        if blame_deploy:
+            prompt += await self._recent_commits_section(repo_config, workspace)
 
         if repo_config.mode == "fix":
             prompt += FIX_PROMPT_SUFFIX.format(workspace=workspace.path)
