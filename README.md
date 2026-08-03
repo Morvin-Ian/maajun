@@ -5,93 +5,34 @@
 [![Python](https://img.shields.io/pypi/pyversions/maajun.svg)](https://pypi.org/project/maajun/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](https://github.com/Morvin-Ian/maajun/blob/main/LICENSE)
 
-**Error monitoring that files the bug report — and can write the fix.**
+Error monitoring that files the bug report — and can write the fix.
 
-Maajun watches your error sources — local log files (e.g. your app's error
-log on a VPS) and failed GitHub Actions runs — and when a new error
-appears it investigates the code and documents the incident on GitHub:
-in *suggest* mode it files an issue with the analysis and a suggested fix;
-in *fix* mode it applies the fix on a branch, runs your test suite against
-it, and opens a pull request with the result. It records what each analysis
-cost, caps what it may spend per day, and never reports the same error twice.
+Maajun watches your error sources, investigates each new error against your
+source code, and documents it on GitHub. In `suggest` mode it opens an issue
+containing the root-cause analysis and a proposed patch. In `fix` mode it
+applies the patch on a branch, runs your test suite against it, and opens a
+pull request with the result.
 
-```
-error detected ──▶ fingerprint & dedup ──▶ AI reads your code
-  (logs / CI)                                        │
-   issue (suggest) ◀───────────────────────────────  ┤
-   PR    (fix)     ◀──── branch + applied fix ───────┘
-```
+Nothing merges without your review, in either mode.
 
-## What it actually files
+**Contents** — [Requirements](#requirements) · [Installation](#installation) ·
+[Quick start](#quick-start) · [How it works](#how-it-works) ·
+[Modes](#modes) · [AI providers](#ai-providers) ·
+[Configuration](#configuration) · [Commands](#commands) ·
+[Cost control](#cost-control) · [Security model](#security-model) ·
+[Documentation](#documentation)
 
-An unhandled `KeyError` hits your error log at 3 a.m. Nobody is awake. By
-morning there is an issue on the repo — this is the shape of it (`suggest`
-mode, the default):
+## Requirements
 
-> ### \[maajun] KeyError: 'discount'
->
-> # `KeyError: 'discount'` when a cart has no promotion applied
->
-> ## What happened
->
-> Checkout raised an unhandled `KeyError` for carts created before a
-> promotion was attached. 41 requests hit it in 12 minutes; every one
-> returned a 500 to the customer at the payment step.
->
-> ## Root cause
->
-> `cart/totals.py:88` reads `cart["discount"]` directly. The key is only
-> written by `promotions.apply()` (`cart/promotions.py:23`), which is
-> skipped entirely when no promotion matches — so the key is absent rather
-> than zero. The `.get()` used one line above at `totals.py:87` is what
-> makes the omission easy to miss on review.
->
-> ## Likely cause commit
->
-> `4f1c9ab` — *"only apply promotions when one matches"*. It added the
-> early return in `promotions.apply()` that leaves `discount` unset; every
-> caller before it could assume the key existed.
->
-> ## Suggested fix
->
-> Default the lookup, so an absent promotion means no discount:
->
-> ```python
-> -    discount = cart["discount"]
-> +    discount = cart.get("discount", Decimal("0"))
-> ```
->
-> ---
->
-> ## Error details
->
-> ```
-> Traceback (most recent call last):
->   File "/srv/shop/checkout/views.py", line 142, in post
->     total = compute_total(cart)
->   File "/srv/shop/cart/totals.py", line 88, in compute_total
->     discount = cart["discount"]
-> KeyError: 'discount'
-> ```
->
-> - Source: `logfile:/var/log/shop/error.log`
-> - First seen: 2026-08-03T03:14:22Z
-> - Fingerprint: `9f3c1ab77e02d418`
-> - Opened automatically by [maajun](https://github.com/Morvin-Ian/maajun).
+- Python 3.11 or newer
+- An API key for DeepSeek or OpenAI — see [AI providers](#ai-providers)
+- Optional: a GitHub token, to open issues and pull requests
 
-In `fix` mode the same analysis arrives as a **pull request** instead: the
-applied diff, the report committed as `docs/incidents/<fingerprint>.md`, and
-your own test suite's verdict at the top of the body —
+Log-file monitoring reads files on the local machine, so the daemon has to run
+on the server that writes them. The GitHub Actions monitor works from anywhere
+with network access.
 
-> ✅ **Tests pass** — `pytest -q`
-> <details><summary>Output</summary>…</details>
-
-— or `❌ **Tests fail** (exit 1)`, which still opens the PR, because
-"this fix breaks the suite" is exactly what a reviewer needs to know.
-
-**Nothing merges without your review**, in either mode.
-
-## Install
+## Installation
 
 ```bash
 uv tool install maajun     # or: pipx install maajun / pip install maajun
@@ -105,99 +46,257 @@ git clone https://github.com/Morvin-Ian/maajun && cd maajun && uv sync
 
 ## Quick start
 
-Investigate something right now, without setting up any monitoring:
+### Investigate one issue
+
+No monitoring setup required — describe the problem and let maajun read the
+code:
 
 ```bash
-maajun setup                                           # stores your API key
+maajun setup                                    # pick a provider, store its key
 maajun report "Checkout 500s when the cart is empty"
 ```
 
-That clones your repo, reads the code, and files an issue with a root-cause
-report (`-m fix` opens a PR with the fix applied instead; `--dry-run`
-just prints the analysis). Get a DeepSeek API key at
-[platform.deepseek.com](https://platform.deepseek.com).
+This clones the target repo, analyzes it, and files an issue with a root-cause
+report. Add `-m fix` to open a pull request with the fix applied, or
+`--dry-run` to print the analysis and its cost without touching GitHub.
 
-## Quick start: continuous monitoring
-
-One command sets up everything:
+### Monitor continuously
 
 ```bash
-maajun setup           # API key, GitHub, log files, GitHub Actions
-maajun watch --dry-run # analyze errors without opening PRs — test your config
-maajun watch           # keep monitoring
+maajun setup             # provider key, GitHub, log files, GitHub Actions
+maajun watch --dry-run   # analyze real errors without opening PRs
+maajun watch             # run the daemon
 ```
 
-Only the API key is required. `setup` offers GitHub, log files, and GitHub
-Actions in turn, and each is skippable with Enter — so a minimal install
-is a key and a log path. It detects your repo from the git remote and
-picks up an existing `GITHUB_TOKEN` or `gh auth login` session, and it
-re-runs safely: every answer defaults to what you already have.
+`setup` asks for the provider and its key, then offers GitHub, log files, and
+GitHub Actions in turn — each skippable with Enter, so a minimal install is a key and a log
+path. It detects the repo from your `origin` remote, reuses an existing
+`GITHUB_TOKEN` or `gh auth login` session, and re-runs safely: every prompt
+defaults to your current configuration.
 
-Without a GitHub repo, maajun still detects and analyzes errors — the
-incident report is written under `daemon.workdir` instead of opening a
-pull request. Add a repo whenever you want PRs:
-
-```bash
-maajun setup --repo you/yourapp    # or re-run 'maajun setup' interactively
-```
-
-For CI, every prompt has a flag, and secrets come from the environment so
-they never reach shell history:
+For unattended setup, every prompt has a flag and secrets come from the
+environment:
 
 ```bash
 DEEPSEEK_API_KEY=... GITHUB_TOKEN=... \
   maajun setup --non-interactive --repo you/yourapp --logs /var/log/app/error.log
+
+OPENAI_API_KEY=... GITHUB_TOKEN=... \
+  maajun setup --non-interactive --provider openai --repo you/yourapp \
+    --logs /var/log/app/error.log
 ```
 
-Tweak any setting later with `maajun config <key> <value>`, watch more
-than one repo with `maajun add-repo <owner/name>`, re-check your wiring
-with `maajun status`, and review what it did with `maajun incidents`.
+Without a configured repo, maajun runs in **local mode**: errors are still
+detected and analyzed, but each report is written to
+`<workdir>/reports/<fingerprint>.md` instead of opening a pull request.
 
-The same error is never reported twice — repeat sightings only bump a counter.
+## How it works
 
-## What it costs, and what it can do
+1. **Detect** — a monitor picks up a new error from a log file or a failed
+   GitHub Actions run.
+2. **Deduplicate** — each error is fingerprinted. The same error is never
+   reported twice; repeat sightings bump a counter on the existing incident.
+3. **Analyze** — the agent reads the relevant source in a clone under
+   `daemon.workdir` and produces a *what happened / root cause / suggested fix*
+   report, including the commit that likely introduced the bug.
+4. **Report** — an issue in `suggest` mode, or a branch, a test run, and a pull
+   request in `fix` mode.
 
-Both questions people reasonably ask before pointing an AI daemon at their
-repo with their API key in it:
+Each incident records its token count and cost, viewable with
+`maajun incidents`.
 
-**Spend is bounded by default.** `daemon.max_usd_per_day` starts at **$5**:
-past that, maajun stops analyzing for the rest of the UTC day, warns once,
-and keeps polling — skipped errors are picked up later, not dropped. Raise
-it with `maajun config daemon.max_usd_per_day 20`, or set `0` for no cap.
+### Example report
+
+The shape of a filed issue, abridged:
+
+> ### \[maajun] KeyError: 'discount'
+>
+> **What happened** — Checkout raised an unhandled `KeyError` for carts created
+> before a promotion was attached. 41 requests hit it in 12 minutes; every one
+> returned a 500 at the payment step.
+>
+> **Root cause** — `cart/totals.py:88` reads `cart["discount"]` directly. The
+> key is only written by `promotions.apply()` (`cart/promotions.py:23`), which
+> returns early when no promotion matches — so the key is absent rather than
+> zero.
+>
+> **Likely cause commit** — `4f1c9ab` *"only apply promotions when one
+> matches"*, which added that early return.
+>
+> **Suggested fix**
+>
+> ```python
+> -    discount = cart["discount"]
+> +    discount = cart.get("discount", Decimal("0"))
+> ```
+>
+> Source: `logfile:/var/log/shop/error.log` · First seen:
+> `2026-08-03T03:14:22Z` · Fingerprint: `9f3c1ab77e02d418`
+
+In `fix` mode the same analysis arrives as a pull request: the applied diff, the
+report committed as `docs/incidents/<fingerprint>.md`, and your test suite's
+verdict at the top of the body.
+
+> ✅ **Tests pass** — `pytest -q`
+
+A failing suite (`❌ Tests fail (exit 1)`) still opens the PR — a fix that
+breaks the tests is exactly what a reviewer needs to see.
+
+## Modes
+
+| Mode | Files | Output |
+|------|-------|--------|
+| `suggest` (default) | Read-only | Issue with analysis and a suggested patch |
+| `fix` | Edits its own clone under `daemon.workdir` | Branch + test run + pull request |
+
+Switch with `maajun config github.mode fix`, or per run with
+`-m/--mode` on `watch` and `report`.
+
+## AI providers
+
+DeepSeek and OpenAI are both fully supported and interchangeable — pick either
+during `maajun setup`.
+
+| | DeepSeek | OpenAI |
+|---|---|---|
+| `ai.provider` | `deepseek` | `openai` |
+| Default model | `deepseek-v4-flash` | `gpt-4o-mini` |
+| With `ai.thinking_mode` | `deepseek-v4-pro` | `gpt-4o` |
+| API key | [platform.deepseek.com](https://platform.deepseek.com) | [platform.openai.com/api-keys](https://platform.openai.com/api-keys) |
+| Environment variable | `DEEPSEEK_API_KEY` | `OPENAI_API_KEY` |
+
+Switch at any time — the key for each provider is stored separately, so moving
+back and forth costs nothing:
+
+```bash
+maajun config ai.provider openai
+maajun config ai.model gpt-4o        # override the default model
+maajun provider-list                 # which providers have a key stored
+```
+
+Both speak the same `/chat/completions` protocol, so any compatible gateway,
+proxy, or self-hosted server works too — point `ai.base_url` at it, and
+`ai.provider` still selects the request dialect and model defaults.
+
+## Configuration
+
+Settings live in `~/.config/maajun/config.toml`; pass `-c/--config PATH` to any
+command to use another file. `setup` writes it for you, and `maajun config`
+edits it in place with validation and comment preservation:
+
+```bash
+maajun config                      # print the whole config (secrets masked)
+maajun config github.mode          # print one value
+maajun config github.mode fix      # set a value
+```
+
+A minimal config:
+
+```toml
+[ai]
+provider = "deepseek"         # or "openai"
+# model = "gpt-4o-mini"       # provider default if omitted
+# thinking_mode = true        # use the provider's reasoning model
+
+[github]
+repo = "owner/name"           # "" for local mode
+base_branch = "main"
+mode = "suggest"
+# test_command = "pytest -q"  # verifies a fix-mode edit; result goes in the PR
+
+[monitor]
+log_files = ["/var/log/myapp/error.log"]
+poll_interval = 30
+# github_actions_repos = ["owner/name"]
+
+[daemon]
+workdir = "~/.local/share/maajun"   # clones, incident DB, state
+# max_usd_per_day = 5.0             # 0 = no cap
+```
+
+At least one error source — log files or GitHub Actions — must be configured;
+the daemon refuses to start with nothing to watch. See the
+[monitoring guide](https://github.com/Morvin-Ian/maajun/blob/main/docs/monitoring.md)
+for every key, detection tuning, and multi-repo setups.
+
+Credentials are never stored in this file. Environment variables win
+(`DEEPSEEK_API_KEY`, `OPENAI_API_KEY`, `GITHUB_TOKEN`); otherwise keys are read
+from the OS keyring under the service name `maajun`.
+
+## Commands
+
+| Command | Purpose |
+|---------|---------|
+| `maajun setup` | Configure everything — provider key, GitHub, error sources |
+| `maajun status` | Preflight check of credentials, repo access, and monitors |
+| `maajun watch` | Run the monitoring daemon (`--once`, `--dry-run`, `-m`) |
+| `maajun report "…"` | Investigate an issue you describe, on demand |
+| `maajun incidents` | List handled incidents with status, cost, and links |
+| `maajun config [KEY] [VALUE]` | View or change settings |
+| `maajun add-repo OWNER/NAME` | Watch an additional repository |
+| `maajun provider-list` | Show provider support and stored keys |
+| `maajun sign-out` | Clear stored credentials |
+| `maajun reset` | Delete all config, data, and credentials |
+
+Run `maajun <command> --help` for the full flag list, or see the
+[command reference](https://github.com/Morvin-Ian/maajun/blob/main/docs/commands.md).
+
+## Cost control
+
+`daemon.max_usd_per_day` defaults to **$5**. Past that, maajun stops analyzing
+for the rest of the UTC day, warns once, and keeps polling — skipped errors are
+picked up later, not dropped.
+
+```bash
+maajun config daemon.max_usd_per_day 20   # raise the cap; 0 disables it
+```
+
 Every incident's exact token count and cost is recorded and shown by
-`maajun incidents`; `--dry-run` prints what an analysis *would* have cost
-before you commit to anything. At DeepSeek's published rate ($0.27/$1.10 per
-1M input/output tokens) an analysis is cents, not dollars — but measure your
-own with `--dry-run` rather than trusting an estimate.
+`maajun incidents`, and `--dry-run` prints what an analysis *would* have cost.
 
-**The agent is deliberately small.** It has no shell access in any mode —
-there is no bash tool to grant. In `suggest` mode it is strictly read-only;
-in `fix` mode it may edit files *only* inside its own clone under
-`daemon.workdir`, never your running application. Your `test_command` comes
-from your config, not from the model, so verification can't be redirected.
-The GitHub token is passed to git via `GIT_ASKPASS` and never lands in a
-remote URL, `.git/config`, or the process list.
+Costs are computed from published list prices, in USD per 1M input / output
+tokens:
+
+| Model | Input | Output |
+|---|---|---|
+| `deepseek-v4-flash` | $0.27 | $1.10 |
+| `deepseek-v4-pro` | $1.10 | $4.40 |
+| `gpt-4o-mini` | $0.15 | $0.60 |
+| `gpt-4o` | $2.50 | $10.00 |
+
+On either provider's default model a single analysis costs cents, not dollars —
+but measure your own workload with `--dry-run` rather than trusting an
+estimate. Rates change; verify them against
+[DeepSeek](https://api-docs.deepseek.com/quick_start/pricing) or
+[OpenAI](https://openai.com/api/pricing/) before relying on the cap, and note
+that a model with no entry is priced at a deliberately conservative $1.00 /
+$3.00 so the cap never overshoots.
+
+## Security model
+
+- **No shell access.** The agent has no bash tool in any mode; there is nothing
+  to grant.
+- **Scoped writes.** `suggest` mode is strictly read-only. `fix` mode may edit
+  files only inside maajun's own clone under `daemon.workdir`, never your
+  running application.
+- **Verification you control.** `test_command` comes from your config, not from
+  the model, so a fix cannot redirect its own verification.
+- **Token hygiene.** The GitHub token is passed to git via `GIT_ASKPASS`; it
+  never lands in a remote URL, `.git/config`, or the process list.
 
 ## Documentation
 
 - [How it works](https://github.com/Morvin-Ian/maajun/blob/main/docs/architecture.md)
   — components, monitors, and the incident pipeline
 - [Monitoring guide](https://github.com/Morvin-Ian/maajun/blob/main/docs/monitoring.md)
-  — config reference, error sources (logs, GitHub Actions), cost tracking,
-  running on a VPS
+  — full config reference, error sources, cost tracking, running on a VPS
 - [Command reference](https://github.com/Morvin-Ian/maajun/blob/main/docs/commands.md)
   — every CLI command and flag
-
-## Supported AI providers
-
-DeepSeek and OpenAI. Both speak the same wire protocol, so any compatible
-gateway works too — point `ai.base_url` at it. Pick one during
-`maajun setup`, or switch later with `maajun config ai.provider openai`.
 
 ## Development
 
 ```bash
-uv sync            # installs dev dependencies (pytest, ruff)
+uv sync            # install dev dependencies (pytest, ruff)
 uv run pytest      # run tests
 uv run ruff check  # lint
 ```
