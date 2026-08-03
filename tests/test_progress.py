@@ -2,7 +2,7 @@
 
 from rich.console import Console
 
-from maajun.progress import ThinkingStatus, WorkingStatus, working
+from maajun.progress import WorkingStatus, working
 
 
 def _render(renderable) -> str:
@@ -33,10 +33,6 @@ def test_working_status_set_same_phase_keeps_timer():
     before = status._started
     status.set("Analyzing with AI")
     assert status._started == before
-
-
-def test_thinking_status_renders_a_word():
-    assert "…" in _render(ThinkingStatus())
 
 
 def test_working_context_manager_yields_status():
