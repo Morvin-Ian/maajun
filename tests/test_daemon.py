@@ -512,3 +512,93 @@ async def test_local_mode_notice_says_report_not_pr(local_setup):
 async def test_local_mode_aclose_survives_no_github_client(local_setup):
     daemon, logfile, agent, store, checkout = local_setup
     await daemon.aclose()  # must not blow up on github=None
+
+
+# ---------------------------------------------------------------------------
+# Daily spend cap
+# ---------------------------------------------------------------------------
+
+
+def _seed_spend(store, fingerprint: str, cost: float) -> None:
+    """Record an already-paid-for incident so today's spend is non-zero."""
+    from maajun.monitors import ErrorEvent
+
+    store.record(ErrorEvent(
+        source="test", message="prior", details="prior", fingerprint=fingerprint,
+    ))
+    store.mark_processed(fingerprint, branch="", pr_url="x", cost_usd=cost)
+
+
+async def test_spend_cap_stops_further_analysis(setup):
+    """An unattended daemon must not be an unbounded bill."""
+    daemon, logfile, agent, github, store, remote = setup
+    daemon.config.daemon.max_usd_per_day = 0.01
+    _seed_spend(store, "earlier", 0.02)
+
+    with open(logfile, "a") as f:
+        f.write(TRACEBACK)
+    handled = await daemon.poll_once()
+
+    assert handled == []
+    assert github.issues == []
+    assert agent.prompts == []  # no AI call was made
+
+
+async def test_capped_error_is_retried_later(setup):
+    """Skipping for budget must not blacklist the error forever."""
+    daemon, logfile, agent, github, store, remote = setup
+    daemon.config.daemon.max_usd_per_day = 0.01
+    _seed_spend(store, "earlier", 0.02)
+
+    with open(logfile, "a") as f:
+        f.write(TRACEBACK)
+    await daemon.poll_once()
+
+    # Cap raised (or a new day) — the same error is picked up again.
+    daemon.config.daemon.max_usd_per_day = 100.0
+    with open(logfile, "a") as f:
+        f.write(TRACEBACK)
+    handled = await daemon.poll_once()
+
+    assert len(handled) == 1
+    assert len(github.issues) == 1
+
+
+async def test_spend_cap_warns_once_per_day(setup):
+    daemon, logfile, agent, github, store, remote = setup
+    daemon.config.daemon.max_usd_per_day = 0.01
+    _seed_spend(store, "earlier", 0.05)
+    notices: list[tuple[str, str]] = []
+    daemon.on_notice = lambda message, level: notices.append((level, message))
+
+    for _ in range(3):
+        with open(logfile, "a") as f:
+            f.write(TRACEBACK)
+        await daemon.poll_once()
+
+    warnings = [msg for lvl, msg in notices if lvl == "warn"]
+    assert len(warnings) == 1
+    assert "spend cap reached" in warnings[0]
+    assert "$0.01" in warnings[0]
+
+
+async def test_no_cap_by_default(setup):
+    daemon, logfile, agent, github, store, remote = setup
+    _seed_spend(store, "earlier", 999.0)
+
+    with open(logfile, "a") as f:
+        f.write(TRACEBACK)
+    assert len(await daemon.poll_once()) == 1
+
+
+async def test_dry_run_ignores_the_cap(setup):
+    """--dry-run costs money too, but it's an explicit interactive request."""
+    daemon, logfile, agent, github, store, remote = setup
+    daemon.config.daemon.max_usd_per_day = 0.01
+    _seed_spend(store, "earlier", 0.02)
+
+    with open(logfile, "a") as f:
+        f.write(TRACEBACK)
+    await daemon.poll_once(dry_run=True)
+
+    assert agent.prompts  # the analysis still ran

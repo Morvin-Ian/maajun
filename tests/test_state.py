@@ -111,3 +111,23 @@ def test_forget_drops_incident_so_it_records_as_new(store):
     store.forget(e.fingerprint)
     assert store.get(e.fingerprint) is None
     assert store.record(e) is True
+
+
+def test_cost_since_only_counts_recent_incidents(tmp_path):
+    from maajun.utils import utc_day_start_iso
+
+    store = IncidentStore(tmp_path / "i.db")
+    for fingerprint, cost in (("old", 5.0), ("today", 0.25)):
+        store.record(ErrorEvent(
+            source="t", message=fingerprint, details=fingerprint,
+            fingerprint=fingerprint,
+        ))
+        store.mark_processed(fingerprint, branch="", pr_url="x", cost_usd=cost)
+    store._conn.execute(
+        "UPDATE incidents SET last_seen = ? WHERE fingerprint = ?",
+        ("2020-01-01T00:00:00+00:00", "old"),
+    )
+    store._conn.commit()
+
+    assert store.cost_since(utc_day_start_iso()) == 0.25
+    assert store.total_cost() == 5.25

@@ -56,6 +56,7 @@ poll_interval = 30            # seconds between polls
 [daemon]
 workdir = "~/.local/share/maajun"   # clones, incident DB, state
 # repo_path = "/srv/myapp"          # local checkout to analyze in local mode
+# max_usd_per_day = 5.0             # stop analyzing past this daily spend
 ```
 
 At least one error source must be configured — log files or GitHub
@@ -331,6 +332,23 @@ sqlite3 ~/.local/share/maajun/incidents.db \
   "SELECT COUNT(*), SUM(cost_usd) FROM incidents WHERE status='processed'"
 ```
 
+### Capping spend
+
+Tracking is not a limit. A daemon left running against a log that starts
+emitting a novel error every minute will keep paying for analyses. Set a
+daily ceiling:
+
+```bash
+maajun config daemon.max_usd_per_day 5
+```
+
+Before each incident the daemon sums today's `cost_usd` (UTC day) and, if
+the cap is reached, stops analyzing, warns once, and keeps polling. Errors
+skipped this way are *not* marked as seen — they are picked up on the next
+poll after the cap resets or is raised, so nothing is silently lost. The
+default is `0`, meaning no cap; `--dry-run` ignores it, since that is an
+explicit interactive request.
+
 ## Running under systemd
 
 `/etc/systemd/system/maajun.service`:
@@ -377,6 +395,8 @@ log files in one shot and points at whatever is missing.
 - **"No GitHub token"** — run `maajun setup` or set `GITHUB_TOKEN`.
 - **"Token cannot push"** — the fine-grained PAT is missing Contents
   write access or doesn't cover the repo.
+- **Nothing analyzed after a while** — look for a "spend cap reached"
+  warning: `daemon.max_usd_per_day` pauses analysis until the next UTC day.
 - **"No monitors configured"** — the `[monitor]` section defines no log
   files and no GitHub Actions repos.
 - **"A repo is configured but there is no GitHub token"** — you asked for

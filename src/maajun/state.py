@@ -81,6 +81,20 @@ class IncidentStore:
         ).fetchone()
         return row["total"]
 
+    def cost_since(self, since: str) -> float:
+        """Total USD spent on incidents last seen at or after `since`.
+
+        Backs the daily spend cap. Keyed on last_seen because that is when the
+        cost was actually incurred — an old incident re-analyzed today should
+        count against today.
+        """
+        row = self._conn.execute(
+            "SELECT COALESCE(SUM(cost_usd), 0) as total FROM incidents"
+            " WHERE last_seen >= ?",
+            (since,),
+        ).fetchone()
+        return row["total"]
+
     def total_tokens(self) -> dict[str, int]:
         row = self._conn.execute(
             "SELECT COALESCE(SUM(prompt_tokens), 0) as prompt,"
