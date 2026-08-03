@@ -15,6 +15,82 @@ in *fix* mode it applies the fix on a branch, runs your test suite against
 it, and opens a pull request with the result. It records what each analysis
 cost, caps what it may spend per day, and never reports the same error twice.
 
+```
+error detected ──▶ fingerprint & dedup ──▶ AI reads your code
+  (logs / CI)                                        │
+   issue (suggest) ◀───────────────────────────────  ┤
+   PR    (fix)     ◀──── branch + applied fix ───────┘
+```
+
+## What it actually files
+
+An unhandled `KeyError` hits your error log at 3 a.m. Nobody is awake. By
+morning there is an issue on the repo — this is the shape of it (`suggest`
+mode, the default):
+
+> ### \[maajun] KeyError: 'discount'
+>
+> # `KeyError: 'discount'` when a cart has no promotion applied
+>
+> ## What happened
+>
+> Checkout raised an unhandled `KeyError` for carts created before a
+> promotion was attached. 41 requests hit it in 12 minutes; every one
+> returned a 500 to the customer at the payment step.
+>
+> ## Root cause
+>
+> `cart/totals.py:88` reads `cart["discount"]` directly. The key is only
+> written by `promotions.apply()` (`cart/promotions.py:23`), which is
+> skipped entirely when no promotion matches — so the key is absent rather
+> than zero. The `.get()` used one line above at `totals.py:87` is what
+> makes the omission easy to miss on review.
+>
+> ## Likely cause commit
+>
+> `4f1c9ab` — *"only apply promotions when one matches"*. It added the
+> early return in `promotions.apply()` that leaves `discount` unset; every
+> caller before it could assume the key existed.
+>
+> ## Suggested fix
+>
+> Default the lookup, so an absent promotion means no discount:
+>
+> ```python
+> -    discount = cart["discount"]
+> +    discount = cart.get("discount", Decimal("0"))
+> ```
+>
+> ---
+>
+> ## Error details
+>
+> ```
+> Traceback (most recent call last):
+>   File "/srv/shop/checkout/views.py", line 142, in post
+>     total = compute_total(cart)
+>   File "/srv/shop/cart/totals.py", line 88, in compute_total
+>     discount = cart["discount"]
+> KeyError: 'discount'
+> ```
+>
+> - Source: `logfile:/var/log/shop/error.log`
+> - First seen: 2026-08-03T03:14:22Z
+> - Fingerprint: `9f3c1ab77e02d418`
+> - Opened automatically by [maajun](https://github.com/Morvin-Ian/maajun).
+
+In `fix` mode the same analysis arrives as a **pull request** instead: the
+applied diff, the report committed as `docs/incidents/<fingerprint>.md`, and
+your own test suite's verdict at the top of the body —
+
+> ✅ **Tests pass** — `pytest -q`
+> <details><summary>Output</summary>…</details>
+
+— or `❌ **Tests fail** (exit 1)`, which still opens the PR, because
+"this fix breaks the suite" is exactly what a reviewer needs to know.
+
+**Nothing merges without your review**, in either mode.
+
 ## Install
 
 ```bash
@@ -76,16 +152,31 @@ DEEPSEEK_API_KEY=... GITHUB_TOKEN=... \
 Tweak any setting later with `maajun config <key> <value>`, watch more
 than one repo with `maajun add-repo <owner/name>`, re-check your wiring
 with `maajun status`, and review what it did with `maajun incidents`.
-Each new error becomes one artifact:
-
-```
-error detected ──▶ fingerprint & dedup ──▶ AI analyzes your code
-  (logs / CI)                                         │
-   issue (suggest) ◀────────────────────────────────  ┤
-   PR    (fix)     ◀──── branch + applied fix ────────┘
-```
 
 The same error is never reported twice — repeat sightings only bump a counter.
+
+## What it costs, and what it can do
+
+Both questions people reasonably ask before pointing an AI daemon at their
+repo with their API key in it:
+
+**Spend is bounded by default.** `daemon.max_usd_per_day` starts at **$5**:
+past that, maajun stops analyzing for the rest of the UTC day, warns once,
+and keeps polling — skipped errors are picked up later, not dropped. Raise
+it with `maajun config daemon.max_usd_per_day 20`, or set `0` for no cap.
+Every incident's exact token count and cost is recorded and shown by
+`maajun incidents`; `--dry-run` prints what an analysis *would* have cost
+before you commit to anything. At DeepSeek's published rate ($0.27/$1.10 per
+1M input/output tokens) an analysis is cents, not dollars — but measure your
+own with `--dry-run` rather than trusting an estimate.
+
+**The agent is deliberately small.** It has no shell access in any mode —
+there is no bash tool to grant. In `suggest` mode it is strictly read-only;
+in `fix` mode it may edit files *only* inside its own clone under
+`daemon.workdir`, never your running application. Your `test_command` comes
+from your config, not from the model, so verification can't be redirected.
+The GitHub token is passed to git via `GIT_ASKPASS` and never lands in a
+remote URL, `.git/config`, or the process list.
 
 ## Documentation
 
