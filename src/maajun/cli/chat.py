@@ -7,11 +7,11 @@ import typer
 from maajun.auth import AuthManager
 from maajun.chat_ui import run_chat
 from maajun.cli._shared import (
-    _build_config,
-    _configured_providers,
-    _pick_provider,
     app,
+    build_agent_config,
+    configured_providers,
     console,
+    pick_provider,
 )
 
 
@@ -27,7 +27,7 @@ def chat(
 ):
     """Start an interactive chat session"""
     auth = AuthManager()
-    configured = _configured_providers(auth)
+    configured = configured_providers(auth)
 
     if not configured:
         console.print(
@@ -36,14 +36,14 @@ def chat(
         raise typer.Exit(1)
 
     if provider is None:
-        provider = _pick_provider(configured)
+        provider = pick_provider(configured)
     elif provider not in configured:
         console.print(f"[red]Provider '{provider}' is not configured.[/red]")
         console.print(f"[dim]Configured: {', '.join(configured)}[/dim]")
         raise typer.Exit(1)
 
     run_chat(
-        _build_config(auth, provider, thinking),
+        build_agent_config(auth, provider, thinking),
         provider,
         auto_approve=auto_approve,
         console=console,

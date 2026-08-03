@@ -10,12 +10,12 @@ from rich.table import Table
 
 from maajun.auth import AuthManager
 from maajun.cli._shared import (
-    _build_config,
-    _implemented_providers,
-    _input,
-    _secret_input,
     app,
+    build_agent_config,
     console,
+    implemented_providers,
+    prompt_line,
+    prompt_secret,
 )
 from maajun.providers.base import ProviderType
 from maajun.providers.factory import ProviderFactory
@@ -23,11 +23,11 @@ from maajun.providers.factory import ProviderFactory
 
 def _validate_key(auth: AuthManager, provider: str) -> None:
     """Check a freshly saved key against the provider API, if implemented"""
-    if provider not in _implemented_providers():
+    if provider not in implemented_providers():
         console.print(f"[dim]{provider} support is coming soon; key stored for later.[/dim]")
         return
 
-    config = _build_config(auth, provider)
+    config = build_agent_config(auth, provider)
     instance = ProviderFactory.create_provider(
         ProviderType(provider), {"api_key": config.ai.api_key},
     )
@@ -63,7 +63,7 @@ def login():
         console.print(f"  {status} [cyan]{i}.[/cyan] {p}")
 
     while True:
-        choice = _input("\n> Choice: ").strip()
+        choice = prompt_line("\n> Choice: ").strip()
         if choice.isdigit() and 1 <= int(choice) <= len(providers):
             provider = providers[int(choice) - 1]
             break
@@ -71,14 +71,14 @@ def login():
 
     if auth.has_api_key(provider):
         console.print(f"\n[yellow]⚠ {provider} already has a key stored.[/yellow]")
-        overwrite = _input("> Overwrite? (y/N): ").strip().lower()
+        overwrite = prompt_line("> Overwrite? (y/N): ").strip().lower()
         if overwrite != "y":
             console.print("[dim]Cancelled.[/dim]")
             return
 
     console.print(f"\n[bold]Paste your {provider} API key:[/bold]")
     console.print("[dim](input is hidden for security)[/dim]\n")
-    key = _secret_input("> API key: ")
+    key = prompt_secret("> API key: ")
 
     if not key:
         console.print("[red]No key entered. Cancelled.[/red]")
@@ -94,7 +94,7 @@ def login():
 def provider_list():
     """Show status of all providers"""
     auth = AuthManager()
-    implemented = _implemented_providers()
+    implemented = implemented_providers()
 
     table = Table(title="AI Providers")
     table.add_column("Provider", style="cyan")
@@ -121,7 +121,7 @@ def config_set_key(
 ):
     """Store an API key for a provider (prompts if the key is omitted)"""
     if key is None:
-        key = _secret_input("API key (input hidden): ")
+        key = prompt_secret("API key (input hidden): ")
         if not key:
             console.print("[red]No key entered. Cancelled.[/red]")
             raise typer.Exit(1)

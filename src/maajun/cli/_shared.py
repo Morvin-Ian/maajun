@@ -22,23 +22,23 @@ app = typer.Typer(invoke_without_command=True)
 console = Console()
 
 
-def _implemented_providers() -> list[str]:
+def implemented_providers() -> list[str]:
     return [p.value for p in ProviderFactory.get_supported_providers()]
 
 
-def _configured_providers(auth: AuthManager) -> list[str]:
+def configured_providers(auth: AuthManager) -> list[str]:
     """Providers that are both implemented and have a stored key"""
-    return [p for p in _implemented_providers() if auth.has_api_key(p)]
+    return [p for p in implemented_providers() if auth.has_api_key(p)]
 
 
-def _build_config(auth: AuthManager, provider: str, thinking: bool = False) -> Config:
+def build_agent_config(auth: AuthManager, provider: str, thinking: bool = False) -> Config:
     api_key = auth.get_api_key(provider)
     return Config(ai=AIProviderConfig(
         provider=provider, api_key=api_key, thinking_mode=thinking,
     ))
 
 
-def _input(text: str) -> str:
+def prompt_line(text: str) -> str:
     """Paste-safe line prompt.
 
     prompt_toolkit enables bracketed paste, so a multi-line paste lands in
@@ -55,7 +55,7 @@ def _input(text: str) -> str:
     return console.input(text, markup=False)
 
 
-def _secret_input(text: str) -> str:
+def prompt_secret(text: str) -> str:
     """Paste-safe hidden prompt for keys and tokens (echoes '*').
 
     Rejects multi-line pastes: no token or API key contains a newline, so
@@ -75,7 +75,7 @@ def _secret_input(text: str) -> str:
         )
 
 
-def _prompt_mode(current: str = "suggest") -> str:
+def prompt_mode(current: str = "suggest") -> str:
     """Prompt for suggest/fix mode, defaulting to `current`."""
     console.print("\n[bold]Mode[/bold]")
     console.print(
@@ -85,7 +85,7 @@ def _prompt_mode(current: str = "suggest") -> str:
         "  [cyan]2.[/cyan] fix — the agent may also change code inside its workspace"
     )
     default = "1" if current != "fix" else "2"
-    choice = _input(f"> Mode (1/2) [{default}]: ").strip() or default
+    choice = prompt_line(f"> Mode (1/2) [{default}]: ").strip() or default
     if choice == "2":
         return "fix"
     if choice == "1":
@@ -94,25 +94,25 @@ def _prompt_mode(current: str = "suggest") -> str:
     return current
 
 
-def _pick_provider(configured: list[str]) -> str:
+def pick_provider(configured: list[str]) -> str:
     if len(configured) == 1:
         return configured[0]
     console.print("\n[bold]Select a provider:[/bold]\n")
     for i, p in enumerate(configured, 1):
         console.print(f"  [cyan]{i}.[/cyan] {p}")
     while True:
-        choice = _input("\n> Choice: ").strip()
+        choice = prompt_line("\n> Choice: ").strip()
         if choice.isdigit() and 1 <= int(choice) <= len(configured):
             return configured[int(choice) - 1]
         console.print("[red]Invalid choice.[/red]")
 
 
-def _pick_repo(repos: list[RepoConfig]) -> RepoConfig:
+def pick_repo(repos: list[RepoConfig]) -> RepoConfig:
     console.print("\n[bold]Select a repository:[/bold]\n")
     for i, rc in enumerate(repos, 1):
         console.print(f"  [cyan]{i}.[/cyan] {rc.repo} [dim](mode: {rc.mode})[/dim]")
     while True:
-        choice = _input("\n> Choice: ").strip()
+        choice = prompt_line("\n> Choice: ").strip()
         if choice.isdigit() and 1 <= int(choice) <= len(repos):
             return repos[int(choice) - 1]
         console.print("[red]Invalid choice.[/red]")
