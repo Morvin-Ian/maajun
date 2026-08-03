@@ -694,3 +694,20 @@ async def test_suggest_mode_does_not_run_tests(setup):
 
     assert "Running tests" not in phases
     assert "SHOULD_NOT_RUN" not in github.issues[0]["body"]
+
+
+async def test_cap_warning_reports_the_configured_amount(setup):
+    """A sub-cent cap must not be rounded up in the warning."""
+    daemon, logfile, agent, github, store, remote = setup
+    daemon.config.daemon.max_usd_per_day = 0.005
+    _seed_spend(store, "earlier", 0.02)
+    notices: list[tuple[str, str]] = []
+    daemon.on_notice = lambda message, level: notices.append((level, message))
+
+    with open(logfile, "a") as f:
+        f.write(TRACEBACK)
+    await daemon.poll_once()
+
+    warning = next(msg for lvl, msg in notices if lvl == "warn")
+    assert "$0.005" in warning
+    assert "$0.01" not in warning
