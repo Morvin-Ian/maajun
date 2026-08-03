@@ -12,8 +12,8 @@ from rich.live import Live
 from rich.panel import Panel
 
 from maajun.auth import AuthManager
-from maajun.checks import build_status, gather_github
 from maajun.cli._shared import app, console, pick_repo
+from maajun.cli.status_checks import build_status, gather_github
 from maajun.config import Config, RepoConfig
 from maajun.daemon import build_daemon, build_daemon_for_report
 from maajun.progress import WorkingStatus, working

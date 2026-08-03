@@ -6,7 +6,7 @@ from typing import get_args, get_origin
 import tomlkit
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
-from maajun.monitors.logfile import (
+from maajun.monitors.defaults import (
     DEFAULT_ERROR_PATTERN,
     DEFAULT_JSON_LEVEL_VALUES,
     DEFAULT_TRACEBACK_HEADERS,

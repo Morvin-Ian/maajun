@@ -4,8 +4,8 @@ import pytest
 from typer.testing import CliRunner
 
 from maajun.cli import app
+from maajun.daemon.store import MAX_ATTEMPTS, IncidentStore
 from maajun.monitors import ErrorEvent
-from maajun.state import MAX_ATTEMPTS, IncidentStore
 
 runner = CliRunner()
 

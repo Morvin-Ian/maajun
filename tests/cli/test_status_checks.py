@@ -1,6 +1,6 @@
 """Tests for the status-check assembly (pure, no CliRunner)."""
 
-from maajun.checks import build_status
+from maajun.cli.status_checks import build_status
 from maajun.config import Config, GitHubConfig, MonitorConfig, RepoConfig
 
 

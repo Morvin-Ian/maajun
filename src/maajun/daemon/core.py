@@ -1,4 +1,4 @@
-"""Daemon — polls monitors, analyzes new errors, opens PRs.
+"""The poll loop and the incident-handling flow.
 
 Flow per new error: dedup by fingerprint -> sync workspace -> agent
 analyzes -> in suggest mode a GitHub issue is filed with the report; in fix
@@ -15,13 +15,19 @@ import signal
 from collections.abc import Callable
 from pathlib import Path
 
-from maajun.agent.core import Agent, PermissionCallback
-from maajun.auth import AuthManager
-from maajun.config import AIProviderConfig, Config, RepoConfig
-from maajun.costs import extract_usage
-from maajun.monitors import ErrorEvent, GitHubActionsMonitor, LogFileMonitor, Monitor
-from maajun.state import IncidentStore
-from maajun.utils import truncate, utc_day_start_iso
+from maajun.agent.core import PermissionCallback
+from maajun.config import Config, RepoConfig
+from maajun.daemon import reports
+from maajun.daemon.prompts import (
+    ANALYZE_PROMPT,
+    FIX_PROMPT_SUFFIX,
+    MANUAL_REPORT_PROMPT,
+    RECENT_COMMITS_SECTION,
+)
+from maajun.daemon.store import IncidentStore
+from maajun.monitors import ErrorEvent, Monitor
+from maajun.providers.pricing import extract_usage
+from maajun.utils import utc_day_start_iso
 from maajun.vcs import CommandResult, GitHubClient, GitWorkspace
 
 log = logging.getLogger(__name__)
@@ -38,77 +44,6 @@ NoticeCallback = Callable[[str, str], None]
 def _noop(_: str) -> None:
     pass
 
-ANALYZE_PROMPT = """\
-An error was detected on a monitored system. Investigate it against the
-repository checked out at {workspace} and write an incident report.
-
-Error source: {source}
-First seen: {timestamp}
-
-Error details:
-```
-{details}
-```
-
-Use the read_file/grep/glob/list_dir tools on {workspace} to locate the
-code involved. Then respond with ONLY a markdown report in this format:
-
-# <one-line error summary>
-
-## What happened
-<plain-language description of the error>
-
-## Root cause
-<your analysis, referencing files and lines in the repo>
-
-## Likely cause commit
-<the commit below that most plausibly introduced this, with one line of
-reasoning; write "Unclear" if none of them touch the code involved>
-
-## Suggested fix
-<concrete change(s), with code snippets where helpful>
-"""
-
-RECENT_COMMITS_SECTION = """
-Recent commits on {branch}, newest first — one of these may have introduced
-the error. Use git_status and read_file to check what they touched; do not
-guess from the subject line alone.
-
-```
-{commits}
-```
-"""
-
-FIX_PROMPT_SUFFIX = """
-You MAY apply the fix: use edit_file/write_file on files inside {workspace}.
-Keep the change minimal and focused on this error. Still finish by
-responding with the markdown report, adding an "## Applied fix" section
-describing exactly what you changed.
-"""
-
-MANUAL_REPORT_PROMPT = """\
-A user reported the following issue. Investigate it against the
-repository checked out at {workspace} and write an incident report.
-
-Issue description:
-```
-{description}
-```
-
-Use the read_file/grep/glob/list_dir tools on {workspace} to locate the
-code involved. Then respond with ONLY a markdown report in this format:
-
-# <one-line error summary>
-
-## What happened
-<plain-language description of the issue>
-
-## Root cause
-<your analysis, referencing files and lines in the repo>
-
-## Suggested fix
-<concrete change(s), with code snippets where helpful>
-"""
 
 
 # How many commits of history to offer the model for deploy blame.
@@ -230,22 +165,6 @@ class Daemon:
             self._notice(message, "warn")
         return True
 
-    def _cycle_full(self) -> bool:
-        """Whether this poll cycle has already analyzed its allowance.
-
-        The daily cap bounds the day; this bounds the burst. Fifty novel
-        fingerprints in one cycle would otherwise be fifty AI calls back to
-        back. The remainder is picked up on the next poll.
-        """
-        limit = self.config.daemon.max_incidents_per_cycle
-        if limit <= 0 or self._handled_this_cycle < limit:
-            return False
-        log.info(
-            "reached max_incidents_per_cycle (%d); remaining errors will be "
-            "picked up on the next poll", limit,
-        )
-        return True
-
     async def _recent_commits_section(
         self, repo_config: RepoConfig, workspace
     ) -> str:
@@ -269,6 +188,22 @@ class Daemon:
             branch=repo_config.base_branch or "the checked-out branch",
             commits="\n".join(commits),
         )
+
+    def _cycle_full(self) -> bool:
+        """Whether this poll cycle has already analyzed its allowance.
+
+        The daily cap bounds the day; this bounds the burst. Fifty novel
+        fingerprints in one cycle would otherwise be fifty AI calls back to
+        back. The remainder is picked up on the next poll.
+        """
+        limit = self.config.daemon.max_incidents_per_cycle
+        if limit <= 0 or self._handled_this_cycle < limit:
+            return False
+        log.info(
+            "reached max_incidents_per_cycle (%d); remaining errors will be "
+            "picked up on the next poll", limit,
+        )
+        return True
 
     def _artifact_label(self, monitor: Monitor) -> str:
         """What this monitor's incidents produce, for user-facing lines."""
@@ -515,7 +450,7 @@ class Daemon:
         )
 
         if dry_run:
-            self._print_dry_run(
+            reports.print_dry_run(
                 dry_run_header, repo_config.repo or LOCAL_REPO_LABEL, report,
                 (prompt_tokens, completion_tokens, cost), dry_run_extra,
             )
@@ -531,7 +466,9 @@ class Daemon:
         if opens_pull_request:
             verification = await self._verify(repo_config, workspace, progress)
             progress("Opening PR")
-            self._write_report(workspace, event, report)
+            reports.write_report_file(
+                workspace.path / "docs" / "incidents", event, report
+            )
             await workspace.commit_all(commit_message)
             await workspace.push(branch)
             url = await self.github.create_pull_request(
@@ -539,7 +476,7 @@ class Daemon:
                 head=branch,
                 base=repo_config.base_branch,
                 title=title,
-                body=self._pr_body(repo_config, event, report, verification),
+                body=reports.pr_body(repo_config, event, report, verification),
             )
             recorded_branch = branch
         else:
@@ -549,7 +486,7 @@ class Daemon:
             url = await self.github.create_issue(
                 repo_config.repo,
                 title=title,
-                body=self._issue_body(event, report),
+                body=reports.issue_body(event, report),
             )
             recorded_branch = ""
 
@@ -583,15 +520,7 @@ class Daemon:
         """
         progress("Writing report")
         prompt_tokens, completion_tokens, cost = usage
-        self.report_dir.mkdir(parents=True, exist_ok=True)
-        report_path = self.report_dir / f"{event.fingerprint}.md"
-        report_path.write_text(
-            f"{report}\n\n---\n\n"
-            f"## Error details\n\n```\n{event.details}\n```\n\n"
-            f"- Source: `{event.source}`\n"
-            f"- First seen: {event.timestamp}\n"
-            f"- Fingerprint: `{event.fingerprint}`\n"
-        )
+        report_path = reports.write_report_file(self.report_dir, event, report)
         self.store.mark_processed(
             event.fingerprint,
             branch="",
@@ -605,42 +534,6 @@ class Daemon:
             report_path, event.fingerprint, cost, prompt_tokens, completion_tokens,
         )
         return str(report_path)
-
-    @staticmethod
-    def _print_dry_run(
-        header: str,
-        repo: str,
-        report: str,
-        usage: tuple[int, int, float],
-        extra: tuple[str, ...] = (),
-    ) -> None:
-        prompt_tokens, completion_tokens, cost = usage
-        bar = "=" * 60
-        print(f"\n{bar}")
-        print(f"DRY RUN — {header}")
-        for line in extra:
-            print(line)
-        print(f"Repo: {repo}")
-        print(f"{bar}\n")
-        print(report)
-        print(f"\n{bar}")
-        print(
-            f"Cost: {prompt_tokens} prompt + {completion_tokens} "
-            f"completion tokens = ${cost:.4f}"
-        )
-        print(f"{bar}\n")
-
-    def _write_report(self, workspace: GitWorkspace, event: ErrorEvent, report: str) -> None:
-        report_dir = workspace.path / "docs" / "incidents"
-        report_dir.mkdir(parents=True, exist_ok=True)
-        report_path = report_dir / f"{event.fingerprint}.md"
-        report_path.write_text(
-            f"{report}\n\n---\n\n"
-            f"## Error details\n\n```\n{event.details}\n```\n\n"
-            f"- Source: `{event.source}`\n"
-            f"- First seen: {event.timestamp}\n"
-            f"- Fingerprint: `{event.fingerprint}`\n"
-        )
 
     async def _verify(
         self, repo_config: RepoConfig, workspace: GitWorkspace, progress: ProgressCallback
@@ -661,221 +554,3 @@ class Daemon:
             repo_config.test_command, result.exit_code, repo_config.repo,
         )
         return result
-
-    def _pr_body(
-        self,
-        repo_config: RepoConfig,
-        event: ErrorEvent,
-        report: str,
-        verification: CommandResult | None = None,
-    ) -> str:
-        return (
-            f"{report}\n\n---\n"
-            "This PR contains the applied fix and the incident report.\n\n"
-            f"{self._verification_section(repo_config, verification)}"
-            f"{self._provenance(event)}"
-        )
-
-    @staticmethod
-    def _verification_section(
-        repo_config: RepoConfig, verification: CommandResult | None
-    ) -> str:
-        """A verdict on the fix, so the diff isn't reviewed on trust alone."""
-        if verification is None:
-            return (
-                "> ⚠️ **Unverified** — no `test_command` is configured for this "
-                "repo, so the fix was not tested.\n\n"
-            )
-        if verification.passed:
-            headline = f"✅ **Tests pass** — `{repo_config.test_command}`"
-        elif verification.exit_code is None:
-            headline = f"⚠️ **Could not run** `{repo_config.test_command}`"
-        else:
-            headline = (
-                f"❌ **Tests fail** (exit {verification.exit_code}) — "
-                f"`{repo_config.test_command}`"
-            )
-        output = truncate(verification.output, 3000, "\n… (truncated)")
-        return (
-            f"{headline}\n\n"
-            f"<details><summary>Output</summary>\n\n"
-            f"```\n{output or '(no output)'}\n```\n\n</details>\n\n"
-        )
-
-    def _issue_body(self, event: ErrorEvent, report: str) -> str:
-        return (
-            f"{report}\n\n---\n\n"
-            f"## Error details\n\n```\n{event.details[:4000]}\n```\n\n"
-            f"{self._provenance(event)}"
-        )
-
-    @staticmethod
-    def _provenance(event: ErrorEvent) -> str:
-        return (
-            f"- Source: `{event.source}`\n"
-            f"- First seen: {event.timestamp}\n"
-            f"- Fingerprint: `{event.fingerprint}`\n"
-            f"- Opened automatically by [maajun](https://github.com/Morvin-Ian/maajun)."
-        )
-
-
-class _DaemonDeps:
-    """Credentials and shared state common to every Daemon wiring."""
-
-    def __init__(self, config: Config, auth: AuthManager):
-        api_key = auth.get_api_key(config.ai.provider)
-        if not api_key:
-            raise RuntimeError(
-                f"No API key for {config.ai.provider}. Run `maajun setup` "
-                f"or set {config.ai.provider.upper()}_API_KEY."
-            )
-
-        workdir = Path(config.daemon.workdir).expanduser()
-        self.store = IncidentStore(workdir / "incidents.db")
-        self.report_dir = workdir / "reports"
-
-        repos = config.github.get_all_repos()
-        # GitHub is optional. With no repo configured, errors are still
-        # detected and analyzed — the report lands on disk instead of in a PR.
-        self.local_mode = not repos
-        if self.local_mode:
-            self.token = None
-            self.github = None
-            self.repos = [RepoConfig(mode="suggest")]
-            self.workspaces = {"": LocalWorkspace(_local_repo_path(config))}
-        else:
-            token = auth.get_github_token()
-            if not token:
-                raise RuntimeError(
-                    "A repo is configured but there is no GitHub token. "
-                    "Run `maajun setup`, export GITHUB_TOKEN, or run `gh auth login`."
-                )
-            self.token = token
-            self.github = GitHubClient(token)
-            self.repos = repos
-            self.workspaces = {
-                repo_config.repo: GitWorkspace(
-                    workdir / "workspaces", repo_config.repo, token
-                )
-                for repo_config in repos
-            }
-
-        ai = config.ai.model_copy(update={"api_key": api_key})
-
-        def agent_factory_for_repo(repo_config: RepoConfig, workspace) -> Callable[[], Agent]:
-            def factory() -> Agent:
-                return Agent(
-                    Config(ai=AIProviderConfig(**ai.model_dump())),
-                    approve=make_permission_policy(repo_config.mode, workspace.path),
-                )
-            return factory
-
-        self.agent_factory_for_repo = agent_factory_for_repo
-
-
-def _local_repo_path(config: Config) -> Path:
-    """The checkout local mode analyzes: daemon.repo_path, else the cwd."""
-    path = Path(config.daemon.repo_path or Path.cwd()).expanduser().resolve()
-    if not path.is_dir():
-        raise RuntimeError(
-            f"daemon.repo_path is not a directory: {path}. "
-            "Point it at a local checkout, or configure a GitHub repo."
-        )
-    return path
-
-
-def _build_monitors(
-    config: Config, repos: list[RepoConfig], auth: AuthManager | None = None
-) -> tuple[list[Monitor], dict[str, RepoConfig]]:
-    """Build monitors and map each to the repo whose PRs it should open.
-
-    `auth` supplies the GitHub Actions token, which lives in the keyring or the
-    environment — never in the config file.
-    """
-    auth = auth or AuthManager()
-    monitor_cfg = config.monitor
-    monitors: list[Monitor] = []
-    monitor_to_repo: dict[str, RepoConfig] = {}
-    default_repo = repos[0] if repos else None
-
-    def attach(monitor: Monitor, repo_config: RepoConfig | None) -> None:
-        monitors.append(monitor)
-        if repo_config is not None:
-            monitor_to_repo[monitor.name] = repo_config
-
-    # Global log_files attach to the first repo.
-    for path in monitor_cfg.log_files:
-        attach(LogFileMonitor(path, **monitor_cfg.logfile_kwargs()), default_repo)
-
-    # Per-repo log_files attach to their own repo, in addition to the above.
-    for repo_config in repos:
-        for path in repo_config.log_files:
-            attach(
-                LogFileMonitor(path, **monitor_cfg.logfile_kwargs()),
-                repo_config,
-            )
-
-    # GitHub Actions. Silently skipped without a token: `status` reports it,
-    # and one unusable monitor should not stop the log monitors from running.
-    actions_token = auth.get_github_token() if monitor_cfg.github_actions_repos else None
-    if monitor_cfg.github_actions_repos and not actions_token:
-        log.warning(
-            "monitor.github_actions_repos is set but no GitHub token is "
-            "available; skipping GitHub Actions monitors"
-        )
-    if actions_token:
-        for repo in monitor_cfg.github_actions_repos:
-            matched = next((rc for rc in repos if rc.repo == repo), default_repo)
-            attach(GitHubActionsMonitor(
-                actions_token,
-                repo,
-                burst_threshold=monitor_cfg.burst_threshold,
-                burst_window_seconds=monitor_cfg.burst_window_seconds,
-            ), matched)
-
-    return monitors, monitor_to_repo
-
-
-def build_daemon(config: Config, auth: AuthManager | None = None) -> Daemon:
-    """Wire a Daemon from config + stored credentials.
-
-    Supports both legacy single-repo and new multi-repo configuration.
-    """
-    auth = auth or AuthManager()
-    deps = _DaemonDeps(config, auth)
-    monitors, monitor_to_repo = _build_monitors(config, deps.repos, auth)
-    if not monitors:
-        raise RuntimeError(
-            "No monitors configured. Add log files under [monitor] "
-            "or GitHub Actions settings."
-        )
-
-    return Daemon(
-        config,
-        monitors=monitors,
-        store=deps.store,
-        workspaces=deps.workspaces,
-        monitor_to_repo=monitor_to_repo,
-        github=deps.github,
-        agent_factory_for_repo=deps.agent_factory_for_repo,
-        repo_configs=deps.repos,
-        report_dir=deps.report_dir,
-        local_mode=deps.local_mode,
-    )
-
-
-def build_daemon_for_report(config: Config, auth: AuthManager | None = None) -> Daemon:
-    """Wire a Daemon for manual reports — no monitors required."""
-    deps = _DaemonDeps(config, auth or AuthManager())
-    return Daemon(
-        config,
-        monitors=[],
-        store=deps.store,
-        workspaces=deps.workspaces,
-        monitor_to_repo={},
-        github=deps.github,
-        agent_factory_for_repo=deps.agent_factory_for_repo,
-        repo_configs=deps.repos,
-        report_dir=deps.report_dir,
-        local_mode=deps.local_mode,
-    )

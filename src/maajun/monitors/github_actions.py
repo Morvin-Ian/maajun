@@ -7,7 +7,7 @@ from typing import Any
 import httpx
 
 from maajun.monitors.base import ErrorEvent, HTTPPollMonitor
-from maajun.utils import github_headers
+from maajun.vcs.api import github_headers
 
 
 class GitHubActionsMonitor(HTTPPollMonitor):
