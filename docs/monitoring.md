@@ -50,8 +50,8 @@ poll_interval = 30            # seconds between polls
 # burst_threshold = 1               # only report after N errors in the window
 # burst_window_seconds = 60
 
-# GitHub Actions — poll failed workflow runs (optional)
-# github_actions_token = "github_pat_..."
+# GitHub Actions — poll failed workflow runs (optional).
+# Uses the same GitHub token as everything else; no secret goes in this file.
 # github_actions_repos = ["owner/name"]
 
 [daemon]
@@ -166,9 +166,10 @@ burst_window_seconds = 300   # 5 errors within 5 minutes
 
 ### GitHub Actions
 
-Set `github_actions_token` and `github_actions_repos` to poll each repo
-for failed workflow runs. The token needs read access to the repos'
-actions. A failure becomes an incident fingerprinted by the commit SHA,
+Set `github_actions_repos` to poll each repo for failed workflow runs. It
+uses the same GitHub token as everything else — read from the keyring or
+`$GITHUB_TOKEN`, never written into the config file — and that token needs
+read access to the repos' actions. A failure becomes an incident fingerprinted by the commit SHA,
 so multiple workflows failing on the same commit produce a single
 incident (one commit, one root cause), with the run details and a link
 to the failed run.

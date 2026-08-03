@@ -110,9 +110,7 @@ def build_status(
     log_paths = list(config.monitor.log_files)
     for repo_config in repos:
         log_paths.extend(repo_config.log_files)
-    watches_actions = bool(
-        config.monitor.github_actions_token and config.monitor.github_actions_repos
-    )
+    watches_actions = bool(config.monitor.github_actions_repos)
     if not log_paths and not watches_actions:
         monitors.checks.append(Check(
             "At least one monitor configured", False,

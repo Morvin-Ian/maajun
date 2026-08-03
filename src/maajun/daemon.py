@@ -714,9 +714,14 @@ def _local_repo_path(config: Config) -> Path:
 
 
 def _build_monitors(
-    config: Config, repos: list[RepoConfig]
+    config: Config, repos: list[RepoConfig], auth: AuthManager | None = None
 ) -> tuple[list[Monitor], dict[str, RepoConfig]]:
-    """Build monitors and map each to the repo whose PRs it should open."""
+    """Build monitors and map each to the repo whose PRs it should open.
+
+    `auth` supplies the GitHub Actions token, which lives in the keyring or the
+    environment — never in the config file.
+    """
+    auth = auth or AuthManager()
     monitor_cfg = config.monitor
     monitors: list[Monitor] = []
     monitor_to_repo: dict[str, RepoConfig] = {}
@@ -739,12 +744,19 @@ def _build_monitors(
                 repo_config,
             )
 
-    # GitHub Actions.
-    if monitor_cfg.github_actions_token and monitor_cfg.github_actions_repos:
+    # GitHub Actions. Silently skipped without a token: `status` reports it,
+    # and one unusable monitor should not stop the log monitors from running.
+    actions_token = auth.get_github_token() if monitor_cfg.github_actions_repos else None
+    if monitor_cfg.github_actions_repos and not actions_token:
+        log.warning(
+            "monitor.github_actions_repos is set but no GitHub token is "
+            "available; skipping GitHub Actions monitors"
+        )
+    if actions_token:
         for repo in monitor_cfg.github_actions_repos:
             matched = next((rc for rc in repos if rc.repo == repo), default_repo)
             attach(GitHubActionsMonitor(
-                monitor_cfg.github_actions_token,
+                actions_token,
                 repo,
                 burst_threshold=monitor_cfg.burst_threshold,
                 burst_window_seconds=monitor_cfg.burst_window_seconds,
@@ -758,8 +770,9 @@ def build_daemon(config: Config, auth: AuthManager | None = None) -> Daemon:
 
     Supports both legacy single-repo and new multi-repo configuration.
     """
-    deps = _DaemonDeps(config, auth or AuthManager())
-    monitors, monitor_to_repo = _build_monitors(config, deps.repos)
+    auth = auth or AuthManager()
+    deps = _DaemonDeps(config, auth)
+    monitors, monitor_to_repo = _build_monitors(config, deps.repos, auth)
     if not monitors:
         raise RuntimeError(
             "No monitors configured. Add log files under [monitor] "
