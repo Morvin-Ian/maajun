@@ -1,5 +1,10 @@
 # Maajun
 
+[![CI](https://github.com/Morvin-Ian/maajun/actions/workflows/ci.yml/badge.svg)](https://github.com/Morvin-Ian/maajun/actions/workflows/ci.yml)
+[![PyPI](https://img.shields.io/pypi/v/maajun.svg)](https://pypi.org/project/maajun/)
+[![Python](https://img.shields.io/pypi/pyversions/maajun.svg)](https://pypi.org/project/maajun/)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 **Error monitoring that files the bug report — and can write the fix.**
 
 Maajun watches your error sources — local log files (e.g. your app's error
@@ -10,12 +15,23 @@ in *fix* mode it applies the fix on a branch, runs your test suite against
 it, and opens a pull request with the result. It records what each analysis
 cost, caps what it may spend per day, and never reports the same error twice.
 
+## Install
+
+```bash
+uv tool install maajun     # or: pipx install maajun / pip install maajun
+```
+
+From source:
+
+```bash
+git clone https://github.com/Morvin-Ian/maajun && cd maajun && uv sync
+```
+
 ## Quick start
 
 Investigate something right now, without setting up any monitoring:
 
 ```bash
-uv sync                                                # or: pip install maajun
 maajun setup                                           # stores your API key
 maajun report "Checkout 500s when the cart is empty"
 ```
@@ -92,3 +108,7 @@ uv sync            # installs dev dependencies (pytest, ruff)
 uv run pytest      # run tests
 uv run ruff check  # lint
 ```
+
+## License
+
+[MIT](LICENSE).
