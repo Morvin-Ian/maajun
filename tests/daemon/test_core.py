@@ -582,8 +582,22 @@ async def test_spend_cap_warns_once_per_day(setup):
     assert "$0.01" in warnings[0]
 
 
-async def test_no_cap_by_default(setup):
+async def test_capped_by_default(setup):
+    """An install nobody tuned is still bounded — the default is a ceiling."""
     daemon, logfile, agent, github, store, remote = setup
+    assert daemon.config.daemon.max_usd_per_day == 5.0
+    _seed_spend(store, "earlier", 999.0)
+
+    with open(logfile, "a") as f:
+        f.write(TRACEBACK)
+    assert await daemon.poll_once() == []
+    assert agent.prompts == []
+
+
+async def test_zero_disables_the_cap(setup):
+    """0 is the opt-out, for someone who wants an unbounded daemon."""
+    daemon, logfile, agent, github, store, remote = setup
+    daemon.config.daemon.max_usd_per_day = 0.0
     _seed_spend(store, "earlier", 999.0)
 
     with open(logfile, "a") as f:

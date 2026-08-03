@@ -69,8 +69,19 @@ def test_shows_todays_spend_against_the_cap(workdir, tmp_path):
     assert "of $0.5 cap" in result.output
 
 
-def test_warns_when_no_cap_is_set(workdir):
+def test_shows_the_default_cap_when_none_is_configured(workdir):
     config_path, data = workdir
+    store = _store(data)
+    _add(store, "fp1", message="boom", cost=0.25, url="u")
+    store.close()
+
+    result = runner.invoke(app, ["incidents", "-c", str(config_path)])
+    assert "of $5 cap" in result.output
+
+
+def test_warns_when_the_cap_is_disabled(workdir):
+    config_path, data = workdir
+    config_path.write_text(f'[daemon]\nworkdir = "{data}"\nmax_usd_per_day = 0\n')
     store = _store(data)
     _add(store, "fp1", message="boom", cost=0.25, url="u")
     store.close()
