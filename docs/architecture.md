@@ -81,7 +81,9 @@ blip never becomes a pull request.
    hash of the error text with digits and hex addresses stripped, so the
    same crash at a different line number or timestamp is still the same
    incident. CI failures use the commit SHA. Fingerprints live in a
-   SQLite store; known ones just bump a counter.
+   SQLite store; known ones just bump a counter. An incident whose last
+   attempt *failed* is retried on a later poll, up to three attempts —
+   otherwise one transient GitHub 502 would blacklist that error forever.
 3. **Analyze** — for a new fingerprint, the daemon syncs an isolated
    clone of the event's repo, creates a branch
    `maajun/incident-<fingerprint>`, and asks the agent to investigate.
