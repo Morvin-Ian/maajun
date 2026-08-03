@@ -1,8 +1,8 @@
 """`maajun setup` — the one command that configures everything.
 
-Only the AI API key is required. A GitHub repo and token, log files, GitHub
-Actions, Sentry, and email notifications are each offered and each skippable,
-so a first run can be four keystrokes and still leave a working install.
+Only the AI API key is required. A GitHub repo and token, log files, and
+GitHub Actions are each offered and each skippable, so a first run can be
+three keystrokes and still leave a working install.
 
 Re-running is safe: every question defaults to what is already configured, and
 nothing is asked twice unless --reconfigure is passed.
@@ -19,7 +19,7 @@ import typer
 from rich.panel import Panel
 
 from maajun.auth import GITHUB_TOKEN_ENV, AuthManager
-from maajun.checks import build_status, gather_github, gather_monitor_secrets
+from maajun.checks import build_status, gather_github
 from maajun.cli._shared import (
     app,
     configured_providers,
@@ -29,12 +29,7 @@ from maajun.cli._shared import (
     prompt_mode,
     prompt_secret,
 )
-from maajun.config import (
-    Config,
-    MonitorInstanceConfig,
-    RepoConfig,
-    default_config_path,
-)
+from maajun.config import Config, RepoConfig, default_config_path
 from maajun.providers.base import ProviderType
 from maajun.providers.factory import ProviderFactory
 from maajun.utils import is_valid_repo
@@ -47,7 +42,6 @@ PROVIDER_SIGNUP_URLS = {
 }
 
 GITHUB_TOKEN_URL = "https://github.com/settings/personal-access-tokens"
-SENTRY_TOKEN_URL = "https://sentry.io/settings/account/api/auth-tokens/"
 
 _GITHUB_REMOTE_RE = re.compile(r"github\.com[:/]([^/\s]+/[^/\s]+?)(?:\.git)?/?$")
 
@@ -340,7 +334,6 @@ def _setup_error_sources(
     *,
     log_paths: str | None,
     github_actions: bool | None,
-    sentry: str | None,
 ) -> None:
     logs = log_paths if log_paths is not None else ask.text(
         "Log files to watch (comma-separated)",
@@ -378,73 +371,6 @@ def _setup_error_sources(
                 f"  [green]✓[/green] Watching Actions on {', '.join(repo_names)}"
             )
 
-    target = sentry if sentry is not None else (
-        ask.text("Sentry project (org/project)") if ask.confirm("Monitor Sentry issues?")
-        else ""
-    )
-    if target:
-        _setup_sentry(auth, config, ask, target)
-
-
-def _setup_sentry(auth: AuthManager, config: Config, ask: _Asker, target: str) -> None:
-    if target.count("/") != 1 or not all(target.split("/")):
-        console.print(
-            f'  [yellow]⚠ "{target}" is not in org/project form — Sentry '
-            "skipped.[/yellow]"
-        )
-        return
-    org, project = target.split("/")
-
-    if not auth.get_monitor_secret("sentry"):
-        console.print(f"  [dim]Create an auth token at {SENTRY_TOKEN_URL}[/dim]")
-        token = ask.secret("Sentry auth token (input hidden, Enter to skip)")
-        if not token:
-            console.print(
-                "  [yellow]⚠ No token — set MAAJUN_SENTRY_TOKEN before "
-                "watching.[/yellow]"
-            )
-        else:
-            try:
-                # Kept in the keyring: [[monitor.instances]] is plaintext.
-                auth.set_monitor_secret("sentry", token)
-            except RuntimeError as e:
-                console.print(
-                    f"  [yellow]⚠ Could not use the keyring: {e}\n"
-                    "    Export it instead: MAAJUN_SENTRY_TOKEN=...[/yellow]"
-                )
-
-    others = [i for i in config.monitor.instances if i.type != "sentry"]
-    config.monitor.instances = [
-        *others,
-        MonitorInstanceConfig(type="sentry", org=org, project=project),
-    ]
-    console.print(f"  [green]✓[/green] Watching Sentry project {org}/{project}")
-
-
-# ---------------------------------------------------------------------------
-# Step 4: email notifications (optional)
-# ---------------------------------------------------------------------------
-
-
-def _setup_email(config: Config, ask: _Asker) -> None:
-    if not ask.confirm("Email you when a PR opens?"):
-        return
-    email = config.daemon.email
-    email.smtp_host = ask.text("SMTP host", email.smtp_host or "smtp.gmail.com")
-    port = ask.text("SMTP port", str(email.smtp_port))
-    try:
-        email.smtp_port = int(port)
-    except ValueError:
-        console.print(f"  [yellow]⚠ {port!r} is not a port — keeping "
-                      f"{email.smtp_port}.[/yellow]")
-    email.username = ask.text("SMTP username", email.username)
-    email.from_addr = ask.text("From address", email.from_addr or email.username)
-    recipients = ask.text("To addresses (comma-separated)", ",".join(email.to_addrs))
-    email.to_addrs = [a.strip() for a in recipients.split(",") if a.strip()]
-    console.print(
-        "  [dim]Set MAAJUN_SMTP_PASSWORD in the environment for the "
-        "password.[/dim]"
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -472,9 +398,6 @@ def setup(
         None, "--github-actions/--no-github-actions",
         help="Watch the configured repos for failed workflow runs",
     ),
-    sentry: str | None = typer.Option(
-        None, "--sentry", help="Sentry project to monitor, as org/project"
-    ),
     non_interactive: bool = typer.Option(
         False, "--non-interactive",
         help="Never prompt; take everything from flags and the environment",
@@ -491,8 +414,8 @@ def setup(
     current configuration.
 
     Secrets are read from the environment in --non-interactive mode
-    (DEEPSEEK_API_KEY, GITHUB_TOKEN, MAAJUN_SENTRY_TOKEN) rather than from
-    flags, so they never land in shell history.
+    (DEEPSEEK_API_KEY, GITHUB_TOKEN) rather than from flags, so they never
+    land in shell history.
     """
     path = config_path or default_config_path()
     ask = _Asker(interactive=not non_interactive)
@@ -505,7 +428,7 @@ def setup(
         border_style="blue",
     ))
 
-    total = 4
+    total = 3
     _step(1, total, "AI provider")
     config.ai.provider = _setup_provider(auth, ask, provider, reconfigure)
 
@@ -519,14 +442,8 @@ def setup(
     _step(3, total, "Error sources", optional=True)
     _setup_error_sources(
         auth, config, ask,
-        log_paths=logs, github_actions=github_actions, sentry=sentry,
+        log_paths=logs, github_actions=github_actions,
     )
-
-    _step(4, total, "Email notifications", optional=True)
-    if non_interactive:
-        console.print("  [dim]Skipped in --non-interactive mode.[/dim]")
-    else:
-        _setup_email(config, ask)
 
     config.save(path)
     console.print(f"\n[green]✓ Wrote {path}[/green]")
@@ -543,7 +460,6 @@ def _print_summary(config: Config, auth: AuthManager) -> None:
         has_token=auth.has_github_token(),
         repos=repos,
         network=None,
-        monitor_secrets=gather_monitor_secrets(auth, config),
     )
     console.print("\n[bold]Status[/bold]")
     for section in sections:

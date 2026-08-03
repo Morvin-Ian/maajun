@@ -12,7 +12,7 @@ from rich.live import Live
 from rich.panel import Panel
 
 from maajun.auth import AuthManager
-from maajun.checks import build_status, gather_github, gather_monitor_secrets
+from maajun.checks import build_status, gather_github
 from maajun.cli._shared import app, console, pick_repo
 from maajun.config import Config, RepoConfig
 from maajun.daemon import build_daemon, build_daemon_for_report
@@ -319,7 +319,6 @@ def status(
     sections, ok = build_status(
         config, provider=provider, has_key=has_key,
         has_token=has_token, repos=repos, network=network,
-        monitor_secrets=gather_monitor_secrets(auth, config),
     )
 
     console.print(Panel("[bold]Maajun status[/bold]", border_style="blue"))

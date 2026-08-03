@@ -6,7 +6,7 @@ import json
 import pytest
 
 from maajun.agent.core import PERMISSION_DENIED, Agent
-from maajun.agent.tools import BASH, ToolRegistry, default_registry
+from maajun.agent.tools import WRITE_FILE, ToolRegistry, default_registry
 from maajun.agent.tools.base import Tool, json_schema
 from maajun.config import AIProviderConfig, Config
 from maajun.providers.base import CompletionResponse, ProviderError, ToolDefinition
@@ -29,13 +29,24 @@ class StreamsFromChatMixin:
             yield "tool_calls", response.tool_calls
 
 
+@pytest.fixture(autouse=True)
+def _isolate_cwd(monkeypatch, tmp_path):
+    """Any tool that writes a relative path must land in tmp, never the repo.
+
+    write_file is a real executor here, so without this a fake tool call with
+    a relative path drops files into the working tree.
+    """
+    monkeypatch.chdir(tmp_path)
+
+
 class ToolCallingProvider(StreamsFromChatMixin):
     """Provider that returns tool_calls on the first call, then plain text."""
 
-    def __init__(self, tool_result="tool output", reply="final answer"):
+    def __init__(self, tool_result="tool output", reply="final answer", path="x.txt"):
         self.call_count = 0
         self.tool_result = tool_result
         self.reply = reply
+        self.path = path
         self.last_messages = None
 
     async def chat_completion(self, messages, **kwargs):
@@ -50,8 +61,8 @@ class ToolCallingProvider(StreamsFromChatMixin):
                         "id": "call_1",
                         "type": "function",
                         "function": {
-                            "name": "bash",
-                            "arguments": json.dumps({"command": "echo test"}),
+                            "name": "write_file",
+                            "arguments": json.dumps({"path": self.path, "content": "hi"}),
                         },
                     }
                 ],
@@ -84,16 +95,16 @@ class MultiToolProvider(StreamsFromChatMixin):
                         "id": "call_1",
                         "type": "function",
                         "function": {
-                            "name": "bash",
-                            "arguments": json.dumps({"command": "echo a"}),
+                            "name": "write_file",
+                            "arguments": json.dumps({"path": "a.txt", "content": "a"}),
                         },
                     },
                     {
                         "id": "call_2",
                         "type": "function",
                         "function": {
-                            "name": "bash",
-                            "arguments": json.dumps({"command": "echo b"}),
+                            "name": "write_file",
+                            "arguments": json.dumps({"path": "b.txt", "content": "b"}),
                         },
                     },
                 ],
@@ -106,8 +117,8 @@ class MultiToolProvider(StreamsFromChatMixin):
                         "id": "call_3",
                         "type": "function",
                         "function": {
-                            "name": "bash",
-                            "arguments": json.dumps({"command": "echo c"}),
+                            "name": "write_file",
+                            "arguments": json.dumps({"path": "c.txt", "content": "c"}),
                         },
                     }
                 ],
@@ -268,7 +279,7 @@ def _tool_messages(provider):
 async def test_dangerous_tool_denied_without_callback(config):
     provider = ToolCallingProvider()
     agent = _make_agent(config, provider)
-    agent.registry = ToolRegistry([BASH])
+    agent.registry = ToolRegistry([WRITE_FILE])
 
     response = await agent.chat("run something")
 
@@ -276,10 +287,11 @@ async def test_dangerous_tool_denied_without_callback(config):
     assert _tool_messages(provider)[0]["content"] == PERMISSION_DENIED
 
 
-async def test_dangerous_tool_runs_when_approved(config):
-    provider = ToolCallingProvider()
+async def test_dangerous_tool_runs_when_approved(config, tmp_path):
+    target = tmp_path / "x.txt"
+    provider = ToolCallingProvider(path=str(target))
     agent = _make_agent(config, provider)
-    agent.registry = ToolRegistry([BASH])
+    agent.registry = ToolRegistry([WRITE_FILE])
 
     approvals = []
 
@@ -290,14 +302,15 @@ async def test_dangerous_tool_runs_when_approved(config):
     agent.approve = approve
     await agent.chat("run something")
 
-    assert approvals == [("bash", {"command": "echo test"})]
-    assert "test" in _tool_messages(provider)[0]["content"]
+    assert approvals == [("write_file", {"path": str(target), "content": "hi"})]
+    assert "Wrote" in _tool_messages(provider)[0]["content"]
+    assert target.read_text() == "hi"
 
 
 async def test_dangerous_tool_denied_by_callback(config):
     provider = ToolCallingProvider()
     agent = _make_agent(config, provider)
-    agent.registry = ToolRegistry([BASH])
+    agent.registry = ToolRegistry([WRITE_FILE])
 
     async def deny(name, args):
         return False
@@ -326,7 +339,7 @@ async def test_safe_tool_skips_approval(config):
 async def test_chat_stream_denies_dangerous_tool_without_callback(config):
     provider = ToolCallingProvider(reply="adjusted")
     agent = _make_agent(config, provider)
-    agent.registry = ToolRegistry([BASH])
+    agent.registry = ToolRegistry([WRITE_FILE])
 
     async for _ in agent.chat_stream("run something"):
         pass
@@ -346,7 +359,7 @@ async def test_chat_stream_executes_tools(config):
     # Tool progress is surfaced as tool chunks
     progress = [c for c in chunks if c[0] == "tool" and "🔧" in c[1]]
     assert len(progress) == 1
-    assert "bash" in progress[0][1]
+    assert "write_file" in progress[0][1]
 
     content_chunks = [c for c in chunks if c[0] == "content"]
     assert "".join(c[1] for c in content_chunks) == "streamed answer"

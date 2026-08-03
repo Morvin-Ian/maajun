@@ -34,34 +34,26 @@ base_branch = "main"
 mode = "suggest"
 
 [monitor]
+# Log files to watch for tracebacks and error lines.
+log_files = ["/var/log/myapp/error.log"]
+error_pattern = "\\\\b(ERROR|CRITICAL|FATAL)\\\\b"
 poll_interval = 30
 
-# Monitors can be configured two ways:
-#
-# 1) Legacy shorthand (still supported):
-#    log_files = ["/var/log/myapp/error.log"]
-#    error_pattern = "\\\\b(ERROR|CRITICAL|FATAL)\\\\b"
-#    github_actions_token = "github_pat_..."
-#    github_actions_repos = ["you/another-repo"]
-#
-# 2) Declarative instances (recommended for multiple types):
-#    [[monitor.instances]]
-#    type = "logfile"
-#    path = "/var/log/myapp/error.log"
-#    error_pattern = "\\\\b(ERROR|CRITICAL|FATAL)\\\\b"
+# Detection tuning (optional).
+# json_level_field = "level"        # also match structured JSON logs
+# json_level_values = "error,critical,fatal"
+# burst_threshold = 1               # only report after N errors in the window
+# burst_window_seconds = 60
+
+# GitHub Actions — poll repos for failed workflow runs (optional).
+# github_actions_token = "github_pat_..."
+# github_actions_repos = ["you/another-repo"]
 
 [daemon]
 # Where clones, the incident database, and state live.
 # workdir = "~/.local/share/maajun"
-
-# Email notifications when a PR opens or an incident fails (optional).
-# [daemon.email]
-# smtp_host = "smtp.gmail.com"
-# smtp_port = 587                    # 465 for implicit TLS, else STARTTLS
-# username = "you@example.com"
-# password = ""                      # or set MAAJUN_SMTP_PASSWORD
-# from_addr = "you@example.com"
-# to_addrs = ["you@example.com"]
+# Local checkout to analyze when github.repo is empty (default: cwd).
+# repo_path = "/srv/myapp"
 """
 
 
@@ -160,30 +152,12 @@ class GitHubConfig(_Base):
         return []
 
 
-class MonitorInstanceConfig(_Base):
-    """One declaratively configured monitor: `[[monitor.instances]]`.
-
-    `type` selects a registered monitor class and every other key is passed
-    to its constructor, so this model stays open (extra="allow") rather than
-    duplicating each monitor's signature.
-    """
-
-    type: str
-    repo: str = ""
-    model_config = ConfigDict(extra="allow")
-
-    def monitor_kwargs(self) -> dict:
-        """Constructor kwargs for the monitor: everything but type/repo."""
-        return dict(self.model_extra or {})
-
-
 class MonitorConfig(_Base):
     log_files: list[str] = Field(default_factory=list)
     error_pattern: str = DEFAULT_ERROR_PATTERN
     poll_interval: float = 30.0
 
-    # Log-line detection. Applied to every logfile monitor built from the
-    # log_files shorthand; per-instance overrides go in [[monitor.instances]].
+    # Log-line detection, applied to every logfile monitor.
     json_level_field: str = ""
     json_level_values: str = ",".join(sorted(DEFAULT_JSON_LEVEL_VALUES))
     traceback_headers: list[str] = Field(
@@ -192,13 +166,8 @@ class MonitorConfig(_Base):
     # Emit nothing until burst_threshold events land within the window.
     burst_threshold: int = 1
     burst_window_seconds: float = 60.0
-    # Requires the optional watchdog extra: pip install 'maajun[watchdog]'
-    use_watchdog: bool = False
-
     github_actions_token: str = ""
     github_actions_repos: list[str] = Field(default_factory=list)
-
-    instances: list[MonitorInstanceConfig] = Field(default_factory=list)
 
     @property
     def json_level_value_set(self) -> frozenset[str]:
@@ -221,20 +190,7 @@ class MonitorConfig(_Base):
             traceback_headers=tuple(self.traceback_headers),
             burst_threshold=self.burst_threshold,
             burst_window_seconds=self.burst_window_seconds,
-            use_watchdog=self.use_watchdog,
         )
-
-
-class EmailConfig(_Base):
-    """SMTP settings for notification emails. Enabled when smtp_host,
-    from_addr, and to_addrs are all set."""
-
-    smtp_host: str = ""
-    smtp_port: int = 587  # 465 -> implicit TLS, otherwise STARTTLS
-    username: str = ""
-    password: str = ""  # or set MAAJUN_SMTP_PASSWORD in the environment
-    from_addr: str = ""
-    to_addrs: list[str] = Field(default_factory=list)
 
 
 class DaemonConfig(_Base):
@@ -242,7 +198,6 @@ class DaemonConfig(_Base):
     # Local checkout to analyze when no GitHub repo is configured.
     # Empty means the current working directory.
     repo_path: str = ""
-    email: EmailConfig = Field(default_factory=EmailConfig)
 
 
 class Config(_Base):
@@ -327,7 +282,6 @@ class Config(_Base):
             "traceback_headers",
             "burst_threshold",
             "burst_window_seconds",
-            "use_watchdog",
         ):
             _set_if_customized(monitor, self.monitor, name)
         _set_or_del(monitor, "github_actions_token", self.monitor.github_actions_token or None)
@@ -335,31 +289,10 @@ class Config(_Base):
             monitor["github_actions_repos"] = self.monitor.github_actions_repos
         else:
             monitor.pop("github_actions_repos", None)
-        if self.monitor.instances:
-            instances = tomlkit.aot()
-            for instance in self.monitor.instances:
-                instance_table = tomlkit.table()
-                instance_table["type"] = instance.type
-                if instance.repo:
-                    instance_table["repo"] = instance.repo
-                for key, value in instance.monitor_kwargs().items():
-                    instance_table[key] = value
-                instances.append(instance_table)
-            monitor["instances"] = instances
-        else:
-            monitor.pop("instances", None)
 
         daemon = _table(doc, "daemon")
         daemon["workdir"] = self.daemon.workdir
         _set_or_del(daemon, "repo_path", self.daemon.repo_path or None)
-        email = self.daemon.email
-        if email.smtp_host:
-            email_table = _table(daemon, "email")
-            email_table["smtp_host"] = email.smtp_host
-            email_table["smtp_port"] = email.smtp_port
-            email_table["username"] = email.username
-            email_table["from_addr"] = email.from_addr
-            email_table["to_addrs"] = email.to_addrs
 
         path.write_text(tomlkit.dumps(doc))
         self._path = path
@@ -399,12 +332,7 @@ class Config(_Base):
         elif section == "monitor":
             obj = self.monitor
         elif section == "daemon":
-            if rest[0] == "email":
-                obj, rest = self.daemon.email, rest[1:]
-                if not rest:
-                    raise ValueError("Specify a field, e.g. 'daemon.email.smtp_host'.")
-            else:
-                obj = self.daemon
+            obj = self.daemon
         else:
             raise ValueError(
                 f"Unknown config section: {section}. "
@@ -432,7 +360,7 @@ class Config(_Base):
     def get(self, key: str) -> str:
         """Get a config value using dot notation. Secrets are masked."""
         obj, field_name = self._resolve(key)
-        if field_name in ("api_key", "password") and getattr(obj, field_name):
+        if field_name == "api_key" and getattr(obj, field_name):
             return "***"
         val = getattr(obj, field_name)
         if isinstance(val, list):

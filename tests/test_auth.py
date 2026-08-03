@@ -51,7 +51,6 @@ def test_clear_provider_key_is_idempotent(fake_keyring):
 def test_clear_all(fake_keyring):
     auth = AuthManager()
     auth.set_api_key("deepseek", "a")
-    auth.set_api_key("openai", "b")
     auth.clear_all()
     assert auth.get_all_providers_with_keys() == []
 

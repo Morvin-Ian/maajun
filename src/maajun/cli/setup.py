@@ -14,21 +14,14 @@ from maajun.cli._shared import (
     app,
     configured_providers,
     console,
-    implemented_providers,
     prompt_line,
-    prompt_mode,
 )
 from maajun.config import (
-    STARTER_CONFIG,
-    AIProviderConfig,
     Config,
-    GitHubConfig,
-    MonitorConfig,
     default_config_path,
     default_data_dir,
     render_config,
 )
-from maajun.utils import PLACEHOLDER_REPO, is_valid_repo
 
 
 @app.callback(invoke_without_command=True)
@@ -116,112 +109,6 @@ def config(
     except ValueError as e:
         console.print(f"[red]✗ {e}[/red]")
         raise typer.Exit(1) from e
-
-
-@app.command()
-def init(
-    path: Path | None = typer.Option(None, "--config", "-c", help="Config file location"),
-    interactive: bool = typer.Option(
-        True, "--interactive/--no-interactive", help="Prompt for settings"
-    ),
-):
-    """Write a starter config file for the monitoring daemon"""
-    path = path or default_config_path()
-    if path.exists():
-        console.print(f"[yellow]⚠ {path} already exists.[/yellow]")
-        overwrite = prompt_line("> Overwrite? (y/N): ").strip().lower()
-        if overwrite != "y":
-            console.print("[dim]Cancelled.[/dim]")
-            return
-
-    if interactive:
-        console.print(Panel(
-            "[bold]Maajun Init[/bold]\n\nLet's set up your daemon config.",
-            border_style="blue",
-        ))
-
-        # AI provider — default to a configured one, else the built-in default.
-        auth = AuthManager()
-        configured = configured_providers(auth)
-        providers = implemented_providers()
-        default_provider = configured[0] if configured else providers[0]
-        provider = prompt_line(
-            f"> AI provider ({'/'.join(providers)}) [{default_provider}]: "
-        ).strip() or default_provider
-        if provider not in providers:
-            console.print(
-                f'[yellow]⚠ Unknown provider "{provider}". Using {default_provider}.[/yellow]'
-            )
-            provider = default_provider
-        if provider not in configured:
-            console.print(
-                f"[dim]No API key stored for {provider} yet — "
-                "run 'maajun login' before 'maajun watch'.[/dim]"
-            )
-
-        console.print("\n[bold]Repository[/bold] (where maajun will open PRs)")
-        repo = prompt_line(
-            f"> Repository (owner/name) [{PLACEHOLDER_REPO}]: "
-        ).strip() or PLACEHOLDER_REPO
-        if not is_valid_repo(repo):
-            console.print(
-                f'[yellow]⚠ "{repo}" is not in owner/name form. Using placeholder.[/yellow]'
-            )
-            repo = PLACEHOLDER_REPO
-
-        base_branch = prompt_line("> Base branch [main]: ").strip() or "main"
-
-        mode = prompt_mode("suggest")
-
-        console.print("\n[bold]Log Files[/bold] (comma-separated paths to monitor)")
-        log_files_input = prompt_line("> Log files [/var/log/myapp/error.log]: ").strip()
-        log_files = (
-            [path.strip() for path in log_files_input.split(",") if path.strip()]
-            if log_files_input else ["/var/log/myapp/error.log"]
-        )
-
-        poll_input = prompt_line("> Poll interval in seconds [30]: ").strip() or "30"
-        try:
-            poll_interval = float(poll_input)
-        except ValueError:
-            poll_interval = 30.0
-
-        config = Config(
-            ai=AIProviderConfig(provider=provider),
-            github=GitHubConfig(
-                repo=repo,
-                base_branch=base_branch,
-                mode=mode,
-            ),
-            monitor=MonitorConfig(
-                log_files=log_files,
-                poll_interval=poll_interval,
-            ),
-        )
-        config.save(path)
-    else:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(STARTER_CONFIG)
-
-    console.print(f"\n[green]✓ Wrote {path}[/green]")
-
-    if interactive:
-        console.print(
-            "\n[bold]Next steps:[/bold]\n"
-            "  1. Run [bold]maajun login[/bold] if you haven't stored an API key\n"
-            "  2. Run [bold]maajun setup[/bold] to connect GitHub and error sources\n"
-            "  3. Run [bold]maajun watch[/bold] to start monitoring\n"
-            "\n[dim]Tips: 'maajun config' views/changes settings; "
-            "'maajun add-repo' watches more repos.[/dim]"
-        )
-    else:
-        console.print(
-            "\n[bold]Next steps:[/bold]\n"
-            "  1. Edit the config: set [cyan]monitor.log_files[/cyan] (or GitHub Actions)\n"
-            "  2. Run [bold]maajun setup[/bold] to connect GitHub and error sources\n"
-            "  3. Run [bold]maajun watch[/bold] to start monitoring\n"
-        )
-
 
 
 @app.command()

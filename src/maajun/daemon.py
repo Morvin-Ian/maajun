@@ -16,12 +16,10 @@ from collections.abc import Callable
 from pathlib import Path
 
 from maajun.agent.core import Agent, PermissionCallback
-from maajun.auth import MONITOR_SECRET_TYPES, AuthManager
+from maajun.auth import AuthManager
 from maajun.config import AIProviderConfig, Config, RepoConfig
 from maajun.costs import extract_usage
-from maajun.monitors import ErrorEvent, Monitor
-from maajun.monitors.registry import MonitorRegistry
-from maajun.notifications import Notifier
+from maajun.monitors import ErrorEvent, GitHubActionsMonitor, LogFileMonitor, Monitor
 from maajun.state import IncidentStore
 from maajun.vcs import GitHubClient, GitWorkspace
 
@@ -147,7 +145,6 @@ class Daemon:
         repo_configs: list[RepoConfig] | None = None,
         report_dir: Path | None = None,
         local_mode: bool = False,
-        notifier: Notifier | None = None,
         progress: ProgressCallback | None = None,
         on_notice: NoticeCallback | None = None,
     ):
@@ -165,7 +162,6 @@ class Daemon:
             report_dir: Where local-mode reports are written
             local_mode: No GitHub configured — analyze and write reports to
                 disk instead of opening pull requests
-            notifier: Email notifier
             progress: Advances a UI spinner's phase label while an incident runs
             on_notice: Emits user-facing lines (new error, PR opened, failure)
         """
@@ -179,7 +175,6 @@ class Daemon:
         self.repo_configs = repo_configs or config.github.get_all_repos()
         self.report_dir = report_dir or Path(config.daemon.workdir).expanduser() / "reports"
         self.local_mode = local_mode
-        self.notifier = notifier or Notifier()
         self.progress = progress or _noop
         self.on_notice = on_notice
 
@@ -295,13 +290,6 @@ class Daemon:
                 log.exception("incident fp=%s failed", event.fingerprint)
                 self._notice(f"Incident failed: {exc}", "error")
                 self.store.mark_failed(event.fingerprint)
-                repo_config = self.monitor_to_repo.get(monitor.name)
-                await self.notifier.notify_incident_failed(
-                    repo=(repo_config.repo or LOCAL_REPO_LABEL) if repo_config else "unknown",
-                    error_message=event.message,
-                    fingerprint=event.fingerprint,
-                    reason=str(exc),
-                )
         return handled
 
     async def handle_incident(
@@ -444,14 +432,6 @@ class Daemon:
         log.info(
             "opened PR %s for fp=%s in repo=%s (cost: $%.4f, tokens: %d/%d)",
             pr_url, event.fingerprint, repo_config.repo, cost, prompt_tokens, completion_tokens,
-        )
-        await self.notifier.notify_pr_created(
-            repo=repo_config.repo,
-            pr_url=pr_url,
-            pr_title=title,
-            error_message=event.message,
-            mode=repo_config.mode,
-            fingerprint=event.fingerprint,
         )
         return pr_url
 
@@ -610,14 +590,9 @@ def _local_repo_path(config: Config) -> Path:
 
 
 def _build_monitors(
-    config: Config, repos: list[RepoConfig], auth: AuthManager | None = None
+    config: Config, repos: list[RepoConfig]
 ) -> tuple[list[Monitor], dict[str, RepoConfig]]:
-    """Build monitors and map each to the repo whose PRs it should open.
-
-    `auth` supplies monitor tokens that are stored in the keyring rather than
-    written into the config file.
-    """
-    auth = auth or AuthManager()
+    """Build monitors and map each to the repo whose PRs it should open."""
     monitor_cfg = config.monitor
     monitors: list[Monitor] = []
     monitor_to_repo: dict[str, RepoConfig] = {}
@@ -628,72 +603,28 @@ def _build_monitors(
         if repo_config is not None:
             monitor_to_repo[monitor.name] = repo_config
 
-    def create(monitor_type: str, **kwargs) -> Monitor:
-        """Build a monitor, turning config mistakes into readable errors.
-
-        A bad `type` or a stray key in [[monitor.instances]] otherwise
-        surfaces as a bare ValueError/TypeError traceback at startup.
-        """
-        try:
-            return MonitorRegistry.create(monitor_type, **kwargs)
-        except ValueError as e:
-            raise RuntimeError(str(e)) from e
-        except TypeError as e:
-            raise RuntimeError(
-                f"Invalid settings for monitor type {monitor_type!r}: {e}"
-            ) from e
-
-    # Shorthand: global log_files attach to the first repo.
+    # Global log_files attach to the first repo.
     for path in monitor_cfg.log_files:
-        attach(create("logfile", path=path, **monitor_cfg.logfile_kwargs()), default_repo)
+        attach(LogFileMonitor(path, **monitor_cfg.logfile_kwargs()), default_repo)
 
-    # Shorthand: per-repo log_files attach to their own repo, in addition
-    # to the above.
+    # Per-repo log_files attach to their own repo, in addition to the above.
     for repo_config in repos:
         for path in repo_config.log_files:
             attach(
-                create("logfile", path=path, **monitor_cfg.logfile_kwargs()),
+                LogFileMonitor(path, **monitor_cfg.logfile_kwargs()),
                 repo_config,
             )
 
-    # Shorthand: GitHub Actions.
+    # GitHub Actions.
     if monitor_cfg.github_actions_token and monitor_cfg.github_actions_repos:
         for repo in monitor_cfg.github_actions_repos:
             matched = next((rc for rc in repos if rc.repo == repo), default_repo)
-            attach(create(
-                "github-actions",
-                token=monitor_cfg.github_actions_token,
-                repo=repo,
+            attach(GitHubActionsMonitor(
+                monitor_cfg.github_actions_token,
+                repo,
                 burst_threshold=monitor_cfg.burst_threshold,
                 burst_window_seconds=monitor_cfg.burst_window_seconds,
             ), matched)
-
-    # Declarative instances — any registered monitor type.
-    for instance in monitor_cfg.instances:
-        kwargs = instance.monitor_kwargs()
-        # A token kept in the keyring rather than in the config file.
-        if "token" not in kwargs:
-            stored = auth.get_monitor_secret(instance.type)
-            if stored:
-                kwargs["token"] = stored
-            elif instance.type in MONITOR_SECRET_TYPES:
-                # Say what's missing. Letting this reach the constructor
-                # surfaces a raw "missing required argument 'token'".
-                raise RuntimeError(
-                    f"No auth token for the {instance.type} monitor. Run "
-                    f"`maajun setup --{instance.type} <org/project>` or set "
-                    f"{AuthManager.monitor_env_var(instance.type)}."
-                )
-        repo_config = default_repo
-        if instance.repo:
-            repo_config = next((rc for rc in repos if rc.repo == instance.repo), None)
-            if repo_config is None:
-                log.warning(
-                    "monitor instance %r targets repo %r, which is not configured; "
-                    "its events will be analyzed but will not open PRs",
-                    instance.type, instance.repo,
-                )
-        attach(create(instance.type, **kwargs), repo_config)
 
     return monitors, monitor_to_repo
 
@@ -703,9 +634,8 @@ def build_daemon(config: Config, auth: AuthManager | None = None) -> Daemon:
 
     Supports both legacy single-repo and new multi-repo configuration.
     """
-    auth = auth or AuthManager()
-    deps = _DaemonDeps(config, auth)
-    monitors, monitor_to_repo = _build_monitors(config, deps.repos, auth)
+    deps = _DaemonDeps(config, auth or AuthManager())
+    monitors, monitor_to_repo = _build_monitors(config, deps.repos)
     if not monitors:
         raise RuntimeError(
             "No monitors configured. Add log files under [monitor] "
@@ -723,7 +653,6 @@ def build_daemon(config: Config, auth: AuthManager | None = None) -> Daemon:
         repo_configs=deps.repos,
         report_dir=deps.report_dir,
         local_mode=deps.local_mode,
-        notifier=Notifier(config.daemon.email),
     )
 
 
@@ -741,5 +670,4 @@ def build_daemon_for_report(config: Config, auth: AuthManager | None = None) -> 
         repo_configs=deps.repos,
         report_dir=deps.report_dir,
         local_mode=deps.local_mode,
-        notifier=Notifier(config.daemon.email),
     )

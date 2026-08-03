@@ -8,13 +8,12 @@ GitHub Actions monitor works from anywhere with network access.
 ## 1. Configure
 
 ```bash
-maajun setup   # interactive: API key, repo, mode, logs, Sentry, email
+maajun setup   # interactive: API key, repo, mode, logs, GitHub Actions
 ```
 
-`init` prompts for the essentials and writes the config for you; pass
-`--no-interactive` to drop a commented template and edit it by hand
-instead. Afterwards you can view or change any setting without opening
-the file:
+`setup` prompts for the essentials and writes the config for you;
+everything but the API key can be skipped with Enter. Afterwards you can
+view or change any setting without opening the file:
 
 ```bash
 maajun config                       # print the whole config
@@ -49,36 +48,19 @@ poll_interval = 30            # seconds between polls
 # traceback_headers = ["Traceback (most recent call last):", "panic:"]
 # burst_threshold = 1               # only report after N errors in the window
 # burst_window_seconds = 60
-# use_watchdog = false              # needs the 'maajun[watchdog]' extra
 
 # GitHub Actions — poll failed workflow runs (optional)
 # github_actions_token = "github_pat_..."
 # github_actions_repos = ["owner/name"]
 
-# Any other monitor type (optional) — see Sentry below
-# [[monitor.instances]]
-# type = "sentry"
-# org = "acme"
-# project = "web"
-
 [daemon]
 workdir = "~/.local/share/maajun"   # clones, incident DB, state
 # repo_path = "/srv/myapp"          # local checkout to analyze in local mode
-
-# Email notifications (optional) — see Notifications below
-# [daemon.email]
-# smtp_host = "smtp.gmail.com"
-# smtp_port = 587                   # 465 for implicit TLS, else STARTTLS
-# username = "you@example.com"
-# password = ""                     # or set MAAJUN_SMTP_PASSWORD
-# from_addr = "you@example.com"
-# to_addrs = ["you@example.com"]
 ```
 
-At least one error source must be configured — log files, GitHub Actions,
-or a `[[monitor.instances]]` entry; the daemon refuses to start with
-nothing to watch. Use `--config /path/to/config.toml` on any command to
-point somewhere else.
+At least one error source must be configured — log files or GitHub
+Actions; the daemon refuses to start with nothing to watch. Use
+`--config /path/to/config.toml` on any command to point somewhere else.
 
 `github.repo` is optional. Left empty, maajun runs in **local mode**: it
 still detects and analyzes errors, but writes each incident report to
@@ -180,20 +162,6 @@ burst_window_seconds = 300   # 5 errors within 5 minutes
 
 `--once` always flushes an incomplete burst rather than discarding it.
 
-**Change-driven polling.** With the optional watchdog extra, the monitor
-reads only when the file actually changes rather than on every interval:
-
-```bash
-pip install 'maajun[watchdog]'
-```
-
-```toml
-use_watchdog = true
-```
-
-It falls back to interval polling (with a warning) when the extra isn't
-installed.
-
 ### GitHub Actions
 
 Set `github_actions_token` and `github_actions_repos` to poll each repo
@@ -205,53 +173,6 @@ to the failed run.
 
 `maajun setup --github-actions` wires this up using the GitHub token you
 already stored, rather than asking for a second one.
-
-### Sentry
-
-Poll a Sentry project for unresolved issues:
-
-```bash
-maajun setup --sentry acme/web
-```
-
-That writes a `[[monitor.instances]]` entry and stores the auth token in
-your keyring — `[[monitor.instances]]` is plaintext, so the token
-deliberately does not live there:
-
-```toml
-[[monitor.instances]]
-type = "sentry"
-org = "acme"
-project = "web"
-```
-
-The token needs `project:read`. On a headless server without a keyring,
-export `MAAJUN_SENTRY_TOKEN` instead. Each issue becomes one incident,
-fingerprinted by its Sentry issue id, with the culprit, event count, and
-a permalink. For self-hosted Sentry add `base_url = "https://sentry.internal"`.
-
-### Any monitor type: `[[monitor.instances]]`
-
-`log_files` and the `github_actions_*` keys are shorthands. The general
-form is an array of tables, one per monitor, where `type` selects the
-monitor and the remaining keys are passed to it:
-
-```toml
-[[monitor.instances]]
-type = "logfile"
-path = "/var/log/api/error.log"
-json_level_field = "level"      # per-instance overrides
-repo = "team/api"               # which repo its PRs go to
-
-[[monitor.instances]]
-type = "github-actions"
-repo = "team/web"
-token = "github_pat_..."
-```
-
-Available types: `logfile`, `github-actions`, `sentry`. An instance whose
-`repo` isn't configured still has its errors analyzed; it just has no
-repo to open a PR against, and the daemon logs a warning at startup.
 
 ## 2. Give it GitHub access
 
@@ -369,29 +290,6 @@ the PR. Start with `suggest`; switch to `fix` once you trust the reports.
 - Committed file: `docs/incidents/<fingerprint>.md` (the same report, so
   incidents are documented in-repo even after the PR is closed)
 
-## Notifications
-
-Configure `[daemon.email]` to get an email whenever maajun opens a PR
-(with a link) or fails to process an incident (with the reason).
-Notifications are enabled when `smtp_host`, `from_addr`, and `to_addrs`
-are all set; leave them out and maajun stays silent. Delivery failures
-are logged and never interrupt the pipeline.
-
-```toml
-[daemon.email]
-smtp_host = "smtp.gmail.com"
-smtp_port = 587                  # 465 uses implicit TLS, anything else STARTTLS
-username = "you@example.com"
-password = ""                    # prefer: export MAAJUN_SMTP_PASSWORD=...
-from_addr = "you@example.com"
-to_addrs = ["you@example.com", "team@example.com"]
-```
-
-Keep the password out of the config file by setting the
-`MAAJUN_SMTP_PASSWORD` environment variable instead (it is used whenever
-`password` is empty). For Gmail, use an app password
-(<https://myaccount.google.com/apppasswords>), not your account password.
-
 ## Deduplication
 
 Every error gets a stable fingerprint before any AI call:
@@ -434,7 +332,6 @@ User=deploy
 ExecStart=/home/deploy/.local/bin/maajun watch
 Environment=GITHUB_TOKEN=github_pat_...
 Environment=DEEPSEEK_API_KEY=sk-...
-# Environment=MAAJUN_SMTP_PASSWORD=...   # if email notifications are on
 # Or keep secrets out of the unit file:
 # EnvironmentFile=/etc/maajun/secrets.env
 Restart=on-failure
@@ -467,10 +364,7 @@ log files in one shot and points at whatever is missing.
 - **"Token cannot push"** — the fine-grained PAT is missing Contents
   write access or doesn't cover the repo.
 - **"No monitors configured"** — the `[monitor]` section defines no log
-  files, GitHub Actions repos, or `[[monitor.instances]]` entries.
-- **"Unknown monitor type"** / **"Invalid settings for monitor type"** —
-  a `[[monitor.instances]]` entry has a misspelled `type`, or a key that
-  the monitor's constructor doesn't accept.
+  files and no GitHub Actions repos.
 - **"A repo is configured but there is no GitHub token"** — you asked for
   PRs without credentials. Run `maajun setup`, or clear `github.repo` to
   fall back to local reports.
@@ -485,7 +379,4 @@ log files in one shot and points at whatever is missing.
   held back on purpose until the threshold is met. For HTTP monitors, run
   with `-v` and check for fetch errors — a monitor that can't reach its
   API logs the failure and returns nothing rather than crashing.
-- **No notification emails** — `[daemon.email]` needs `smtp_host`,
-  `from_addr`, and `to_addrs` all set to be enabled. Send failures are
-  logged (`email notification failed`) — check credentials, and remember
-  Gmail needs an app password.
+
