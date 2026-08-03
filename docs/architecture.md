@@ -9,7 +9,12 @@ text. Responses stream token-by-token, including during tool rounds.
 
 Every response carries the model that produced it and its token usage, so
 the daemon can price each incident accurately (see
-[Cost tracking](monitoring.md#cost-tracking)).
+[Cost tracking](monitoring.md#cost-tracking)). Usage is summed across
+*every* round, not just the one that produced the final text: each tool
+round is a separately billed request that resends the whole conversation,
+so counting only the last one would under-report a tool-heavy analysis
+several times over — and the [spend cap](monitoring.md#capping-spend)
+decides from these numbers.
 
 ### Providers
 
