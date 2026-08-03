@@ -442,3 +442,60 @@ async def test_chat_stream_multiple_tool_rounds(config):
     # Tool results were fed back to the provider
     tool_msgs = [m for m in provider.last_messages if m["role"] == "tool"]
     assert len(tool_msgs) == 3
+
+
+class UsagePerRoundProvider(StreamsFromChatMixin):
+    """Reports token usage on every round, tool rounds included."""
+
+    def __init__(self, rounds=3):
+        self.rounds = rounds
+        self.call_count = 0
+
+    async def chat_completion(self, messages, **kwargs):
+        self.call_count += 1
+        usage = {"prompt_tokens": 100, "completion_tokens": 10}
+        if self.call_count < self.rounds:
+            return CompletionResponse(
+                content="",
+                usage=usage,
+                model="deepseek-v4-flash",
+                tool_calls=[
+                    {
+                        "id": f"call_{self.call_count}",
+                        "type": "function",
+                        "function": {
+                            "name": "write_file",
+                            "arguments": json.dumps(
+                                {"path": f"{self.call_count}.txt", "content": "x"}
+                            ),
+                        },
+                    }
+                ],
+            )
+        return CompletionResponse(content="done", usage=usage, model="deepseek-v4-flash")
+
+    async def validate_credentials(self):
+        return True
+
+    def get_provider_name(self):
+        return "fake"
+
+
+async def test_usage_sums_every_round_not_just_the_last(config):
+    """Each tool round is a billed request; the spend cap reads these numbers."""
+    provider = UsagePerRoundProvider(rounds=3)
+    agent = _make_agent(config, provider)
+
+    response = await agent.chat("investigate")
+
+    assert provider.call_count == 3
+    assert response.usage == {"prompt_tokens": 300, "completion_tokens": 30}
+
+
+async def test_usage_is_none_when_the_provider_reports_none(config):
+    provider = ToolCallingProvider()
+    agent = _make_agent(config, provider)
+
+    response = await agent.chat("do something")
+
+    assert response.usage is None

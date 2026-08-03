@@ -59,6 +59,20 @@ Be concise, accurate, and helpful.  Use markdown when it improves readability.
 If you're unsure about something, say so rather than guessing."""
 
 
+def _accumulate_usage(total: dict[str, int], usage: dict[str, int] | None) -> None:
+    """Add one response's token counts into a running total.
+
+    Sums whatever keys the provider reported rather than a fixed set, so a
+    provider that adds e.g. cached-token counts is carried through instead of
+    being silently dropped.
+    """
+    if not usage:
+        return
+    for key, value in usage.items():
+        if isinstance(value, int):
+            total[key] = total.get(key, 0) + value
+
+
 class Agent:
     def __init__(
         self,
@@ -95,10 +109,16 @@ class Agent:
         tools = self.registry.definitions()
         thinking_parts: list[str] = []
         last_content = ""
+        # Every round is a billed request, and each one resends the whole
+        # conversation — so reporting only the final round's usage would
+        # under-count a tool-heavy analysis several times over, and the
+        # daemon's spend cap reads these numbers.
+        total_usage: dict[str, int] = {}
 
         try:
             for _ in range(MAX_TOOL_ROUNDS):
                 response = await self._complete(messages, tools)
+                _accumulate_usage(total_usage, response.usage)
 
                 if response.thinking:
                     thinking_parts.append(response.thinking)
@@ -113,7 +133,7 @@ class Agent:
                     return CompletionResponse(
                         content=response.content,
                         thinking="".join(thinking_parts) or None,
-                        usage=response.usage,
+                        usage=total_usage or None,
                         model=response.model,
                     )
 
@@ -124,6 +144,7 @@ class Agent:
             return CompletionResponse(
                 content=last_content,
                 thinking="".join(thinking_parts) or None,
+                usage=total_usage or None,
                 model=response.model,
             )
 
