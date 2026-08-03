@@ -19,7 +19,7 @@ import typer
 from rich.panel import Panel
 
 from maajun.auth import GITHUB_TOKEN_ENV, AuthManager
-from maajun.checks import build_status, gather_github
+from maajun.checks import build_status, gather_github, gather_monitor_secrets
 from maajun.cli._shared import (
     app,
     configured_providers,
@@ -543,6 +543,7 @@ def _print_summary(config: Config, auth: AuthManager) -> None:
         has_token=auth.has_github_token(),
         repos=repos,
         network=None,
+        monitor_secrets=gather_monitor_secrets(auth, config),
     )
     console.print("\n[bold]Status[/bold]")
     for section in sections:

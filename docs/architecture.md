@@ -46,27 +46,47 @@ a suggestion instead).
 
 A monitor is anything that can answer "what new errors happened since I
 last asked?" — the daemon just polls whichever ones the config enables
-and treats their output identically. Both produce the same normalized
+and treats their output identically. They all produce the same normalized
 `ErrorEvent` (source, message, details, fingerprint), so the rest of the
 pipeline doesn't care where an error came from.
 
 - **Log files** (`monitors/logfile.py`) — tails files incrementally,
-  surviving rotation and truncation. Recognizes Python tracebacks
-  (including ones split across polls) and lines matching the configured
-  error pattern. Requires maajun to run on the machine that writes the
-  logs — this is how failing requests on a VPS are detected, via the
-  traceback the app logs when a request errors.
+  surviving rotation and truncation. Recognizes Python, Java, and Go
+  stack traces (including ones split across polls), lines matching the
+  configured error pattern, and structured JSON logs matched on a level
+  field. Requires maajun to run on the machine that writes the logs —
+  this is how failing requests on a VPS are detected, via the traceback
+  the app logs when a request errors.
 - **GitHub Actions** (`monitors/github_actions.py`) — polls for failed
   workflow runs, turning CI breakage into incidents. Failures are
   fingerprinted by commit SHA, so several red workflows on the same
   commit collapse into a single incident.
+- **Sentry** (`monitors/sentry_monitor.py`) — polls a project for
+  unresolved issues, fingerprinted by Sentry issue id.
 
-The GitHub Actions monitor is built on `HTTPPollMonitor`, which owns the
+The HTTP-based monitors are built on `HTTPPollMonitor`, which owns the
 HTTP client, remembers which item ids it has already emitted, and
 swallows (but logs) fetch failures — a monitor that can't reach its API
 returns no events rather than crashing the daemon. Adding a new
-HTTP-polled source means implementing three methods: fetch the items,
-identify one, convert one to an `ErrorEvent`.
+HTTP-polled source means implementing three methods (fetch the items,
+identify one, convert one to an `ErrorEvent`) and registering the class:
+
+```python
+@MonitorRegistry.register("my-source")
+class MySourceMonitor(HTTPPollMonitor):
+    ...
+```
+
+`MonitorRegistry` (`monitors/registry.py`) is what lets
+[`[[monitor.instances]]`](monitoring.md#any-monitor-type-monitorinstances)
+name a `type` in config: the daemon looks the type up and passes the
+remaining keys to the constructor, so a new monitor becomes configurable
+without touching the daemon's wiring.
+
+Every monitor also inherits **burst thresholding** from the base class:
+with `burst_threshold > 1`, events are buffered until N of them land
+inside `burst_window_seconds` and then emitted together, so a one-off
+blip never becomes a pull request.
 
 ## The incident pipeline (`maajun watch`)
 
@@ -90,7 +110,11 @@ identify one, convert one to an `ErrorEvent`.
 4. **Publish** — the report is committed as
    `docs/incidents/<fingerprint>.md`, the branch is pushed, and a pull
    request is opened with the report as its body. If the branch already
-   has an open PR it is reused, never duplicated.
+   has an open PR it is reused, never duplicated. With no `github.repo`
+   configured the daemon runs in
+   [local mode](monitoring.md#1-configure) instead: steps 1–3 are
+   unchanged, but the report is written to `<workdir>/reports/` and no
+   git or GitHub operation runs at all.
 5. **Record & notify** — the incident is marked processed with its PR
    URL, token counts, and USD cost. If email notifications are
    configured, an email is sent with a link to the PR. If any step

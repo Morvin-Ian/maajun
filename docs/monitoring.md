@@ -32,7 +32,7 @@ provider = "deepseek"
 # max_tokens = 4096
 
 [github]
-repo = "owner/name"           # repository maajun opens PRs on
+repo = "owner/name"           # repository maajun opens PRs on; "" for local mode
 base_branch = "main"          # branch PRs target
 mode = "suggest"              # "suggest" or "fix" — see Modes below
 
@@ -43,12 +43,27 @@ log_files = [                 # files to tail for errors
 error_pattern = "\\b(ERROR|CRITICAL|FATAL)\\b"   # regex for error lines
 poll_interval = 30            # seconds between polls
 
+# Detection tuning (optional) — see Tuning detection below
+# json_level_field = "level"        # also match structured JSON logs
+# json_level_values = "error,critical,fatal"
+# traceback_headers = ["Traceback (most recent call last):", "panic:"]
+# burst_threshold = 1               # only report after N errors in the window
+# burst_window_seconds = 60
+# use_watchdog = false              # needs the 'maajun[watchdog]' extra
+
 # GitHub Actions — poll failed workflow runs (optional)
 # github_actions_token = "github_pat_..."
 # github_actions_repos = ["owner/name"]
 
+# Any other monitor type (optional) — see Sentry below
+# [[monitor.instances]]
+# type = "sentry"
+# org = "acme"
+# project = "web"
+
 [daemon]
 workdir = "~/.local/share/maajun"   # clones, incident DB, state
+# repo_path = "/srv/myapp"          # local checkout to analyze in local mode
 
 # Email notifications (optional) — see Notifications below
 # [daemon.email]
@@ -60,9 +75,17 @@ workdir = "~/.local/share/maajun"   # clones, incident DB, state
 # to_addrs = ["you@example.com"]
 ```
 
-At least one error source must be configured — log files or GitHub
-Actions; the daemon refuses to start with nothing to watch. Use
-`--config /path/to/config.toml` on any command to point somewhere else.
+At least one error source must be configured — log files, GitHub Actions,
+or a `[[monitor.instances]]` entry; the daemon refuses to start with
+nothing to watch. Use `--config /path/to/config.toml` on any command to
+point somewhere else.
+
+`github.repo` is optional. Left empty, maajun runs in **local mode**: it
+still detects and analyzes errors, but writes each incident report to
+`<workdir>/reports/<fingerprint>.md` instead of opening a pull request,
+and forces `suggest` mode so the agent can never edit your working tree.
+Set `daemon.repo_path` to choose which checkout it analyzes — the default
+is the current directory.
 
 ### Multiple repositories
 
@@ -104,9 +127,14 @@ second repo.
 
 Point `monitor.log_files` at the files your app writes. The monitor
 tails them incrementally (surviving rotation and truncation), recognizes
-Python tracebacks — including ones split across polls — and lines
-matching `error_pattern`. An ERROR line immediately followed by a
+stack traces — including ones split across polls — and lines matching
+`error_pattern`. An ERROR line followed within a line or two by a
 traceback (`logging.exception`) is merged into a single event.
+
+Stack traces are recognized for Python (`Traceback (most recent call
+last):`), Java (`Exception in thread`, `Caused by:`), and Go (`panic:`,
+`goroutine`). Override the list with `traceback_headers` for another
+language or a custom format.
 
 This is how maajun catches **request errors on a VPS**: run maajun on
 the same server as your app, and point it at the log your app's
@@ -118,6 +146,54 @@ works too since `error_pattern` is a plain regex you can adapt to any
 log format. Errors that are swallowed without being logged are invisible
 — make sure unhandled exceptions actually reach a file.
 
+### Tuning detection
+
+`error_pattern` matches `ERROR|CRITICAL|FATAL` by default. Warnings are
+deliberately excluded: every match costs an AI call and a pull request,
+so opt in explicitly if you want them.
+
+```toml
+[monitor]
+error_pattern = "\\b(ERROR|CRITICAL|FATAL|WARNING)\\b"
+```
+
+**Structured logs.** Set `json_level_field` to match one-JSON-object-per-line
+logs on their level field, instead of hoping the regex hits:
+
+```toml
+json_level_field = "level"                  # or "severity", "levelname", …
+json_level_values = "error,critical,fatal"  # levels that count as errors
+```
+
+The regex still applies to lines that aren't valid JSON, so a mixed log
+works.
+
+**Noisy, self-recovering errors.** `burst_threshold` holds events back
+until N of them land inside `burst_window_seconds`, so a single blip is
+ignored and only a genuinely repeating error opens a PR. The whole burst
+is reported once the threshold is reached:
+
+```toml
+burst_threshold = 5
+burst_window_seconds = 300   # 5 errors within 5 minutes
+```
+
+`--once` always flushes an incomplete burst rather than discarding it.
+
+**Change-driven polling.** With the optional watchdog extra, the monitor
+reads only when the file actually changes rather than on every interval:
+
+```bash
+pip install 'maajun[watchdog]'
+```
+
+```toml
+use_watchdog = true
+```
+
+It falls back to interval polling (with a warning) when the extra isn't
+installed.
+
 ### GitHub Actions
 
 Set `github_actions_token` and `github_actions_repos` to poll each repo
@@ -126,6 +202,56 @@ actions. A failure becomes an incident fingerprinted by the commit SHA,
 so multiple workflows failing on the same commit produce a single
 incident (one commit, one root cause), with the run details and a link
 to the failed run.
+
+`maajun setup --github-actions` wires this up using the GitHub token you
+already stored, rather than asking for a second one.
+
+### Sentry
+
+Poll a Sentry project for unresolved issues:
+
+```bash
+maajun setup --sentry acme/web
+```
+
+That writes a `[[monitor.instances]]` entry and stores the auth token in
+your keyring — `[[monitor.instances]]` is plaintext, so the token
+deliberately does not live there:
+
+```toml
+[[monitor.instances]]
+type = "sentry"
+org = "acme"
+project = "web"
+```
+
+The token needs `project:read`. On a headless server without a keyring,
+export `MAAJUN_SENTRY_TOKEN` instead. Each issue becomes one incident,
+fingerprinted by its Sentry issue id, with the culprit, event count, and
+a permalink. For self-hosted Sentry add `base_url = "https://sentry.internal"`.
+
+### Any monitor type: `[[monitor.instances]]`
+
+`log_files` and the `github_actions_*` keys are shorthands. The general
+form is an array of tables, one per monitor, where `type` selects the
+monitor and the remaining keys are passed to it:
+
+```toml
+[[monitor.instances]]
+type = "logfile"
+path = "/var/log/api/error.log"
+json_level_field = "level"      # per-instance overrides
+repo = "team/api"               # which repo its PRs go to
+
+[[monitor.instances]]
+type = "github-actions"
+repo = "team/web"
+token = "github_pat_..."
+```
+
+Available types: `logfile`, `github-actions`, `sentry`. An instance whose
+`repo` isn't configured still has its errors analyzed; it just has no
+repo to open a PR against, and the daemon logs a warning at startup.
 
 ## 2. Give it GitHub access
 
@@ -341,16 +467,24 @@ log files in one shot and points at whatever is missing.
 - **"Token cannot push"** — the fine-grained PAT is missing Contents
   write access or doesn't cover the repo.
 - **"No monitors configured"** — the `[monitor]` section defines no log
-  files or GitHub Actions repos.
+  files, GitHub Actions repos, or `[[monitor.instances]]` entries.
+- **"Unknown monitor type"** / **"Invalid settings for monitor type"** —
+  a `[[monitor.instances]]` entry has a misspelled `type`, or a key that
+  the monitor's constructor doesn't accept.
+- **"A repo is configured but there is no GitHub token"** — you asked for
+  PRs without credentials. Run `maajun setup`, or clear `github.repo` to
+  fall back to local reports.
 - **No PR for an error you expected** — check the fingerprint isn't
   already in `incidents.db` (`status=processed` means a PR exists;
   `failed` means the last attempt errored — check logs, fix the cause,
   delete the row to retry).
 - **Nothing detected** — confirm the log path is right and your log
-  format matches `error_pattern`, or that errors are Python tracebacks.
-  For GitHub Actions, run with `-v` and check for fetch errors — a
-  monitor that can't reach its API logs the failure and returns nothing
-  rather than crashing.
+  format matches `error_pattern` (warnings are *not* matched by default),
+  or that errors are recognized stack traces. For JSON logs, set
+  `json_level_field`. If `burst_threshold` is above 1, a single error is
+  held back on purpose until the threshold is met. For HTTP monitors, run
+  with `-v` and check for fetch errors — a monitor that can't reach its
+  API logs the failure and returns nothing rather than crashing.
 - **No notification emails** — `[daemon.email]` needs `smtp_host`,
   `from_addr`, and `to_addrs` all set to be enabled. Send failures are
   logged (`email notification failed`) — check credentials, and remember

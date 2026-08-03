@@ -174,3 +174,27 @@ async def test_sentry_poll_survives_a_failing_api(monkeypatch, caplog):
 
 async def _async_value(value):
     return value
+
+
+def test_missing_sentry_token_names_the_env_var(fake_keyring, monkeypatch):
+    """Regression: this leaked a raw "missing required argument 'token'"."""
+    from maajun.auth import AuthManager
+
+    monkeypatch.delenv("MAAJUN_SENTRY_TOKEN", raising=False)
+    config = _config(instances=[
+        MonitorInstanceConfig(type="sentry", org="acme", project="web"),
+    ])
+    with pytest.raises(RuntimeError, match="MAAJUN_SENTRY_TOKEN"):
+        _build_monitors(config, config.github.get_all_repos(), AuthManager())
+
+
+def test_an_inline_sentry_token_is_still_honored(fake_keyring, monkeypatch):
+    """A token written straight into the config keeps working."""
+    from maajun.auth import AuthManager
+
+    monkeypatch.delenv("MAAJUN_SENTRY_TOKEN", raising=False)
+    config = _config(instances=[
+        MonitorInstanceConfig(type="sentry", org="acme", project="web", token="inline"),
+    ])
+    monitors, _ = _build_monitors(config, config.github.get_all_repos(), AuthManager())
+    assert monitors[0].name == "sentry:acme/web"

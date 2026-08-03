@@ -16,7 +16,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 from maajun.agent.core import Agent, PermissionCallback
-from maajun.auth import AuthManager
+from maajun.auth import MONITOR_SECRET_TYPES, AuthManager
 from maajun.config import AIProviderConfig, Config, RepoConfig
 from maajun.costs import extract_usage
 from maajun.monitors import ErrorEvent, Monitor
@@ -676,6 +676,14 @@ def _build_monitors(
             stored = auth.get_monitor_secret(instance.type)
             if stored:
                 kwargs["token"] = stored
+            elif instance.type in MONITOR_SECRET_TYPES:
+                # Say what's missing. Letting this reach the constructor
+                # surfaces a raw "missing required argument 'token'".
+                raise RuntimeError(
+                    f"No auth token for the {instance.type} monitor. Run "
+                    f"`maajun setup --{instance.type} <org/project>` or set "
+                    f"{AuthManager.monitor_env_var(instance.type)}."
+                )
         repo_config = default_repo
         if instance.repo:
             repo_config = next((rc for rc in repos if rc.repo == instance.repo), None)
