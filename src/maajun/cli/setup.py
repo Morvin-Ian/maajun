@@ -35,10 +35,11 @@ from maajun.providers.factory import ProviderFactory
 from maajun.utils import is_valid_repo
 from maajun.vcs import GitHubClient, GitHubError
 
+# One entry per *implemented* provider. An entry for a provider with no module
+# advertises a choice the wizard cannot honor.
 PROVIDER_SIGNUP_URLS = {
     "deepseek": "https://platform.deepseek.com",
     "openai": "https://platform.openai.com/api-keys",
-    "anthropic": "https://console.anthropic.com/settings/keys",
 }
 
 GITHUB_TOKEN_URL = "https://github.com/settings/personal-access-tokens"
