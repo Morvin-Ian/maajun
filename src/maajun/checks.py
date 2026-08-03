@@ -43,11 +43,11 @@ async def gather_github(
         except GitHubError:
             return None, {}
         pushable = {}
-        for rc in repos:
+        for repo_config in repos:
             try:
-                pushable[rc.repo] = await client.can_push(rc.repo)
+                pushable[repo_config.repo] = await client.can_push(repo_config.repo)
             except GitHubError:
-                pushable[rc.repo] = False
+                pushable[repo_config.repo] = False
         return login, pushable
     finally:
         await client.aclose()
@@ -88,9 +88,9 @@ def build_status(
                                 "or run 'gh auth login'",
         ))
         if network is None:
-            for rc in repos:
+            for repo_config in repos:
                 github.checks.append(Check(
-                    f"Repository {rc.repo}", True,
+                    f"Repository {repo_config.repo}", True,
                     "(reachability not checked)", warn=True, counts=False,
                 ))
         else:
@@ -99,37 +99,48 @@ def build_status(
                 github.checks.append(Check("Token valid", False, "authentication failed"))
             else:
                 github.checks.append(Check(f"Authenticated as {login}", True, counts=False))
-                for rc in repos:
-                    pushes = pushable.get(rc.repo, False)
+                for repo_config in repos:
+                    can_push = pushable.get(repo_config.repo, False)
                     github.checks.append(Check(
-                        f"Can push to {rc.repo}", pushes,
-                        "" if pushes else "check token repo access / Contents perm",
+                        f"Can push to {repo_config.repo}", can_push,
+                        "" if can_push else "check token repo access / Contents perm",
                     ))
 
     monitors = Section("Monitors", [])
     log_paths = list(config.monitor.log_files)
-    for rc in repos:
-        log_paths.extend(rc.log_files)
-    ga = bool(config.monitor.github_actions_token and config.monitor.github_actions_repos)
-    if not log_paths and not ga:
+    for repo_config in repos:
+        log_paths.extend(repo_config.log_files)
+    watches_actions = bool(
+        config.monitor.github_actions_token and config.monitor.github_actions_repos
+    )
+    watches_instances = bool(config.monitor.instances)
+    if not log_paths and not watches_actions and not watches_instances:
         monitors.checks.append(Check(
             "At least one monitor configured", False,
             "add monitor.log_files or GitHub Actions",
         ))
-    for lf in log_paths:
+    for log_path in log_paths:
         # A missing log file is a warning, not a failure: it may be created
         # once the monitored app first logs an error.
-        exists = Path(lf).expanduser().exists()
+        exists = Path(log_path).expanduser().exists()
         monitors.checks.append(Check(
-            f"Log file {lf}", exists,
+            f"Log file {log_path}", exists,
             "" if exists else "not found yet", warn=not exists, counts=False,
         ))
-    if ga:
+    for instance in config.monitor.instances:
+        label = instance.type
+        details = instance.monitor_kwargs()
+        if instance.type == "sentry":
+            label = f"sentry: {details.get('org', '?')}/{details.get('project', '?')}"
+        monitors.checks.append(Check(label, True, counts=False))
+    if watches_actions:
         monitors.checks.append(Check(
             f"GitHub Actions: {', '.join(config.monitor.github_actions_repos)}",
             True, counts=False,
         ))
 
     sections = [ai, github, monitors]
-    ok = all(c.ok for s in sections for c in s.checks if c.counts)
+    ok = all(
+        check.ok for section in sections for check in section.checks if check.counts
+    )
     return sections, ok

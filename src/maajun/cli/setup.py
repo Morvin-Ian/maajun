@@ -11,12 +11,12 @@ from rich.panel import Panel
 
 from maajun.auth import AuthManager
 from maajun.cli._shared import (
-    _configured_providers,
-    _implemented_providers,
-    _input,
-    _prompt_mode,
     app,
+    configured_providers,
     console,
+    implemented_providers,
+    prompt_line,
+    prompt_mode,
 )
 from maajun.config import (
     STARTER_CONFIG,
@@ -38,7 +38,7 @@ def main(ctx: typer.Context):
         return
 
     auth = AuthManager()
-    configured = _configured_providers(auth)
+    configured = configured_providers(auth)
 
     if not configured:
         console.print(Panel(
@@ -129,7 +129,7 @@ def init(
     path = path or default_config_path()
     if path.exists():
         console.print(f"[yellow]⚠ {path} already exists.[/yellow]")
-        overwrite = _input("> Overwrite? (y/N): ").strip().lower()
+        overwrite = prompt_line("> Overwrite? (y/N): ").strip().lower()
         if overwrite != "y":
             console.print("[dim]Cancelled.[/dim]")
             return
@@ -142,10 +142,10 @@ def init(
 
         # AI provider — default to a configured one, else the built-in default.
         auth = AuthManager()
-        configured = _configured_providers(auth)
-        providers = _implemented_providers()
+        configured = configured_providers(auth)
+        providers = implemented_providers()
         default_provider = configured[0] if configured else providers[0]
-        provider = _input(
+        provider = prompt_line(
             f"> AI provider ({'/'.join(providers)}) [{default_provider}]: "
         ).strip() or default_provider
         if provider not in providers:
@@ -160,7 +160,7 @@ def init(
             )
 
         console.print("\n[bold]Repository[/bold] (where maajun will open PRs)")
-        repo = _input(
+        repo = prompt_line(
             f"> Repository (owner/name) [{PLACEHOLDER_REPO}]: "
         ).strip() or PLACEHOLDER_REPO
         if not is_valid_repo(repo):
@@ -169,18 +169,18 @@ def init(
             )
             repo = PLACEHOLDER_REPO
 
-        base_branch = _input("> Base branch [main]: ").strip() or "main"
+        base_branch = prompt_line("> Base branch [main]: ").strip() or "main"
 
-        mode = _prompt_mode("suggest")
+        mode = prompt_mode("suggest")
 
         console.print("\n[bold]Log Files[/bold] (comma-separated paths to monitor)")
-        log_files_input = _input("> Log files [/var/log/myapp/error.log]: ").strip()
+        log_files_input = prompt_line("> Log files [/var/log/myapp/error.log]: ").strip()
         log_files = (
-            [lf.strip() for lf in log_files_input.split(",") if lf.strip()]
+            [path.strip() for path in log_files_input.split(",") if path.strip()]
             if log_files_input else ["/var/log/myapp/error.log"]
         )
 
-        poll_input = _input("> Poll interval in seconds [30]: ").strip() or "30"
+        poll_input = prompt_line("> Poll interval in seconds [30]: ").strip() or "30"
         try:
             poll_interval = float(poll_input)
         except ValueError:
@@ -252,7 +252,7 @@ def reset(
             title="Reset Maajun",
             border_style="red",
         ))
-        confirm = _input("> Type 'yes' to confirm: ").strip().lower()
+        confirm = prompt_line("> Type 'yes' to confirm: ").strip().lower()
         if confirm != "yes":
             console.print("[dim]Cancelled.[/dim]")
             return

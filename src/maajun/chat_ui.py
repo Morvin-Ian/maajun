@@ -170,12 +170,12 @@ async def _chat_loop(agent, console, live_holder=None, prompt_session=None):
             if not agent.history:
                 console.print("[dim]No messages yet.[/dim]")
             else:
-                for msg in agent.history:
-                    if msg["role"] == "user":
-                        console.print(f"\n> {msg['content']}")
-                    elif msg["role"] == "assistant" and msg.get("content"):
+                for message in agent.history:
+                    if message["role"] == "user":
+                        console.print(f"\n> {message['content']}")
+                    elif message["role"] == "assistant" and message.get("content"):
                         console.print()
-                        console.print(_rendered(msg["content"]))
+                        console.print(_rendered(message["content"]))
             continue
 
         console.print()

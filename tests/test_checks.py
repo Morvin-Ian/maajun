@@ -108,3 +108,32 @@ def test_cannot_push_fails(tmp_path):
         repos=config.github.get_all_repos(), network=("morvin", {"owner/name": False}),
     )
     assert ok is False
+
+
+def test_a_sentry_only_setup_counts_as_a_configured_monitor():
+    """[[monitor.instances]] is a real error source, so requiring log_files or
+    GitHub Actions on top of it was wrong."""
+    from maajun.config import MonitorInstanceConfig
+
+    config = Config(
+        github=GitHubConfig(repo="owner/name"),
+        monitor=MonitorConfig(instances=[
+            MonitorInstanceConfig(type="sentry", org="acme", project="web"),
+        ]),
+    )
+    sections, ok = build_status(
+        config, provider="deepseek", has_key=True, has_token=True,
+        repos=[RepoConfig(repo="owner/name")], network=None,
+    )
+    assert ok is True
+    assert "sentry: acme/web" in _labels(sections)
+
+
+def test_no_monitors_at_all_still_fails():
+    config = Config(github=GitHubConfig(repo="owner/name"), monitor=MonitorConfig())
+    sections, ok = build_status(
+        config, provider="deepseek", has_key=True, has_token=True,
+        repos=[RepoConfig(repo="owner/name")], network=None,
+    )
+    assert ok is False
+    assert "At least one monitor configured" in _labels(sections)

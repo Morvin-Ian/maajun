@@ -92,11 +92,11 @@ class AIProviderConfig(_Base):
 
     @field_validator("provider")
     @classmethod
-    def validate_provider(cls, v: str) -> str:
+    def validate_provider(cls, value: str) -> str:
         valid_providers = [p.value for p in ProviderType]
-        if v not in valid_providers:
+        if value not in valid_providers:
             raise ValueError(f'Provider must be one of: {", ".join(valid_providers)}')
-        return v
+        return value
 
 
 class RepoConfig(_Base):
@@ -112,17 +112,17 @@ class RepoConfig(_Base):
 
     @field_validator("mode")
     @classmethod
-    def validate_mode(cls, v: str) -> str:
-        if v not in ("suggest", "fix"):
+    def validate_mode(cls, value: str) -> str:
+        if value not in ("suggest", "fix"):
             raise ValueError('mode must be "suggest" or "fix"')
-        return v
+        return value
 
     @field_validator("repo")
     @classmethod
-    def validate_repo(cls, v: str) -> str:
-        if v and not is_valid_repo(v):
+    def validate_repo(cls, value: str) -> str:
+        if value and not is_valid_repo(value):
             raise ValueError('repo must be in "owner/name" form')
-        return v
+        return value
 
 
 class GitHubConfig(_Base):
@@ -135,17 +135,17 @@ class GitHubConfig(_Base):
 
     @field_validator("mode")
     @classmethod
-    def validate_mode(cls, v: str) -> str:
-        if v not in ("suggest", "fix"):
+    def validate_mode(cls, value: str) -> str:
+        if value not in ("suggest", "fix"):
             raise ValueError('mode must be "suggest" or "fix"')
-        return v
+        return value
 
     @field_validator("repo")
     @classmethod
-    def validate_repo(cls, v: str) -> str:
-        if v and not is_valid_repo(v):
+    def validate_repo(cls, value: str) -> str:
+        if value and not is_valid_repo(value):
             raise ValueError('repo must be in "owner/name" form')
-        return v
+        return value
 
     def get_all_repos(self) -> list[RepoConfig]:
         """Get all configured repos, normalizing legacy single-repo format."""
@@ -437,7 +437,7 @@ class Config(_Base):
         val = getattr(obj, field_name)
         if isinstance(val, list):
             if val and isinstance(val[0], RepoConfig):
-                return ", ".join(rc.repo for rc in val)
+                return ", ".join(repo_config.repo for repo_config in val)
             return ", ".join(str(v) for v in val)
         return "" if val is None else str(val)
 
@@ -483,18 +483,21 @@ def _set_field(obj: BaseModel, field_name: str, value: str) -> None:
     if field_info is None:
         raise ValueError(f"Unknown field: {field_name}")
 
-    ann = field_info.annotation
-    non_none = [a for a in get_args(ann) if a is not type(None)]
-    base = non_none[0] if non_none else ann
+    annotation = field_info.annotation
+    # Unwrap Optional[T] / T | None down to the type we need to coerce to.
+    inner_types = [a for a in get_args(annotation) if a is not type(None)]
+    field_type = inner_types[0] if inner_types else annotation
 
     try:
-        if get_origin(ann) is list or ann is list:
-            coerced: object = [v.strip() for v in value.split(_LIST_SEP) if v.strip()]
-        elif base is bool:
+        if get_origin(annotation) is list or annotation is list:
+            coerced: object = [
+                item.strip() for item in value.split(_LIST_SEP) if item.strip()
+            ]
+        elif field_type is bool:
             coerced = value.strip().lower() in ("true", "1", "yes", "on")
-        elif base is int:
+        elif field_type is int:
             coerced = int(value)
-        elif base is float:
+        elif field_type is float:
             coerced = float(value)
         else:
             coerced = value
@@ -531,13 +534,13 @@ def render_config(config: "Config") -> str:
 
     parts.append("\n[bold cyan]\\[github][/bold cyan]")
     if config.github.repos:
-        for rc in config.github.repos:
+        for repo_config in config.github.repos:
             parts.append("\n  [dim]\\[\\[github.repos]][/dim]")
-            parts.append(f'    repo = [green]"{rc.repo}"[/green]')
-            parts.append(f'    base_branch = [green]"{rc.base_branch}"[/green]')
-            parts.append(f'    mode = [green]"{rc.mode}"[/green]')
-            if rc.log_files:
-                parts.append(f"    log_files = [green]{rc.log_files}[/green]")
+            parts.append(f'    repo = [green]"{repo_config.repo}"[/green]')
+            parts.append(f'    base_branch = [green]"{repo_config.base_branch}"[/green]')
+            parts.append(f'    mode = [green]"{repo_config.mode}"[/green]')
+            if repo_config.log_files:
+                parts.append(f"    log_files = [green]{repo_config.log_files}[/green]")
     elif config.github.repo:
         parts.append(f'  repo = [green]"{config.github.repo}"[/green]')
         parts.append(f'  base_branch = [green]"{config.github.base_branch}"[/green]')

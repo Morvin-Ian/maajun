@@ -403,14 +403,14 @@ class Daemon:
             # agent per incident and would otherwise leak connection pools.
             await agent.aclose()
         report = response.content.strip()
-        prompt_tok, comp_tok, cost = extract_usage(
+        prompt_tokens, completion_tokens, cost = extract_usage(
             response.usage, getattr(response, "model", None)
         )
 
         if dry_run:
             self._print_dry_run(
                 dry_run_header, repo_config.repo or LOCAL_REPO_LABEL, report,
-                (prompt_tok, comp_tok, cost), dry_run_extra,
+                (prompt_tokens, completion_tokens, cost), dry_run_extra,
             )
             if forget_on_dry_run:
                 self.store.forget(event.fingerprint)
@@ -418,7 +418,7 @@ class Daemon:
 
         if self.local_mode:
             return self._save_local_report(
-                event, report, (prompt_tok, comp_tok, cost), progress
+                event, report, (prompt_tokens, completion_tokens, cost), progress
             )
 
         progress("Opening PR")
@@ -438,12 +438,12 @@ class Daemon:
             branch=branch,
             pr_url=pr_url,
             cost_usd=cost,
-            prompt_tokens=prompt_tok,
-            completion_tokens=comp_tok,
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
         )
         log.info(
             "opened PR %s for fp=%s in repo=%s (cost: $%.4f, tokens: %d/%d)",
-            pr_url, event.fingerprint, repo_config.repo, cost, prompt_tok, comp_tok,
+            pr_url, event.fingerprint, repo_config.repo, cost, prompt_tokens, completion_tokens,
         )
         await self.notifier.notify_pr_created(
             repo=repo_config.repo,
@@ -468,7 +468,7 @@ class Daemon:
         recorded cost, but nothing leaves the machine.
         """
         progress("Writing report")
-        prompt_tok, comp_tok, cost = usage
+        prompt_tokens, completion_tokens, cost = usage
         self.report_dir.mkdir(parents=True, exist_ok=True)
         report_path = self.report_dir / f"{event.fingerprint}.md"
         report_path.write_text(
@@ -483,12 +483,12 @@ class Daemon:
             branch="",
             pr_url=str(report_path),
             cost_usd=cost,
-            prompt_tokens=prompt_tok,
-            completion_tokens=comp_tok,
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
         )
         log.info(
             "wrote local report %s for fp=%s (cost: $%.4f, tokens: %d/%d)",
-            report_path, event.fingerprint, cost, prompt_tok, comp_tok,
+            report_path, event.fingerprint, cost, prompt_tokens, completion_tokens,
         )
         return str(report_path)
 
@@ -500,7 +500,7 @@ class Daemon:
         usage: tuple[int, int, float],
         extra: tuple[str, ...] = (),
     ) -> None:
-        prompt_tok, comp_tok, cost = usage
+        prompt_tokens, completion_tokens, cost = usage
         bar = "=" * 60
         print(f"\n{bar}")
         print(f"DRY RUN — {header}")
@@ -510,7 +510,10 @@ class Daemon:
         print(f"{bar}\n")
         print(report)
         print(f"\n{bar}")
-        print(f"Cost: {prompt_tok} prompt + {comp_tok} completion tokens = ${cost:.4f}")
+        print(
+            f"Cost: {prompt_tokens} prompt + {completion_tokens} "
+            f"completion tokens = ${cost:.4f}"
+        )
         print(f"{bar}\n")
 
     def _write_report(self, workspace: GitWorkspace, event: ErrorEvent, report: str) -> None:

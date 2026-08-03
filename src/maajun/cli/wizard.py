@@ -21,13 +21,13 @@ from rich.panel import Panel
 from maajun.auth import GITHUB_TOKEN_ENV, AuthManager
 from maajun.checks import build_status, gather_github
 from maajun.cli._shared import (
-    _configured_providers,
-    _implemented_providers,
-    _input,
-    _prompt_mode,
-    _secret_input,
     app,
+    configured_providers,
     console,
+    implemented_providers,
+    prompt_line,
+    prompt_mode,
+    prompt_secret,
 )
 from maajun.config import (
     Config,
@@ -93,18 +93,18 @@ class _Asker:
         if not self.interactive:
             return default
         shown = f"{prompt} [{default}]: " if default else f"{prompt}: "
-        return _input(f"> {shown}").strip() or default
+        return prompt_line(f"> {shown}").strip() or default
 
     def secret(self, prompt: str) -> str:
         if not self.interactive:
             return ""
-        return _secret_input(f"> {prompt}: ")
+        return prompt_secret(f"> {prompt}: ")
 
     def confirm(self, prompt: str, default: bool = False) -> bool:
         if not self.interactive:
             return default
         hint = "Y/n" if default else "y/N"
-        answer = _input(f"> {prompt} ({hint}): ").strip().lower()
+        answer = prompt_line(f"> {prompt} ({hint}): ").strip().lower()
         if not answer:
             return default
         return answer.startswith("y")
@@ -137,8 +137,8 @@ def _setup_provider(
     auth: AuthManager, ask: _Asker, requested: str | None, reconfigure: bool
 ) -> str:
     """Choose a provider and make sure a key is stored. Exits if none is."""
-    implemented = _implemented_providers()
-    configured = _configured_providers(auth)
+    implemented = implemented_providers()
+    configured = configured_providers(auth)
 
     provider = requested or (configured[0] if configured else implemented[0])
     if requested and requested not in implemented:
@@ -242,7 +242,7 @@ def _setup_github(
         "Base branch", existing[0].base_branch if existing else "main"
     )
     resolved_mode = mode or (
-        _prompt_mode(existing[0].mode if existing else "suggest")
+        prompt_mode(existing[0].mode if existing else "suggest")
         if ask.interactive else (existing[0].mode if existing else "suggest")
     )
 
@@ -354,13 +354,17 @@ def _setup_error_sources(
             # Not a problem: the app may only create its error log on first use.
             console.print(f"  [yellow]⚠[/yellow] {path} [dim](not found yet)[/dim]")
 
-    repo = config.github.get_all_repos()
+    configured_repos = config.github.get_all_repos()
     want_actions = (
         github_actions if github_actions is not None
-        else (bool(repo) and ask.confirm("Watch GitHub Actions for failed runs?"))
+        else (
+            bool(configured_repos)
+            and ask.confirm("Watch GitHub Actions for failed runs?")
+        )
     )
     if want_actions:
-        if not repo:
+        repo_names = [repo_config.repo for repo_config in configured_repos]
+        if not repo_names:
             console.print("  [yellow]⚠ GitHub Actions needs a configured repo — "
                           "skipped.[/yellow]")
         elif not auth.has_github_token():
@@ -369,10 +373,9 @@ def _setup_error_sources(
         else:
             # Reuse the GitHub token rather than asking for a second one.
             config.monitor.github_actions_token = auth.get_github_token() or ""
-            config.monitor.github_actions_repos = [rc.repo for rc in repo]
+            config.monitor.github_actions_repos = repo_names
             console.print(
-                f"  [green]✓[/green] Watching Actions on "
-                f"{', '.join(rc.repo for rc in repo)}"
+                f"  [green]✓[/green] Watching Actions on {', '.join(repo_names)}"
             )
 
     target = sentry if sentry is not None else (

@@ -13,7 +13,7 @@ from rich.panel import Panel
 
 from maajun.auth import AuthManager
 from maajun.checks import build_status, gather_github
-from maajun.cli._shared import _pick_repo, app, console
+from maajun.cli._shared import app, console, pick_repo
 from maajun.config import Config, RepoConfig
 from maajun.daemon import build_daemon, build_daemon_for_report
 from maajun.progress import WorkingStatus, working
@@ -66,8 +66,8 @@ def watch(
             console.print(f"[red]✗ Invalid mode: {mode}. Use 'suggest' or 'fix'.[/red]")
             raise typer.Exit(1)
         config.github.mode = mode
-        for rc in config.github.repos:
-            rc.mode = mode
+        for repo_config in config.github.repos:
+            repo_config.mode = mode
 
     try:
         daemon = build_daemon(config)
@@ -90,13 +90,14 @@ def watch(
         ))
     elif len(repos) > 1:
         repos_text = "\n".join(
-            f"  • [cyan]{rc.repo}[/cyan] (base: {rc.base_branch}, mode: {rc.mode})"
-            for rc in repos
+            f"  • [cyan]{repo_config.repo}[/cyan] "
+            f"(base: {repo_config.base_branch}, mode: {repo_config.mode})"
+            for repo_config in repos
         )
 
         def repo_of(monitor) -> str:
-            rc = daemon.monitor_to_repo.get(monitor.name)
-            return rc.repo if rc else "unknown"
+            repo_config = daemon.monitor_to_repo.get(monitor.name)
+            return repo_config.repo if repo_config else "unknown"
 
         monitors_text = "\n".join(
             f"  • {m.name} → [cyan]{repo_of(m)}[/cyan]" for m in daemon.monitors
@@ -163,8 +164,8 @@ def report(
             console.print(f"[red]✗ Invalid mode: {mode}. Use 'suggest' or 'fix'.[/red]")
             raise typer.Exit(1)
         config.github.mode = mode
-        for rc in config.github.repos:
-            rc.mode = mode
+        for repo_config in config.github.repos:
+            repo_config.mode = mode
 
     try:
         daemon = build_daemon_for_report(config)
@@ -190,12 +191,12 @@ def report(
     elif len(repos) == 1:
         target = repos[0]
     elif sys.stdin.isatty():
-        target = _pick_repo(repos)
+        target = pick_repo(repos)
     else:
         console.print("[red]✗ Multiple repos configured. Use --repo to specify which one.[/red]")
         console.print("[dim]Available repos:[/dim]")
-        for rc in repos:
-            console.print(f"  • {rc.repo}")
+        for repo_config in repos:
+            console.print(f"  • {repo_config.repo}")
         raise typer.Exit(1)
 
     if base_branch:
@@ -269,18 +270,18 @@ def add_repo(
         raise typer.Exit(1)
 
     config = Config.load(config_path)
-    logs = [lf.strip() for lf in log_files.split(",") if lf.strip()]
+    logs = [path.strip() for path in log_files.split(",") if path.strip()]
     config.add_repo(RepoConfig(
         repo=repo, base_branch=base_branch, mode=mode, log_files=logs,
     ))
     config.save(config_path)
 
-    names = ", ".join(rc.repo for rc in config.github.repos)
+    names = ", ".join(repo_config.repo for repo_config in config.github.repos)
     console.print(f"[green]✓ Added {repo} ({mode}).[/green]")
     console.print(f"[dim]Now watching: {names}[/dim]")
 
 
-def _check(label: str, ok: bool, detail: str = "", warn: bool = False) -> bool:
+def _print_check(label: str, ok: bool, detail: str = "", warn: bool = False) -> bool:
     """Print one ✓/⚠/✗ status line. Returns ok."""
     if ok:
         mark = "[green]✓[/green]"
@@ -323,8 +324,8 @@ def status(
     console.print(Panel("[bold]Maajun status[/bold]", border_style="blue"))
     for section in sections:
         console.print(f"\n[bold]{section.title}[/bold]")
-        for c in section.checks:
-            _check(c.label, c.ok, c.detail, c.warn)
+        for check in section.checks:
+            _print_check(check.label, check.ok, check.detail, check.warn)
 
     if ok:
         console.print("\n[green]✓ Ready. Run [bold]maajun watch[/bold].[/green]")
