@@ -19,3 +19,11 @@ venv/
 .vscode/
 .idea/
 .DS_Store
+
+# maajun's own runtime state, if it is ever run from inside the checkout.
+# config.toml is what `maajun setup` writes; incidents.db holds the tracebacks
+# and log excerpts it has collected. Neither belongs in a public repo.
+config.toml
+*.db
+.env
+.env.*
