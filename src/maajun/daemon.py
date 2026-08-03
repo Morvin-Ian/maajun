@@ -202,7 +202,8 @@ class Daemon:
         if self._budget_warned_for != day_start:
             self._budget_warned_for = day_start
             message = (
-                f"Daily spend cap reached: ${spent:.4f} of ${cap:.2f}. "
+                # :g not :.2f — a cap of 0.005 must not be reported as $0.01.
+                f"Daily spend cap reached: ${spent:.4f} of ${cap:g}. "
                 "Pausing analysis until tomorrow (UTC). "
                 "Raise it with 'maajun config daemon.max_usd_per_day <amount>'."
             )

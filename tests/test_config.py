@@ -265,3 +265,13 @@ def test_logfile_kwargs_match_the_monitor_signature():
 
     accepted = set(inspect.signature(LogFileMonitor.__init__).parameters)
     assert set(Config().monitor.logfile_kwargs()) <= accepted
+
+
+def test_load_and_save_accept_a_string_path(tmp_path):
+    """The signature said Path, so a str crashed on path.exists()."""
+    path = str(tmp_path / "config.toml")
+    config = Config.load(path)
+    config.github.repo = "acme/webapp"
+    config.save(path)
+
+    assert Config.load(path).github.repo == "acme/webapp"

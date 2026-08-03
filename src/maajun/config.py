@@ -222,9 +222,9 @@ class Config(_Base):
     _path: Path | None = None
 
     @classmethod
-    def load(cls, path: Path | None = None) -> "Config":
+    def load(cls, path: str | Path | None = None) -> "Config":
         """Load config from a TOML file; missing file yields defaults."""
-        path = path or default_config_path()
+        path = Path(path) if path else default_config_path()
         config = cls()
         config._path = path
         if not path.exists():
@@ -235,14 +235,14 @@ class Config(_Base):
         loaded._path = path
         return loaded
 
-    def save(self, path: Path | None = None) -> None:
+    def save(self, path: str | Path | None = None) -> None:
         """Write the config to a TOML file.
 
         Uses tomlkit to round-trip an existing file: comments and formatting
         on keys the user has already written are preserved; every known field
         is (re)written so nothing is silently dropped.
         """
-        path = path or self._path or default_config_path()
+        path = Path(path) if path else (self._path or default_config_path())
         path.parent.mkdir(parents=True, exist_ok=True)
 
         if path.exists():
