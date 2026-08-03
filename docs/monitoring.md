@@ -58,7 +58,7 @@ poll_interval = 30            # seconds between polls
 [daemon]
 workdir = "~/.local/share/maajun"   # clones, incident DB, state
 # repo_path = "/srv/myapp"          # local checkout to analyze in local mode
-# max_usd_per_day = 5.0             # stop analyzing past this daily spend
+# max_usd_per_day = 5.0             # stop analyzing past this daily spend (0 = no cap)
 # max_incidents_per_cycle = 10      # bound one poll's burst (0 = unlimited)
 ```
 
@@ -370,19 +370,21 @@ sqlite3 ~/.local/share/maajun/incidents.db \
 ### Capping spend
 
 Tracking is not a limit. A daemon left running against a log that starts
-emitting a novel error every minute will keep paying for analyses. Set a
-daily ceiling:
+emitting a novel error every minute would keep paying for analyses, so
+**`max_usd_per_day` defaults to `5.0`** — maajun stops analyzing after $5 of
+spend in a UTC day rather than running up an open-ended bill while you sleep.
+Change or remove the ceiling:
 
 ```bash
-maajun config daemon.max_usd_per_day 5
+maajun config daemon.max_usd_per_day 20   # raise it
+maajun config daemon.max_usd_per_day 0    # 0 = no cap
 ```
 
 Before each incident the daemon sums today's `cost_usd` (UTC day) and, if
 the cap is reached, stops analyzing, warns once, and keeps polling. Errors
 skipped this way are *not* marked as seen — they are picked up on the next
-poll after the cap resets or is raised, so nothing is silently lost. The
-default is `0`, meaning no cap; `--dry-run` ignores it, since that is an
-explicit interactive request.
+poll after the cap resets or is raised, so nothing is silently lost.
+`--dry-run` ignores the cap, since that is an explicit interactive request.
 
 `max_incidents_per_cycle` (default 10) bounds a single poll the way the cap
 bounds the day: fifty novel errors arriving at once would otherwise be fifty

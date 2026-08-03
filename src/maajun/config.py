@@ -57,7 +57,7 @@ poll_interval = 30
 # Local checkout to analyze when github.repo is empty (default: cwd).
 # repo_path = "/srv/myapp"
 # Stop analyzing once this much has been spent in a UTC day (0 = no cap).
-# max_usd_per_day = 5.0
+# max_usd_per_day = 5.0            # default: 5.0
 # Most incidents analyzed per poll cycle (0 = unlimited).
 # max_incidents_per_cycle = 10
 """
@@ -215,8 +215,9 @@ class DaemonConfig(_Base):
     repo_path: str = ""
     # Stop analyzing once this much has been spent in a UTC day. 0 = no cap.
     # An unattended daemon plus a log that starts emitting novel errors is
-    # otherwise an unbounded bill.
-    max_usd_per_day: float = 0.0
+    # otherwise an unbounded bill, so this defaults to a ceiling rather than
+    # to off: the first surprise should be a paused daemon, not an invoice.
+    max_usd_per_day: float = 5.0
     # Most incidents to analyze in a single poll cycle. 0 = unlimited. Bounds
     # the burst the daily cap can't: fifty novel errors at once would otherwise
     # be fifty back-to-back AI calls.
