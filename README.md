@@ -3,7 +3,7 @@
 [![CI](https://github.com/Morvin-Ian/maajun/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/Morvin-Ian/maajun/actions/workflows/ci.yml?query=branch%3Amain)
 [![PyPI](https://img.shields.io/pypi/v/maajun.svg)](https://pypi.org/project/maajun/)
 [![Python](https://img.shields.io/pypi/pyversions/maajun.svg)](https://pypi.org/project/maajun/)
-[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](https://github.com/Morvin-Ian/maajun/blob/main/LICENSE)
 
 **Error monitoring that files the bug report — and can write the fix.**
 
@@ -180,11 +180,13 @@ remote URL, `.git/config`, or the process list.
 
 ## Documentation
 
-- [How it works](docs/architecture.md) — components, monitors, and the
-  incident pipeline
-- [Monitoring guide](docs/monitoring.md) — config reference, error
-  sources (logs, GitHub Actions), cost tracking, running on a VPS
-- [Command reference](docs/commands.md) — every CLI command and flag
+- [How it works](https://github.com/Morvin-Ian/maajun/blob/main/docs/architecture.md)
+  — components, monitors, and the incident pipeline
+- [Monitoring guide](https://github.com/Morvin-Ian/maajun/blob/main/docs/monitoring.md)
+  — config reference, error sources (logs, GitHub Actions), cost tracking,
+  running on a VPS
+- [Command reference](https://github.com/Morvin-Ian/maajun/blob/main/docs/commands.md)
+  — every CLI command and flag
 
 ## Supported AI providers
 
@@ -202,4 +204,4 @@ uv run ruff check  # lint
 
 ## License
 
-[MIT](LICENSE).
+[MIT](https://github.com/Morvin-Ian/maajun/blob/main/LICENSE).
