@@ -118,3 +118,53 @@ def test_no_monitors_at_all_still_fails():
     )
     assert ok is False
     assert "At least one monitor configured" in _labels(sections)
+
+
+# ---------------------------------------------------------------------------
+# Log file readability
+# ---------------------------------------------------------------------------
+
+
+def _status_for_log(tmp_path, log_path):
+    config = Config(
+        github=GitHubConfig(repo="owner/name"),
+        monitor=MonitorConfig(log_files=[str(log_path)]),
+    )
+    return build_status(
+        config, provider="deepseek", has_key=True, has_token=True,
+        repos=[RepoConfig(repo="owner/name")], network=None,
+    )
+
+
+def test_unreadable_log_file_fails_the_preflight(tmp_path):
+    """The classic VPS misconfiguration: root-owned log, non-root daemon.
+
+    exists() passed, status said ready, and the daemon then logged a
+    PermissionError every single poll while detecting nothing.
+    """
+    log_file = tmp_path / "root-owned.log"
+    log_file.write_text("")
+    log_file.chmod(0o000)
+    try:
+        sections, ok = _status_for_log(tmp_path, log_file)
+        detail = next(c.detail for s in sections for c in s.checks
+                      if c.label.startswith("Log file"))
+        assert ok is False
+        assert "not readable" in detail
+    finally:
+        log_file.chmod(0o644)
+
+
+def test_readable_log_file_passes(tmp_path):
+    log_file = tmp_path / "app.log"
+    log_file.write_text("")
+    _, ok = _status_for_log(tmp_path, log_file)
+    assert ok is True
+
+
+def test_missing_log_file_is_still_only_a_warning(tmp_path):
+    """It may not exist until the app logs its first error."""
+    sections, ok = _status_for_log(tmp_path, tmp_path / "not-yet.log")
+    check = next(c for s in sections for c in s.checks if c.label.startswith("Log file"))
+    assert ok is True
+    assert check.warn is True

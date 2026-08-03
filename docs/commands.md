@@ -44,6 +44,16 @@ In `--non-interactive` mode secrets are read from the environment
 (`DEEPSEEK_API_KEY`, `GITHUB_TOKEN`) rather than from flags, so they never
 land in shell history.
 
+### `maajun incidents`
+
+List handled incidents with status, sighting count, cost, and the issue or
+PR each produced, plus today's spend against `daemon.max_usd_per_day`.
+
+| Flag | Meaning |
+|------|---------|
+| `-n, --limit N` | How many to show (default 20) |
+| `--failed` | Only incidents that failed 3 times and are no longer retried |
+
 ### `maajun add-repo REPO`
 
 Add another repository to watch, which turns on **multi-repo mode**. The

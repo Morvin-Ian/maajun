@@ -99,11 +99,16 @@ blip never becomes a pull request.
    SQLite store; known ones just bump a counter. An incident whose last
    attempt *failed* is retried on a later poll, up to three attempts —
    otherwise one transient GitHub 502 would blacklist that error forever.
+   Before each incident the daemon also checks the
+   [daily spend cap](monitoring.md#capping-spend) and the per-cycle limit;
+   anything deferred is forgotten so a later poll picks it up.
 3. **Analyze** — for a new fingerprint, the daemon syncs an isolated
    clone of the event's repo, creates a branch
    `maajun/incident-<fingerprint>`, and asks the agent to investigate.
    The agent reads the code with its safe tools and writes a structured
-   report (what happened / root cause / suggested fix). In fix mode it
+   report (what happened / root cause / likely cause commit / suggested
+   fix) — the last few commits on the base branch are handed to it so the
+   report can name the deploy that probably introduced the error. In fix mode it
    may also edit files in the clone. The clone is synced in both modes —
    the agent reads the code from it — but only fix mode branches. In a
    [multi-repo](monitoring.md#multiple-repositories) config each monitor

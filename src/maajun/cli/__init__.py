@@ -7,6 +7,7 @@ pulls in every command module for its `@app.command()` side effects.
 
 from maajun.cli import (  # noqa: F401,E402  register commands
     auth,
+    incidents,
     monitor,
     setup,
     wizard,

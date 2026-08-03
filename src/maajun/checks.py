@@ -6,6 +6,7 @@ can be unit-tested without a CliRunner; cli.py owns the console and rendering.
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -51,6 +52,30 @@ async def gather_github(
         return login, pushable
     finally:
         await client.aclose()
+
+
+def _log_file_check(log_path: str) -> Check:
+    """Existence *and* readability.
+
+    A missing file is only a warning — the app may create it on its first
+    error. An unreadable one is a hard failure: it is the classic VPS
+    misconfiguration (maajun running as a non-root user against a root-owned
+    /var/log file), and the daemon would otherwise log an exception every poll
+    while `status` reported everything fine.
+    """
+    path = Path(log_path).expanduser()
+    if not path.exists():
+        return Check(
+            f"Log file {log_path}", False, "not found yet",
+            warn=True, counts=False,
+        )
+    if not os.access(path, os.R_OK):
+        return Check(
+            f"Log file {log_path}", False,
+            "exists but is not readable — check permissions, or run maajun "
+            "as a user that can read it",
+        )
+    return Check(f"Log file {log_path}", True, counts=False)
 
 
 def build_status(
@@ -117,13 +142,7 @@ def build_status(
             "add monitor.log_files or GitHub Actions",
         ))
     for log_path in log_paths:
-        # A missing log file is a warning, not a failure: it may be created
-        # once the monitored app first logs an error.
-        exists = Path(log_path).expanduser().exists()
-        monitors.checks.append(Check(
-            f"Log file {log_path}", exists,
-            "" if exists else "not found yet", warn=not exists, counts=False,
-        ))
+        monitors.checks.append(_log_file_check(log_path))
     if watches_actions:
         monitors.checks.append(Check(
             f"GitHub Actions: {', '.join(config.monitor.github_actions_repos)}",

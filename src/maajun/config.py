@@ -58,6 +58,8 @@ poll_interval = 30
 # repo_path = "/srv/myapp"
 # Stop analyzing once this much has been spent in a UTC day (0 = no cap).
 # max_usd_per_day = 5.0
+# Most incidents analyzed per poll cycle (0 = unlimited).
+# max_incidents_per_cycle = 10
 """
 
 
@@ -212,6 +214,10 @@ class DaemonConfig(_Base):
     # An unattended daemon plus a log that starts emitting novel errors is
     # otherwise an unbounded bill.
     max_usd_per_day: float = 0.0
+    # Most incidents to analyze in a single poll cycle. 0 = unlimited. Bounds
+    # the burst the daily cap can't: fifty novel errors at once would otherwise
+    # be fifty back-to-back AI calls.
+    max_incidents_per_cycle: int = 10
 
 
 class Config(_Base):
@@ -310,6 +316,7 @@ class Config(_Base):
         daemon["workdir"] = self.daemon.workdir
         _set_or_del(daemon, "repo_path", self.daemon.repo_path or None)
         _set_if_customized(daemon, self.daemon, "max_usd_per_day")
+        _set_if_customized(daemon, self.daemon, "max_incidents_per_cycle")
 
         path.write_text(tomlkit.dumps(doc))
         self._path = path

@@ -58,6 +58,7 @@ poll_interval = 30            # seconds between polls
 workdir = "~/.local/share/maajun"   # clones, incident DB, state
 # repo_path = "/srv/myapp"          # local checkout to analyze in local mode
 # max_usd_per_day = 5.0             # stop analyzing past this daily spend
+# max_incidents_per_cycle = 10      # bound one poll's burst (0 = unlimited)
 ```
 
 At least one error source must be configured — log files or GitHub
@@ -376,6 +377,20 @@ poll after the cap resets or is raised, so nothing is silently lost. The
 default is `0`, meaning no cap; `--dry-run` ignores it, since that is an
 explicit interactive request.
 
+`max_incidents_per_cycle` (default 10) bounds a single poll the way the cap
+bounds the day: fifty novel errors arriving at once would otherwise be fifty
+back-to-back AI calls. The remainder is picked up on the next poll.
+
+### Reviewing what it did
+
+```bash
+maajun incidents              # status, cost, and links, newest first
+maajun incidents --failed     # only those that failed 3 times and stopped
+```
+
+The summary shows today's spend against your cap and the all-time total, so
+neither cost tracking nor the cap needs a sqlite3 query to inspect.
+
 ## Running under systemd
 
 `/etc/systemd/system/maajun.service`:
@@ -424,6 +439,11 @@ log files in one shot and points at whatever is missing.
   write access or doesn't cover the repo.
 - **Nothing analyzed after a while** — look for a "spend cap reached"
   warning: `daemon.max_usd_per_day` pauses analysis until the next UTC day.
+  `maajun incidents` shows the spend, and `maajun incidents --failed` shows
+  anything that failed three times and is no longer retried.
+- **A log file exists but nothing is detected** — `maajun status` now fails
+  on an unreadable log. The usual cause is a root-owned file and a non-root
+  daemon.
 - **"No monitors configured"** — the `[monitor]` section defines no log
   files and no GitHub Actions repos.
 - **"A repo is configured but there is no GitHub token"** — you asked for
