@@ -10,7 +10,7 @@ readme = "README.md"
 requires-python = ">=3.11"
 license = "MIT"
 license-files = ["LICENSE"]
-authors = [{ name = "Ian Morvin", email = "ian@t4glab.com" }]
+authors = [{ name = "Ian Morvin", email = morvinian@gmail.com" }]
 keywords = [
     "error-monitoring",
     "observability",
