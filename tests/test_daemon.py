@@ -602,3 +602,95 @@ async def test_dry_run_ignores_the_cap(setup):
     await daemon.poll_once(dry_run=True)
 
     assert agent.prompts  # the analysis still ran
+
+
+# ---------------------------------------------------------------------------
+# Fix verification
+# ---------------------------------------------------------------------------
+
+
+def _fix_mode(daemon, *, test_command: str = "") -> None:
+    repo_config = daemon.monitor_to_repo[daemon.monitors[0].name]
+    repo_config.mode = "fix"
+    repo_config.test_command = test_command
+
+
+async def test_passing_tests_are_reported_in_the_pr(setup):
+    daemon, logfile, agent, github, store, remote = setup
+    _fix_mode(daemon, test_command="exit 0")
+
+    with open(logfile, "a") as f:
+        f.write(TRACEBACK)
+    await daemon.poll_once()
+
+    body = github.calls[0]["body"]
+    assert "Tests pass" in body
+    assert "exit 0" in body
+
+
+async def test_failing_tests_are_reported_not_suppressed(setup):
+    """A fix that breaks the suite is exactly what a reviewer must be told."""
+    daemon, logfile, agent, github, store, remote = setup
+    _fix_mode(daemon, test_command="echo 'boom: 1 failed'; exit 1")
+
+    with open(logfile, "a") as f:
+        f.write(TRACEBACK)
+    handled = await daemon.poll_once()
+
+    assert len(handled) == 1  # the PR still opens
+    body = github.calls[0]["body"]
+    assert "Tests fail" in body
+    assert "exit 1" in body
+    assert "boom: 1 failed" in body
+
+
+async def test_unrunnable_test_command_does_not_abort_the_incident(setup):
+    daemon, logfile, agent, github, store, remote = setup
+    _fix_mode(daemon, test_command="this-command-does-not-exist-xyz")
+
+    with open(logfile, "a") as f:
+        f.write(TRACEBACK)
+    handled = await daemon.poll_once()
+
+    assert len(handled) == 1
+    assert "Tests fail" in github.calls[0]["body"]  # non-zero exit from the shell
+
+
+async def test_no_test_command_marks_the_pr_unverified(setup):
+    daemon, logfile, agent, github, store, remote = setup
+    _fix_mode(daemon)  # no test_command
+
+    with open(logfile, "a") as f:
+        f.write(TRACEBACK)
+    await daemon.poll_once()
+
+    assert "Unverified" in github.calls[0]["body"]
+
+
+async def test_tests_run_in_the_workspace_not_the_cwd(setup):
+    """The command must see the agent's edits, which live in the clone."""
+    daemon, logfile, agent, github, store, remote = setup
+    _fix_mode(daemon, test_command="pwd")
+
+    with open(logfile, "a") as f:
+        f.write(TRACEBACK)
+    await daemon.poll_once()
+
+    workspace = daemon.workspaces["owner/name"]
+    assert str(workspace.path) in github.calls[0]["body"]
+
+
+async def test_suggest_mode_does_not_run_tests(setup):
+    """There is no diff to verify, so don't spend the time."""
+    daemon, logfile, agent, github, store, remote = setup
+    repo_config = daemon.monitor_to_repo[daemon.monitors[0].name]
+    repo_config.test_command = "echo SHOULD_NOT_RUN"
+    phases: list[str] = []
+    daemon.progress = phases.append
+
+    with open(logfile, "a") as f:
+        f.write(TRACEBACK)
+    await daemon.poll_once()
+
+    assert "Running tests" not in phases
+    assert "SHOULD_NOT_RUN" not in github.issues[0]["body"]

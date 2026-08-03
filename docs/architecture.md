@@ -95,7 +95,10 @@ blip never becomes a pull request.
 4. **Publish** — depends on the repo's [mode](monitoring.md#modes). In
    `suggest` mode the report is filed as a GitHub **issue**: no branch, no
    commit, no push, because there is no diff to review. In `fix` mode the
-   report is committed as `docs/incidents/<fingerprint>.md` alongside the
+   repo's `test_command` (if set) is run in the workspace first and its
+   verdict is put at the top of the PR body — it comes from config, not from
+   the model, since the agent has no shell access. The report is then
+   committed as `docs/incidents/<fingerprint>.md` alongside the
    agent's edits, the branch is pushed, and a **pull request** is opened
    with the report as its body — reusing an existing PR for the branch
    rather than duplicating it. With no `github.repo` configured the daemon

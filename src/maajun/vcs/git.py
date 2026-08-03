@@ -13,6 +13,7 @@ import asyncio
 import os
 import stat
 import subprocess
+from dataclasses import dataclass
 from pathlib import Path
 
 ASKPASS_SCRIPT = '#!/bin/sh\necho "$MAAJUN_GIT_TOKEN"\n'
@@ -23,6 +24,18 @@ COMMIT_EMAIL = "maajun@localhost"
 
 class GitError(Exception):
     pass
+
+
+@dataclass
+class CommandResult:
+    """Outcome of a workspace command, e.g. the configured test suite."""
+
+    exit_code: int | None  # None when it timed out or could not start
+    output: str
+
+    @property
+    def passed(self) -> bool:
+        return self.exit_code == 0
 
 
 class GitWorkspace:
@@ -112,3 +125,35 @@ class GitWorkspace:
 
     async def diff_stat(self) -> str:
         return await self._git("diff", "--stat", "HEAD~1")
+
+    def _run_shell(self, command: str, timeout: float) -> CommandResult:
+        try:
+            proc = subprocess.run(
+                command,
+                shell=True,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                cwd=str(self.path),
+            )
+        except subprocess.TimeoutExpired:
+            return CommandResult(
+                exit_code=None,
+                output=f"Timed out after {timeout:.0f}s.",
+            )
+        except OSError as e:
+            return CommandResult(exit_code=None, output=f"Could not run: {e}")
+        return CommandResult(
+            exit_code=proc.returncode,
+            output=f"{proc.stdout}{proc.stderr}".strip(),
+        )
+
+    async def run_command(self, command: str, *, timeout: float = 600) -> CommandResult:
+        """Run a configured shell command in the workspace.
+
+        Deliberately *not* an agent tool: the command comes from the user's
+        config, never from the model, so verification can't be talked into
+        running something else. Never raises — a failing or absent test
+        command is a result to report, not a reason to abort the incident.
+        """
+        return await asyncio.to_thread(self._run_shell, command, timeout)

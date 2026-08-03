@@ -6,8 +6,9 @@ Maajun watches your error sources — local log files (e.g. your app's error
 log on a VPS) and failed GitHub Actions runs — and when a new error
 appears it investigates the code and documents the incident on GitHub:
 in *suggest* mode it files an issue with the analysis and a suggested fix;
-in *fix* mode it applies the fix on a branch and opens a pull request. It
-records what each analysis cost, and the same error is never reported twice.
+in *fix* mode it applies the fix on a branch, runs your test suite against
+it, and opens a pull request with the result. It records what each analysis
+cost, caps what it may spend per day, and never reports the same error twice.
 
 ## Quick start
 

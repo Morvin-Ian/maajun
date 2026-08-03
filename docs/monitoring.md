@@ -31,9 +31,10 @@ provider = "deepseek"
 # max_tokens = 4096
 
 [github]
-repo = "owner/name"           # repository maajun opens PRs on; "" for local mode
+repo = "owner/name"           # repository maajun reports to; "" for local mode
 base_branch = "main"          # branch PRs target
 mode = "suggest"              # "suggest" or "fix" — see Modes below
+# test_command = "pytest -q"  # verifies a fix-mode edit; result goes in the PR
 
 [monitor]
 log_files = [                 # files to tail for errors
@@ -277,6 +278,7 @@ existing `maajun/report-<fingerprint>` branch and PR).
 | Agent file access | Read-only | May edit files, but only inside its own clone |
 | Agent shell access | None | None |
 | Contains | Incident report + suggested fix | Applied fix + incident report |
+| Verified | n/a — no diff | By `test_command`, if set |
 | You review | The suggestion | The actual diff |
 
 Suggest mode files an **issue**, not a pull request. A PR whose diff
@@ -286,6 +288,30 @@ repo to read it, but creates no branch and pushes nothing.
 
 Either way, **nothing merges without your review**. Start with `suggest`;
 switch to `fix` once you trust the reports.
+
+### Verifying a fix
+
+A fix-mode diff nobody ran is a diff reviewed on trust. Set `test_command`
+and maajun runs it in the workspace after the agent's edits, then puts the
+verdict at the top of the PR body:
+
+```bash
+maajun config github.test_command "pytest -q"
+```
+
+```
+✅ Tests pass — `pytest -q`      ❌ Tests fail (exit 1) — `pytest -q`
+```
+
+Either way the PR still opens — "this fix breaks the suite" is precisely
+what a reviewer needs to know, and suppressing the PR would bury the
+analysis with it. Output is collapsed in a `<details>` block, truncated at
+3 000 characters, with a 10-minute timeout. With no `test_command` the PR is
+labelled **Unverified**.
+
+The command comes from your config, never from the model: the agent has no
+shell access in either mode, so verification cannot be redirected to run
+something else.
 
 ## What you get
 

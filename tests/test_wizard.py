@@ -238,3 +238,35 @@ def test_summary_points_at_prs_once_a_repo_is_set(fake_keyring, api_key, tmp_pat
         "--repo", "acme/webapp", "--logs", str(log_file),
     ])
     assert "--dry-run" in result.output
+
+
+# ---------------------------------------------------------------------------
+# Fix-mode verification
+# ---------------------------------------------------------------------------
+
+
+def test_setup_records_a_test_command(fake_keyring, api_key, tmp_path):
+    config_path = tmp_path / "config.toml"
+    result = runner.invoke(app, [
+        "setup", "--non-interactive", "--config", str(config_path),
+        "--repo", "acme/webapp", "--mode", "fix", "--test-command", "pytest -q",
+    ])
+    assert result.exit_code == 0, result.output
+    assert Config.load(config_path).github.get_all_repos()[0].test_command == "pytest -q"
+
+
+def test_fix_mode_without_a_test_command_warns(fake_keyring, api_key, tmp_path):
+    result = runner.invoke(app, [
+        "setup", "--non-interactive", "--config", str(tmp_path / "config.toml"),
+        "--repo", "acme/webapp", "--mode", "fix",
+    ])
+    assert "unverified" in result.output.lower()
+
+
+def test_suggest_mode_is_not_asked_for_a_test_command(fake_keyring, api_key, tmp_path):
+    """Suggest mode has no diff, so there is nothing to verify."""
+    result = runner.invoke(app, [
+        "setup", "--non-interactive", "--config", str(tmp_path / "config.toml"),
+        "--repo", "acme/webapp", "--mode", "suggest",
+    ])
+    assert "unverified" not in result.output.lower()
