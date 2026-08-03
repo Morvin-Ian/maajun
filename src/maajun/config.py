@@ -24,8 +24,10 @@ provider = "deepseek"
 # thinking_mode = true
 
 [github]
-# Repository the daemon documents errors in and opens PRs against.
-repo = "owner/name"
+# Repository the daemon documents errors in and opens PRs against, as
+# "owner/name". Optional: left empty, maajun analyzes errors and writes
+# reports under daemon.workdir instead of opening pull requests.
+repo = ""
 base_branch = "main"
 # "suggest": PRs contain only the incident report and suggested fix.
 # "fix": the agent may also change code inside its isolated workspace.
@@ -237,6 +239,9 @@ class EmailConfig(_Base):
 
 class DaemonConfig(_Base):
     workdir: str = str(default_data_dir())
+    # Local checkout to analyze when no GitHub repo is configured.
+    # Empty means the current working directory.
+    repo_path: str = ""
     email: EmailConfig = Field(default_factory=EmailConfig)
 
 
@@ -303,7 +308,10 @@ class Config(_Base):
             github["repos"] = repos_table
         else:
             github.pop("repos", None)
-            github["repo"] = self.github.repo or PLACEHOLDER_REPO
+            # Write the repo as-is. Substituting PLACEHOLDER_REPO for an empty
+            # value used to read back as a *configured* repo, so the daemon
+            # went looking for a token to push to a repository nobody owns.
+            github["repo"] = self.github.repo
             github["base_branch"] = self.github.base_branch
             github["mode"] = self.github.mode
 
@@ -343,6 +351,7 @@ class Config(_Base):
 
         daemon = _table(doc, "daemon")
         daemon["workdir"] = self.daemon.workdir
+        _set_or_del(daemon, "repo_path", self.daemon.repo_path or None)
         email = self.daemon.email
         if email.smtp_host:
             email_table = _table(daemon, "email")

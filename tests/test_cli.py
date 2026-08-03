@@ -26,6 +26,20 @@ def fake_keyring(monkeypatch):
     return store
 
 
+class _FakeGitHubClient:
+    def __init__(self, token, **kwargs):
+        self.token = token
+
+    async def validate_token(self):
+        return "morvin"
+
+    async def can_push(self, repo):
+        return True
+
+    async def aclose(self):
+        pass
+
+
 # ---------------------------------------------------------------------------
 # Main callback (no subcommand)
 # ---------------------------------------------------------------------------
@@ -201,21 +215,40 @@ def test_init_overwrites_on_confirm(tmp_path):
 # ---------------------------------------------------------------------------
 
 
-def test_watch_fails_without_github_token(fake_keyring, tmp_path):
+def test_watch_fails_without_api_key(fake_keyring, tmp_path):
+    """The API key is the one hard requirement."""
     config_path = tmp_path / "config.toml"
     config_path.write_text('[github]\nrepo = "owner/name"\n')
     result = runner.invoke(app, ["watch", "--config", str(config_path)])
     assert result.exit_code == 1
-    assert "No GitHub token" in result.output
+    assert "No API key" in result.output
 
 
-def test_watch_fails_without_repo(fake_keyring, tmp_path, monkeypatch):
-    monkeypatch.setenv("GITHUB_TOKEN", "ghp_test")
+def test_watch_fails_when_a_repo_is_set_but_no_token(fake_keyring, tmp_path, monkeypatch):
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test")
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    monkeypatch.setattr("maajun.auth.shutil.which", lambda name: None)
     config_path = tmp_path / "config.toml"
-    config_path.write_text("[github]\n")
+    config_path.write_text('[github]\nrepo = "owner/name"\n')
     result = runner.invoke(app, ["watch", "--config", str(config_path)])
     assert result.exit_code == 1
-    assert "github.repo" in result.output
+    assert "no GitHub token" in result.output
+
+
+def test_watch_without_a_repo_runs_in_local_mode(fake_keyring, tmp_path, monkeypatch):
+    """GitHub is optional: with no repo, errors are analyzed into local reports."""
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test")
+    log_file = tmp_path / "app.log"
+    log_file.write_text("")
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(
+        f'[monitor]\nlog_files = ["{log_file}"]\n'
+        f'[daemon]\nworkdir = "{tmp_path / "data"}"\nrepo_path = "{tmp_path}"\n'
+    )
+    result = runner.invoke(app, ["watch", "--once", "--config", str(config_path)])
+    assert result.exit_code == 0, result.output
+    assert "local" in result.output
+    assert str(tmp_path) in result.output
 
 
 # ---------------------------------------------------------------------------
@@ -265,97 +298,12 @@ def test_init_help():
 # ---------------------------------------------------------------------------
 
 
-def test_watch_dry_run_fails_without_github_token(fake_keyring, tmp_path):
+def test_watch_dry_run_still_requires_an_api_key(fake_keyring, tmp_path):
     config_path = tmp_path / "config.toml"
     config_path.write_text('[github]\nrepo = "owner/name"\n')
     result = runner.invoke(app, ["watch", "--dry-run", "--config", str(config_path)])
     assert result.exit_code == 1
-    assert "No GitHub token" in result.output
-
-
-# ---------------------------------------------------------------------------
-# github-login
-# ---------------------------------------------------------------------------
-
-
-class _FakeGitHubClient:
-    def __init__(self, token, **kwargs):
-        self.token = token
-
-    async def validate_token(self):
-        return "morvin"
-
-    async def can_push(self, repo):
-        return True
-
-    async def aclose(self):
-        pass
-
-
-def test_github_login_sets_repo_and_token(fake_keyring, tmp_path, monkeypatch):
-    monkeypatch.setattr("maajun.vcs.GitHubClient", _FakeGitHubClient)
-    monkeypatch.setattr("maajun.cli.setup.GitHubClient", _FakeGitHubClient)
-    config_path = tmp_path / "config.toml"
-
-    result = runner.invoke(
-        app,
-        ["github-login", "--config", str(config_path)],
-        input="Morvin-Ian/maajun\nghp_token\n1\n",  # repo, token, mode (1=suggest)
-    )
-
-    assert result.exit_code == 0
-    assert 'repo = "Morvin-Ian/maajun"' in config_path.read_text()
-    assert fake_keyring[("maajun", "github_token")] == "ghp_token"
-
-
-def test_github_login_keeps_configured_repo_on_empty_input(
-    fake_keyring, tmp_path, monkeypatch
-):
-    monkeypatch.setattr("maajun.vcs.GitHubClient", _FakeGitHubClient)
-    monkeypatch.setattr("maajun.cli.setup.GitHubClient", _FakeGitHubClient)
-    config_path = tmp_path / "config.toml"
-    config_path.write_text('[github]\nrepo = "owner/real"\n')
-
-    result = runner.invoke(
-        app,
-        ["github-login", "--config", str(config_path)],
-        input="\nghp_token\n1\n",  # empty (keep repo), token, mode (1=suggest)
-    )
-
-    assert result.exit_code == 0
-    assert "owner/real" in result.output
-    assert 'repo = "owner/real"' in config_path.read_text()
-
-
-def test_github_login_treats_placeholder_repo_as_unset(fake_keyring, tmp_path, monkeypatch):
-    monkeypatch.setattr("maajun.vcs.GitHubClient", _FakeGitHubClient)
-    monkeypatch.setattr("maajun.cli.setup.GitHubClient", _FakeGitHubClient)
-    config_path = tmp_path / "config.toml"
-    config_path.write_text('[github]\nrepo = "owner/name"\n')
-
-    result = runner.invoke(
-        app,
-        ["github-login", "--config", str(config_path)],
-        input="\n",
-    )
-
-    assert result.exit_code == 1
-    assert "No repository entered" in result.output
-
-
-def test_github_login_rejects_bad_repo_format(fake_keyring, tmp_path, monkeypatch):
-    monkeypatch.setattr("maajun.vcs.GitHubClient", _FakeGitHubClient)
-    monkeypatch.setattr("maajun.cli.setup.GitHubClient", _FakeGitHubClient)
-    config_path = tmp_path / "config.toml"
-
-    result = runner.invoke(
-        app,
-        ["github-login", "--config", str(config_path)],
-        input="not-a-repo\n",
-    )
-
-    assert result.exit_code == 1
-    assert "owner/name form" in result.output
+    assert "No API key" in result.output
 
 
 # ---------------------------------------------------------------------------
@@ -393,8 +341,8 @@ def test_status_reports_missing_credentials(fake_keyring, tmp_path):
 
     result = runner.invoke(app, ["status", "--config", str(config_path)])
     assert result.exit_code == 1  # missing API key + token
-    assert "maajun login" in result.output
-    assert "github-login" in result.output.lower() or "GITHUB_TOKEN" in result.output
+    assert "maajun setup" in result.output
+    assert "GITHUB_TOKEN" in result.output or "gh auth login" in result.output
 
 
 def test_status_all_green(fake_keyring, tmp_path, monkeypatch):

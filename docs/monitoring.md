@@ -8,7 +8,7 @@ GitHub Actions monitor works from anywhere with network access.
 ## 1. Configure
 
 ```bash
-maajun init    # interactive: asks for provider, repo, mode, logs, interval
+maajun setup   # interactive: API key, repo, mode, logs, Sentry, email
 ```
 
 `init` prompts for the essentials and writes the config for you; pass
@@ -140,14 +140,19 @@ Create a **fine-grained personal access token** at
 Store it:
 
 ```bash
-maajun github-login        # asks for the repo, then the token
+maajun setup               # asks for the repo, then the token
 ```
 
-`github-login` prompts for the target repository (visible input, saved
-to your config), the token (hidden input), and the
-[mode](#modes), then checks that the token authenticates *and* that it
-can push to that repo — so misconfigured tokens fail here rather than at
-3 a.m.
+`setup` suggests the repository from your `origin` remote, picks up a
+token that is already in `$GITHUB_TOKEN` or a `gh auth login` session,
+and otherwise prompts for one (hidden input). It then checks that the
+token authenticates *and* that it can push to that repo — so
+misconfigured tokens fail here rather than at 3 a.m.
+
+GitHub is optional. Skip it and maajun still detects and analyzes
+errors, writing each incident report under `daemon.workdir/reports`
+instead of opening a pull request. Set `daemon.repo_path` to choose which
+local checkout it analyzes (the default is the current directory).
 
 On a headless server without a keyring, use the environment instead —
 env vars always take precedence:
@@ -332,7 +337,7 @@ calls.
 Run `maajun status` first — it checks credentials, repo push access, and
 log files in one shot and points at whatever is missing.
 
-- **"No GitHub token"** — run `maajun github-login` or set `GITHUB_TOKEN`.
+- **"No GitHub token"** — run `maajun setup` or set `GITHUB_TOKEN`.
 - **"Token cannot push"** — the fine-grained PAT is missing Contents
   write access or doesn't cover the repo.
 - **"No monitors configured"** — the `[monitor]` section defines no log

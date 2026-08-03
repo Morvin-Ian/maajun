@@ -109,7 +109,7 @@ def setup(tmp_path, remote):
         workspaces={"owner/name": workspace},
         monitor_to_repo={monitor.name: repo_config},
         github=github,
-        agent_factory_factory=lambda rc, ws: lambda: agent,
+        agent_factory_for_repo=lambda rc, ws: lambda: agent,
     )
     return daemon, logfile, agent, github, store, remote
 
@@ -364,7 +364,7 @@ async def test_shutdown_event_stops_daemon():
         workspaces={"owner/name": workspace},
         monitor_to_repo={},
         github=None,
-        agent_factory_factory=lambda rc, ws: lambda: None,
+        agent_factory_for_repo=lambda rc, ws: lambda: None,
     )
 
     async def set_shutdown():
@@ -373,3 +373,103 @@ async def test_shutdown_event_stops_daemon():
 
     await asyncio.gather(daemon.run(), set_shutdown())
     SHUTDOWN_EVENT.clear()
+
+
+# ---------------------------------------------------------------------------
+# Local mode: no GitHub configured
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def local_setup(tmp_path):
+    """A daemon with no GitHub repo — reports go to disk instead of PRs."""
+    from maajun.daemon import LocalWorkspace
+
+    logfile = tmp_path / "app.log"
+    logfile.write_text("")
+    checkout = tmp_path / "checkout"
+    checkout.mkdir()
+    (checkout / "main.py").write_text("items = []\n")
+
+    repo_config = RepoConfig(mode="suggest")
+    config = Config(
+        github=GitHubConfig(),
+        monitor=MonitorConfig(log_files=[str(logfile)], poll_interval=1),
+        daemon=DaemonConfig(workdir=str(tmp_path / "work")),
+    )
+    store = IncidentStore(tmp_path / "work" / "incidents.db")
+    agent = FakeAgent()
+    monitor = LogFileMonitor(logfile)
+    daemon = Daemon(
+        config,
+        monitors=[monitor],
+        store=store,
+        workspaces={"": LocalWorkspace(checkout)},
+        monitor_to_repo={monitor.name: repo_config},
+        github=None,
+        agent_factory_for_repo=lambda rc, ws: lambda: agent,
+        repo_configs=[repo_config],
+        report_dir=tmp_path / "work" / "reports",
+        local_mode=True,
+    )
+    return daemon, logfile, agent, store, checkout
+
+
+async def test_local_mode_writes_a_report_instead_of_a_pr(local_setup):
+    daemon, logfile, agent, store, checkout = local_setup
+
+    with open(logfile, "a") as f:
+        f.write("2026-07-18 ERROR shop: order failed\n")
+        f.write(TRACEBACK)
+        f.write("INFO next\n")
+
+    handled = await daemon.poll_once()
+    assert len(handled) == 1
+
+    report_path = daemon.report_dir / f"{handled[0]}.md"
+    assert report_path.exists()
+    assert REPORT in report_path.read_text()
+    assert "IndexError" in report_path.read_text()
+
+
+async def test_local_mode_analyzes_the_local_checkout(local_setup):
+    daemon, logfile, agent, store, checkout = local_setup
+
+    with open(logfile, "a") as f:
+        f.write(TRACEBACK)
+    await daemon.poll_once()
+    await daemon.poll_once()  # flush the carried-over traceback
+
+    assert str(checkout) in agent.prompts[0]
+
+
+async def test_local_mode_records_the_incident_as_processed(local_setup):
+    daemon, logfile, agent, store, checkout = local_setup
+
+    with open(logfile, "a") as f:
+        f.write("ERROR one-off failure\nINFO next\n")
+    handled = await daemon.poll_once()
+
+    # A second sighting must not produce a second report.
+    with open(logfile, "a") as f:
+        f.write("ERROR one-off failure\nINFO next\n")
+    assert await daemon.poll_once() == []
+    assert len(handled) == 1
+
+
+async def test_local_mode_notice_says_report_not_pr(local_setup):
+    daemon, logfile, agent, store, checkout = local_setup
+    notices = []
+    daemon.on_notice = lambda message, level: notices.append((message, level))
+
+    with open(logfile, "a") as f:
+        f.write("ERROR boom\nINFO next\n")
+    await daemon.poll_once()
+
+    assert any("Report written" in message for message, _ in notices)
+    assert not any("PR opened" in message for message, _ in notices)
+
+
+async def test_local_mode_aclose_survives_no_github_client(local_setup):
+    daemon, logfile, agent, store, checkout = local_setup
+    await daemon.aclose()  # must not blow up on github=None

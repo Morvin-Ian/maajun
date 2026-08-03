@@ -19,7 +19,7 @@ AI-powered developer assistant with two faces:
 
 ```bash
 uv sync           # or: pip install maajun
-maajun login      # store your DeepSeek API key (interactive, input hidden)
+maajun setup      # store your DeepSeek API key (interactive, input hidden)
 maajun chat
 ```
 
@@ -27,13 +27,35 @@ Get a DeepSeek API key at [platform.deepseek.com](https://platform.deepseek.com)
 
 ## Quick start: error monitoring
 
+One command sets up everything:
+
 ```bash
-maajun init            # interactive setup (provider, repo, mode, logs)
-maajun github-login    # store a GitHub token for the target repo
-maajun status          # check credentials, repo access, and log files
+maajun setup           # API key, GitHub, log files, Sentry, email
 maajun watch --dry-run # analyze errors without opening PRs — test your config
-maajun watch --once    # one real poll cycle
 maajun watch           # keep monitoring
+```
+
+Only the API key is required. `setup` offers GitHub, log files, GitHub
+Actions, Sentry, and email notifications in turn, and each is skippable
+with Enter — so a minimal install is a key and a log path. It detects
+your repo from the git remote and picks up an existing `GITHUB_TOKEN` or
+`gh auth login` session, and it re-runs safely: every answer defaults to
+what you already have.
+
+Without a GitHub repo, maajun still detects and analyzes errors — the
+incident report is written under `daemon.workdir` instead of opening a
+pull request. Add a repo whenever you want PRs:
+
+```bash
+maajun setup --repo you/yourapp    # or re-run 'maajun setup' interactively
+```
+
+For CI, every prompt has a flag, and secrets come from the environment so
+they never reach shell history:
+
+```bash
+DEEPSEEK_API_KEY=... GITHUB_TOKEN=... \
+  maajun setup --non-interactive --repo you/yourapp --logs /var/log/app/error.log
 ```
 
 Or investigate something yourself, without waiting for a monitor:
@@ -43,11 +65,9 @@ maajun report "Checkout 500s when the cart is empty"   # analyze + open a PR
 maajun report "Slow /search endpoint" --dry-run        # analyze only
 ```
 
-Configure at least one error source — `monitor.log_files` to tail your
-app's logs, or GitHub Actions repos to catch CI failures — and point
-`github.repo` at the repository maajun should open PRs on. Tweak any
-setting later with `maajun config <key> <value>`, and watch more than one
-repo with `maajun add-repo <owner/name>`. Each new error becomes one PR:
+Tweak any setting later with `maajun config <key> <value>`, watch more
+than one repo with `maajun add-repo <owner/name>`, and re-check your
+wiring with `maajun status`. Each new error becomes one PR:
 
 ```
 error detected ──▶ fingerprint & dedup ──▶ AI analyzes your code

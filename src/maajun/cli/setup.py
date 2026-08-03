@@ -43,15 +43,12 @@ def main(ctx: typer.Context):
     if not configured:
         console.print(Panel(
             "[bold]Welcome to Maajun![/bold]\n\n"
-            "No AI providers configured yet.\n"
-            "You need to set up at least one API key to get started.",
+            "Nothing is configured yet. One command sets everything up:\n\n"
+            "  [cyan]maajun setup[/cyan]\n\n"
+            "It needs an AI API key; everything else is optional.",
             title="Setup Required",
             border_style="yellow",
         ))
-        console.print("\n[bold]Quick Setup[/bold]\n")
-        console.print("  [cyan]1.[/cyan] Get an API key from your provider:")
-        console.print("     • DeepSeek:  https://platform.deepseek.com\n")
-        console.print("  [cyan]2.[/cyan] Run [bold]maajun login[/bold] to set up your key.\n")
     else:
         console.print(Panel(
             f"[green]✓ Configured:[/green] {', '.join(configured)}",
@@ -59,16 +56,27 @@ def main(ctx: typer.Context):
             border_style="green",
         ))
         console.print("\n[bold]Commands:[/bold]\n")
-        console.print("  [cyan]init[/cyan]               Set up daemon config interactively")
-        console.print("  [cyan]add-repo[/cyan]           Watch an additional repository")
-        console.print("  [cyan]status[/cyan]             Check credentials, repos, and log files")
-        console.print("  [cyan]watch[/cyan]              Monitor for errors, open PRs")
-        console.print("  [cyan]config[/cyan]             View or change settings")
-        console.print("  [cyan]chat[/cyan]               Start an interactive chat session")
-        console.print("  [cyan]login[/cyan]              Set up an API key interactively")
-        console.print("  [cyan]provider-list[/cyan]      Show provider status")
-        console.print("  [cyan]reset[/cyan]              Delete all data and start fresh\n")
-        console.print("  Run [bold]maajun <command> --help[/bold] for details.\n")
+        for name, help_text in _command_summaries(ctx):
+            console.print(f"  [cyan]{name:<18}[/cyan]{help_text}")
+        console.print("\n  Run [bold]maajun <command> --help[/bold] for details.\n")
+
+
+def _command_summaries(ctx: typer.Context) -> list[tuple[str, str]]:
+    """(name, one-line help) for every registered command.
+
+    Generated from the Typer app rather than hand-maintained: the previous
+    hard-coded list had already drifted, omitting report and sign-out.
+    """
+    command = typer.main.get_command(app)
+    # `setup` leads: the whole point is that one command does everything.
+    names = sorted(command.list_commands(ctx), key=lambda n: (n != "setup", n))
+    summaries = []
+    for name in names:
+        subcommand = command.get_command(ctx, name)
+        if subcommand is None or subcommand.hidden:
+            continue
+        summaries.append((name, (subcommand.get_short_help_str(limit=60) or "")))
+    return summaries
 
 
 @app.command()
