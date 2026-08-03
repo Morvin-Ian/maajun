@@ -11,10 +11,10 @@ from pathlib import Path
 import pytest
 
 from maajun.config import Config, DaemonConfig, GitHubConfig, MonitorConfig, RepoConfig
-from maajun.daemon import SHUTDOWN_EVENT, Daemon, make_permission_policy
+from maajun.daemon.core import SHUTDOWN_EVENT, Daemon, make_permission_policy
+from maajun.daemon.store import IncidentStore
 from maajun.monitors import LogFileMonitor
 from maajun.providers.base import CompletionResponse
-from maajun.state import IncidentStore
 from maajun.vcs import GitWorkspace
 
 TRACEBACK = """\
@@ -422,7 +422,7 @@ async def test_shutdown_event_stops_daemon():
 @pytest.fixture
 def local_setup(tmp_path):
     """A daemon with no GitHub repo — reports go to disk instead of PRs."""
-    from maajun.daemon import LocalWorkspace
+    from maajun.daemon.core import LocalWorkspace
 
     logfile = tmp_path / "app.log"
     logfile.write_text("")
@@ -734,7 +734,7 @@ async def test_prompt_offers_recent_commits_for_blame(setup):
 
 async def test_local_mode_without_git_history_omits_the_section(tmp_path):
     """A plain directory has no commits; don't invite the model to invent one."""
-    from maajun.daemon import LocalWorkspace
+    from maajun.daemon.core import LocalWorkspace
 
     logfile = tmp_path / "app.log"
     logfile.write_text("")

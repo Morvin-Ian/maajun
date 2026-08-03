@@ -14,17 +14,18 @@ the daemon can price each incident accurately (see
 ### Providers
 
 Every supported provider speaks the `/chat/completions` protocol, so
-`ChatCompletionsProvider` holds all the behavior — retries, streaming, tool
-serialization, response parsing — and a vendor module is only an endpoint, a
-pair of model names, and any content quirks to strip: `deepseek.py` removes
-DeepSeek's DSML tool-call markup, `openai.py` has nothing to strip. Point
-`ai.base_url` at a gateway to use any other compatible endpoint.
+`ChatCompletionsProvider` (`providers/chat_completions.py`) holds all the
+behavior — retries, streaming, tool serialization, response parsing — and a
+vendor module is only an endpoint, a pair of model names, and any content
+quirks to strip: `deepseek.py` removes DeepSeek's DSML tool-call markup,
+`openai.py` has nothing to strip. Point `ai.base_url` at a gateway to use any
+other compatible endpoint.
 
-Pricing costs each response by model, matching names as prefixes so dated ids
-(`gpt-4o-2024-08-06`) resolve to their family. It is load-bearing: the
-[spend cap](monitoring.md#capping-spend) decides whether to analyze the next
-incident from these numbers, and an unpriced model logs a warning rather than
-silently costing at the fallback rate.
+`providers/pricing.py` costs each response by model, matching names as
+prefixes so dated ids (`gpt-4o-2024-08-06`) resolve to their family. It is
+load-bearing: the [spend cap](monitoring.md#capping-spend) decides whether to
+analyze the next incident from these numbers, and an unpriced model logs a
+warning rather than silently costing at the fallback rate.
 
 ### Provider resilience
 
@@ -86,6 +87,21 @@ Every monitor also inherits **burst thresholding** from the base class:
 with `burst_threshold > 1`, events are buffered until N of them land
 inside `burst_window_seconds` and then emitted together, so a one-off
 blip never becomes a pull request.
+
+## Layout
+
+```
+maajun/
+  agent/        the tool-calling loop and its tools
+  monitors/     error sources (log files, GitHub Actions) + shared defaults
+  providers/    chat_completions.py (the protocol) + one file per vendor,
+                plus pricing.py
+  daemon/       core (loop), reports (rendering), store, prompts, wiring
+  vcs/          git workspace, GitHub client, API conventions
+  cli/          one command per module, all registering on a shared Typer app
+  auth.py       credentials: env var -> keyring -> gh CLI
+  config.py     the config models and TOML round-trip
+```
 
 ## The incident pipeline (`maajun watch`)
 

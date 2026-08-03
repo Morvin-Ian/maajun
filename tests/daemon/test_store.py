@@ -2,8 +2,8 @@
 
 import pytest
 
+from maajun.daemon.store import IncidentStore
 from maajun.monitors import ErrorEvent
-from maajun.state import IncidentStore
 
 
 @pytest.fixture
@@ -154,7 +154,7 @@ def test_failed_incident_is_retried(tmp_path):
 
 
 def test_retries_stop_after_max_attempts(tmp_path):
-    from maajun.state import MAX_ATTEMPTS
+    from maajun.daemon.store import MAX_ATTEMPTS
 
     store = IncidentStore(tmp_path / "i.db")
     store.record(_event())
@@ -185,7 +185,7 @@ def test_repeat_sighting_still_bumps_the_counter(tmp_path):
 
 
 def test_exhausted_lists_permanently_failed_incidents(tmp_path):
-    from maajun.state import MAX_ATTEMPTS
+    from maajun.daemon.store import MAX_ATTEMPTS
 
     store = IncidentStore(tmp_path / "i.db")
     store.record(_event("gone"))

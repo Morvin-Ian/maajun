@@ -1,6 +1,6 @@
 """Tests for cost tracking."""
 
-from maajun.costs import compute_cost, extract_usage
+from maajun.providers.pricing import compute_cost, extract_usage
 
 
 def test_compute_cost_deepseek_v4_flash():
@@ -80,21 +80,21 @@ def test_extract_usage_none_model_defaults_to_flash():
 
 def test_openai_models_are_priced():
     """Adding a provider without its prices silently moved the spend cap."""
-    from maajun.costs import DEFAULT_PRICING, pricing_for
+    from maajun.providers.pricing import DEFAULT_PRICING, pricing_for
 
     for model in ("gpt-4o", "gpt-4o-mini"):
         assert pricing_for(model) is not DEFAULT_PRICING
 
 
 def test_dated_model_names_resolve_to_their_family():
-    from maajun.costs import PRICING, pricing_for
+    from maajun.providers.pricing import PRICING, pricing_for
 
     assert pricing_for("gpt-4o-2024-08-06") == PRICING["gpt-4o"]
 
 
 def test_longest_prefix_wins():
     """gpt-4o-mini must not resolve to gpt-4o, which is 16x the price."""
-    from maajun.costs import PRICING, pricing_for
+    from maajun.providers.pricing import PRICING, pricing_for
 
     assert pricing_for("gpt-4o-mini-2024-07-18") == PRICING["gpt-4o-mini"]
 
@@ -103,7 +103,7 @@ def test_unknown_model_warns_once(caplog):
     """A silent fallback misreports spend; a logged one is diagnosable."""
     import logging
 
-    from maajun import costs as pricing
+    from maajun.providers import pricing
 
     pricing._warned.discard("some-new-model")
     with caplog.at_level(logging.WARNING):
@@ -115,8 +115,8 @@ def test_unknown_model_warns_once(caplog):
 
 def test_every_supported_provider_has_priced_defaults():
     """A provider whose own default model isn't priced can't be costed."""
-    from maajun.costs import DEFAULT_PRICING, pricing_for
     from maajun.providers.factory import ProviderFactory
+    from maajun.providers.pricing import DEFAULT_PRICING, pricing_for
 
     for provider_type in ProviderFactory.get_supported_providers():
         provider_class = ProviderFactory._providers[provider_type]

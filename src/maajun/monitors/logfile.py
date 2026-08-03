@@ -8,24 +8,12 @@ from pathlib import Path
 from typing import Any
 
 from maajun.monitors.base import ErrorEvent, Monitor
-
-# Only genuine failures by default. Warnings are common and mostly benign, and
-# every matched line costs an AI call and a pull request — opt in explicitly
-# via monitor.error_pattern if you want them.
-DEFAULT_ERROR_PATTERN = r"\b(ERROR|CRITICAL|FATAL)\b"
-
-# Lines that open a multi-line stack trace, per language.
-DEFAULT_TRACEBACK_HEADERS: tuple[str, ...] = (
-    "Traceback (most recent call last):",  # Python
-    "Caused by:",  # Java chained exceptions
-    "panic:",  # Go
-    "goroutine ",  # Go
-    "Exception in thread ",  # Java
+from maajun.monitors.defaults import (
+    DEFAULT_ERROR_PATTERN,
+    DEFAULT_JSON_LEVEL_VALUES,
+    DEFAULT_TRACEBACK_HEADERS,
+    TRACEBACK_LOOKAHEAD_LINES,
 )
-
-# Levels that JSON-formatted logs are matched against when
-# json_level_field is configured.
-DEFAULT_JSON_LEVEL_VALUES: frozenset[str] = frozenset({"error", "critical", "fatal"})
 
 # Headers that *are* the exception, rather than introducing one on a later line.
 _SELF_DESCRIBING_HEADERS = ("panic:", "Exception in thread ")
@@ -34,13 +22,9 @@ _SELF_DESCRIBING_HEADERS = ("panic:", "Exception in thread ")
 # (the logging.exception pattern), so it's worth looking ahead to merge them.
 _SEVERE_LEVEL_RE = re.compile(r"\b(ERROR|CRITICAL|FATAL)\b")
 
-# How many lines after an error line may be scanned for a traceback header.
-# Bounded deliberately: an unbounded scan merges an error with an unrelated
-# traceback far below it and swallows everything in between.
-TRACEBACK_LOOKAHEAD_LINES = 3
-
 # Cap on carried-over text for tracebacks split across polls.
 MAX_PENDING = 64 * 1024
+
 
 class LogFileMonitor(Monitor):
     """Incrementally reads a log file, surviving rotation and truncation.

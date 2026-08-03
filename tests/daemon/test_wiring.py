@@ -4,7 +4,7 @@ import pytest
 
 from maajun.auth import AuthManager
 from maajun.config import Config, GitHubConfig, MonitorConfig, RepoConfig
-from maajun.daemon import _build_monitors
+from maajun.daemon.wiring import _build_monitors
 
 
 @pytest.fixture(autouse=True)

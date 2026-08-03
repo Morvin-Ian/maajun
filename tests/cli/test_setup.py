@@ -7,7 +7,7 @@ from typer.testing import CliRunner
 
 from maajun.auth import AuthManager
 from maajun.cli import app
-from maajun.cli.wizard import detect_repo_from_git
+from maajun.cli.setup import detect_repo_from_git
 from maajun.config import Config
 
 runner = CliRunner()
@@ -28,7 +28,7 @@ def api_key(monkeypatch):
 @pytest.fixture
 def no_git_detect(monkeypatch):
     """Stop the wizard picking up the repo maajun itself is developed in."""
-    monkeypatch.setattr("maajun.cli.wizard.detect_repo_from_git", lambda *a: None)
+    monkeypatch.setattr("maajun.cli.setup.detect_repo_from_git", lambda *a: None)
 
 
 @pytest.fixture(autouse=True)
@@ -47,7 +47,7 @@ def no_network(monkeypatch):
         async def aclose(self):
             pass
 
-    monkeypatch.setattr("maajun.cli.wizard.GitHubClient", _Client)
+    monkeypatch.setattr("maajun.cli.setup.GitHubClient", _Client)
 
 
 # ---------------------------------------------------------------------------
@@ -67,7 +67,7 @@ def test_detect_repo_parses_remote_forms(monkeypatch, url, expected):
     def run(cmd, **kwargs):
         return subprocess.CompletedProcess(cmd, 0, stdout=url, stderr="")
 
-    monkeypatch.setattr("maajun.cli.wizard.subprocess.run", run)
+    monkeypatch.setattr("maajun.cli.setup.subprocess.run", run)
     assert detect_repo_from_git() == expected
 
 
@@ -75,7 +75,7 @@ def test_detect_repo_is_quiet_outside_a_checkout(monkeypatch):
     def run(cmd, **kwargs):
         raise subprocess.CalledProcessError(128, cmd)
 
-    monkeypatch.setattr("maajun.cli.wizard.subprocess.run", run)
+    monkeypatch.setattr("maajun.cli.setup.subprocess.run", run)
     assert detect_repo_from_git() is None
 
 

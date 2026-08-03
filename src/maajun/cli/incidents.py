@@ -14,7 +14,7 @@ from rich.table import Table
 
 from maajun.cli._shared import app, console
 from maajun.config import Config
-from maajun.state import MAX_ATTEMPTS, IncidentStore
+from maajun.daemon.store import MAX_ATTEMPTS, IncidentStore
 from maajun.utils import truncate, utc_day_start_iso
 
 _STATUS_STYLES = {"processed": "green", "failed": "red", "new": "yellow"}

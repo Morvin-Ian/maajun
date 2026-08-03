@@ -6,7 +6,7 @@ from typing import Any
 
 import httpx
 
-from maajun.utils import github_headers
+from maajun.vcs.api import github_headers
 
 API_URL = "https://api.github.com"
 

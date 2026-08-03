@@ -1,6 +1,7 @@
 """Token pricing, used to cost each analysis.
 
-Not cosmetic: `daemon.max_usd_per_day` decides whether to analyse the next
+Lives with the providers because that is what it prices — and it is not
+cosmetic: `daemon.max_usd_per_day` decides whether to analyse the next
 incident from these numbers, so a missing entry moves the cap.
 """
 
@@ -46,7 +47,7 @@ def pricing_for(model: str) -> dict[str, float]:
         log.warning(
             "No pricing entry for model %r — costing it at $%.2f/$%.2f per 1M "
             "tokens. Reported spend and the daily cap will be approximate; add "
-            "it to costs.py to fix.",
+            "it to providers/pricing.py to fix.",
             model, DEFAULT_PRICING["input"], DEFAULT_PRICING["output"],
         )
     return DEFAULT_PRICING

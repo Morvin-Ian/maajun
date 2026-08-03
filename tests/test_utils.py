@@ -3,13 +3,12 @@
 import pytest
 
 from maajun.utils import (
-    GITHUB_API_VERSION,
     PLACEHOLDER_REPO,
-    github_headers,
     is_valid_repo,
     truncate,
     utcnow_iso,
 )
+from maajun.vcs.api import GITHUB_API_VERSION, github_headers
 
 # --- text.truncate ---------------------------------------------------------
 
