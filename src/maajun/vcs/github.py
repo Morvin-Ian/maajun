@@ -91,6 +91,21 @@ class GitHubClient:
             f"Could not create PR ({resp.status_code}): {self._error_detail(resp)}"
         )
 
+    async def create_issue(self, repo: str, *, title: str, body: str) -> str:
+        """Open an issue and return its URL.
+
+        Suggest mode's artifact: an analysis that changes no code is an issue,
+        not a pull request whose diff is empty.
+        """
+        resp = await self._request(
+            "POST", f"/repos/{repo}/issues", json={"title": title, "body": body},
+        )
+        if resp.status_code == 201:
+            return resp.json()["html_url"]
+        raise GitHubError(
+            f"Could not create issue ({resp.status_code}): {self._error_detail(resp)}"
+        )
+
     async def find_pull_request(self, repo: str, *, head: str) -> str | None:
         owner = repo.split("/")[0]
         resp = await self._request(

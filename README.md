@@ -1,13 +1,13 @@
 # Maajun
 
-**Error monitoring that opens the pull request.**
+**Error monitoring that files the bug report — and can write the fix.**
 
 Maajun watches your error sources — local log files (e.g. your app's error
 log on a VPS) and failed GitHub Actions runs — and when a new error
-appears it investigates the code, documents the incident, and opens a pull
-request on GitHub: either with just the analysis and suggested fix
-(*suggest* mode) or with the fix applied (*fix* mode). It records what each
-analysis cost, and the same error never opens two PRs.
+appears it investigates the code and documents the incident on GitHub:
+in *suggest* mode it files an issue with the analysis and a suggested fix;
+in *fix* mode it applies the fix on a branch and opens a pull request. It
+records what each analysis cost, and the same error is never reported twice.
 
 ## Quick start
 
@@ -19,8 +19,9 @@ maajun setup                                           # stores your API key
 maajun report "Checkout 500s when the cart is empty"
 ```
 
-That clones your repo, reads the code, and opens a PR with a root-cause
-report. `--dry-run` prints the analysis instead. Get a DeepSeek API key at
+That clones your repo, reads the code, and files an issue with a root-cause
+report (`-m fix` opens a PR with the fix applied instead; `--dry-run`
+just prints the analysis). Get a DeepSeek API key at
 [platform.deepseek.com](https://platform.deepseek.com).
 
 ## Quick start: continuous monitoring
@@ -57,15 +58,16 @@ DEEPSEEK_API_KEY=... GITHUB_TOKEN=... \
 
 Tweak any setting later with `maajun config <key> <value>`, watch more
 than one repo with `maajun add-repo <owner/name>`, and re-check your
-wiring with `maajun status`. Each new error becomes one PR:
+wiring with `maajun status`. Each new error becomes one artifact:
 
 ```
 error detected ──▶ fingerprint & dedup ──▶ AI analyzes your code
-  (logs / CI)                                   │
-   PR on GitHub ◀──── branch + incident report ─┘
+  (logs / CI)                                         │
+   issue (suggest) ◀────────────────────────────────  ┤
+   PR    (fix)     ◀──── branch + applied fix ────────┘
 ```
 
-The same error never opens two PRs — repeat sightings only bump a counter.
+The same error is never reported twice — repeat sightings only bump a counter.
 
 ## Documentation
 

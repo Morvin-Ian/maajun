@@ -74,6 +74,7 @@ class FakeAgent:
 class FakeGitHub:
     def __init__(self):
         self.calls = []
+        self.issues = []
         self.closed = False
 
     async def create_pull_request(self, repo, *, head, base, title, body):
@@ -81,6 +82,10 @@ class FakeGitHub:
             {"repo": repo, "head": head, "base": base, "title": title, "body": body}
         )
         return f"https://github.com/{repo}/pull/{len(self.calls)}"
+
+    async def create_issue(self, repo, *, title, body):
+        self.issues.append({"repo": repo, "title": title, "body": body})
+        return f"https://github.com/{repo}/issues/{len(self.issues)}"
 
     async def aclose(self):
         self.closed = True
@@ -114,7 +119,8 @@ def setup(tmp_path, remote):
     return daemon, logfile, agent, github, store, remote
 
 
-async def test_error_becomes_pull_request(setup):
+async def test_suggest_mode_files_an_issue(setup):
+    """An analysis that changes no code is an issue, not an empty-diff PR."""
     daemon, logfile, agent, github, store, remote = setup
 
     with open(logfile, "a") as f:
@@ -130,14 +136,48 @@ async def test_error_becomes_pull_request(setup):
     workspace = daemon.workspaces["owner/name"]
     assert str(workspace.path) in agent.prompts[0]
 
-    # PR was opened from the incident branch with the report in the body
+    # An issue carries the report; no PR, no branch, no push.
+    assert github.calls == []
+    assert len(github.issues) == 1
+    issue = github.issues[0]
+    assert "IndexError" in issue["title"]
+    assert "Root cause" in issue["body"]
+    assert "IndexError: list index out of range" in issue["body"]  # error details
+    assert store.get(fp)["pr_url"].endswith("/issues/1")
+    assert store.get(fp)["branch"] == ""
+
+
+async def test_suggest_mode_pushes_no_branch(setup):
+    """The whole point: no branch to review, no CI run, no empty diff."""
+    daemon, logfile, agent, github, store, remote = setup
+
+    with open(logfile, "a") as f:
+        f.write(TRACEBACK)
+    await daemon.poll_once()
+
+    branches = subprocess.run(
+        ["git", "branch", "-a"], cwd=str(remote),
+        capture_output=True, text=True, check=True,
+    ).stdout
+    assert "maajun/incident-" not in branches
+
+
+async def test_fix_mode_opens_a_pull_request_with_the_report_committed(setup):
+    """Fix mode has a real diff, so it still gets a branch and a PR."""
+    daemon, logfile, agent, github, store, remote = setup
+    daemon.monitor_to_repo[daemon.monitors[0].name].mode = "fix"
+
+    with open(logfile, "a") as f:
+        f.write(TRACEBACK)
+    fp = (await daemon.poll_once())[0]
+
+    assert github.issues == []
     assert len(github.calls) == 1
     call = github.calls[0]
     assert call["head"] == f"maajun/incident-{fp}"
     assert call["base"] == "main"
-    assert REPORT.splitlines()[0].lstrip("# ") in call["title"] or "IndexError" in call["title"]
+    assert "IndexError" in call["title"]
     assert "Root cause" in call["body"]
-    assert fp in call["body"]
 
     # Branch with the committed report exists on the remote
     show = subprocess.run(
@@ -147,14 +187,13 @@ async def test_error_becomes_pull_request(setup):
     assert show.returncode == 0
     assert "Root cause" in show.stdout
 
-    # Incident recorded
     row = store.get(fp)
     assert row["status"] == "processed"
     assert row["pr_url"] == "https://github.com/owner/name/pull/1"
     assert row["branch"] == f"maajun/incident-{fp}"
 
 
-async def test_same_error_does_not_open_second_pr(setup):
+async def test_same_error_is_reported_once(setup):
     daemon, logfile, agent, github, store, remote = setup
 
     with open(logfile, "a") as f:
@@ -166,7 +205,7 @@ async def test_same_error_does_not_open_second_pr(setup):
     handled = await daemon.poll_once()
 
     assert handled == []
-    assert len(github.calls) == 1
+    assert len(github.issues) == 1
 
 
 async def test_failed_incident_is_marked_and_loop_survives(setup):
@@ -175,7 +214,7 @@ async def test_failed_incident_is_marked_and_loop_survives(setup):
     async def boom(*args, **kwargs):
         raise RuntimeError("github down")
 
-    github.create_pull_request = boom
+    github.create_issue = boom
 
     with open(logfile, "a") as f:
         f.write(TRACEBACK)
@@ -270,14 +309,14 @@ async def test_manual_report_opens_pr_and_reports_progress(setup):
     repo_config = daemon.monitor_to_repo[next(iter(daemon.monitor_to_repo))]
     phases: list[str] = []
 
-    pr_url = await daemon.handle_manual_report(
+    url = await daemon.handle_manual_report(
         "Checkout button does nothing", repo_config, progress=phases.append
     )
 
-    assert phases == ["Preparing workspace", "Analyzing with AI", "Opening PR"]
-    assert pr_url.endswith("/pull/1")
+    assert phases == ["Preparing workspace", "Analyzing with AI", "Filing issue"]
+    assert url.endswith("/issues/1")
     assert "Checkout button" in agent.prompts[0]
-    assert github.calls[0]["head"].startswith("maajun/report-")
+    assert "Checkout button" in github.issues[0]["title"]
 
 
 async def test_manual_report_dry_run_only_analyzes(setup):
@@ -294,7 +333,7 @@ async def test_manual_report_dry_run_only_analyzes(setup):
     assert github.calls == []
 
 
-async def test_notices_emitted_for_new_error_and_pr(setup):
+async def test_notices_emitted_for_new_error_and_artifact(setup):
     daemon, logfile, agent, github, store, remote = setup
     notices: list[tuple[str, str]] = []
     daemon.on_notice = lambda message, level: notices.append((level, message))
@@ -305,8 +344,8 @@ async def test_notices_emitted_for_new_error_and_pr(setup):
 
     levels = [lvl for lvl, _ in notices]
     assert "info" in levels  # new error detected
-    assert "success" in levels  # PR opened
-    assert any("PR opened" in msg for _, msg in notices)
+    assert "success" in levels  # issue opened
+    assert any("Issue opened" in msg for _, msg in notices)
 
 
 async def test_agent_closed_after_incident(setup):
@@ -333,7 +372,7 @@ async def test_notice_emitted_on_failure(setup):
     async def boom(*args, **kwargs):
         raise RuntimeError("github down")
 
-    github.create_pull_request = boom
+    github.create_issue = boom
 
     with open(logfile, "a") as f:
         f.write(TRACEBACK)

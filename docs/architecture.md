@@ -87,18 +87,21 @@ blip never becomes a pull request.
    `maajun/incident-<fingerprint>`, and asks the agent to investigate.
    The agent reads the code with its safe tools and writes a structured
    report (what happened / root cause / suggested fix). In fix mode it
-   may also edit files in the clone. In a
+   may also edit files in the clone. The clone is synced in both modes —
+   the agent reads the code from it — but only fix mode branches. In a
    [multi-repo](monitoring.md#multiple-repositories) config each monitor
    is bound to a repo, so its errors are analyzed against — and open PRs
    on — the right one, each with its own clone, branch, and mode.
-4. **Publish** — the report is committed as
-   `docs/incidents/<fingerprint>.md`, the branch is pushed, and a pull
-   request is opened with the report as its body. If the branch already
-   has an open PR it is reused, never duplicated. With no `github.repo`
-   configured the daemon runs in
-   [local mode](monitoring.md#1-configure) instead: steps 1–3 are
-   unchanged, but the report is written to `<workdir>/reports/` and no
-   git or GitHub operation runs at all.
+4. **Publish** — depends on the repo's [mode](monitoring.md#modes). In
+   `suggest` mode the report is filed as a GitHub **issue**: no branch, no
+   commit, no push, because there is no diff to review. In `fix` mode the
+   report is committed as `docs/incidents/<fingerprint>.md` alongside the
+   agent's edits, the branch is pushed, and a **pull request** is opened
+   with the report as its body — reusing an existing PR for the branch
+   rather than duplicating it. With no `github.repo` configured the daemon
+   runs in [local mode](monitoring.md#1-configure) instead: steps 1–3 are
+   unchanged, but the report is written to `<workdir>/reports/` and no git
+   or GitHub operation runs at all.
 5. **Record** — the incident is marked processed with its PR URL, token
    counts, and USD cost. If any step fails, the incident is marked failed
    and the daemon moves on; one bad incident never kills the loop.

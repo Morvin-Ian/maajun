@@ -152,7 +152,7 @@ works.
 
 **Noisy, self-recovering errors.** `burst_threshold` holds events back
 until N of them land inside `burst_window_seconds`, so a single blip is
-ignored and only a genuinely repeating error opens a PR. The whole burst
+ignored and only a genuinely repeating error is reported. The whole burst
 is reported once the threshold is reached:
 
 ```toml
@@ -243,7 +243,7 @@ error source before letting maajun loose on your repo.
 ## On-demand reports
 
 You don't have to wait for a monitor to catch something. `maajun report`
-investigates an issue **you describe** and opens a PR with the analysis —
+investigates an issue **you describe** and reports the analysis —
 the same clone → investigate → report → PR pipeline as `watch`, run on
 demand against the same configured repo, mode, and credentials.
 
@@ -257,7 +257,7 @@ Pass a plain description, a bug-tracker summary, or a pasted stack trace.
 The agent reads the target repo with its safe tools and writes the usual
 *what happened / root cause / suggested fix* report; in `fix` mode it also
 edits the clone. A live spinner shows each phase (preparing the workspace,
-analyzing, opening the PR) and finishes with the PR link. With multiple
+analyzing, filing the issue) and finishes with the link. With multiple
 repos configured, `report` prompts you to pick one when `--repo` is
 omitted; pass `--repo owner/name` to skip the prompt in scripts. `--mode`,
 `--base-branch`, and `--dry-run` work the same as on `watch`.
@@ -265,30 +265,44 @@ omitted; pass `--repo owner/name` to skip the prompt in scripts. `--mode`,
 Each report is recorded in the same incident database as detected errors,
 so its tokens and cost are tracked alongside them. Unlike the watch loop,
 `report` is not dedup-gated — running it again on the same description
-re-investigates and updates the existing `maajun/report-<fingerprint>`
-branch and PR rather than skipping it.
+re-investigates and files a fresh issue (or, in `fix` mode, updates the
+existing `maajun/report-<fingerprint>` branch and PR).
 
 ## Modes
 
 | | `suggest` (default) | `fix` |
 |---|---|---|
+| Artifact | A GitHub **issue** | A **pull request** on a branch |
 | Agent file access | Read-only | May edit files, but only inside its own clone |
 | Agent shell access | None | None |
-| PR contains | Incident report + suggested fix | Applied fix + incident report |
+| Contains | Incident report + suggested fix | Applied fix + incident report |
 | You review | The suggestion | The actual diff |
 
-Either way, **nothing merges without your review** — maajun only opens
-the PR. Start with `suggest`; switch to `fix` once you trust the reports.
+Suggest mode files an **issue**, not a pull request. A PR whose diff
+changes nothing still lands in the review queue and triggers CI, which is
+noise — an analysis is an issue. It's also cheaper: suggest mode clones the
+repo to read it, but creates no branch and pushes nothing.
 
-## What a PR looks like
+Either way, **nothing merges without your review**. Start with `suggest`;
+switch to `fix` once you trust the reports.
+
+## What you get
+
+**`suggest` mode — an issue:**
+
+- Title: `[maajun] KeyError: 'discount'`
+- Body: the incident report — what happened, root cause with file/line
+  references, suggested fix — then the raw error details, source, and
+  fingerprint
+
+**`fix` mode — a pull request:**
 
 - Branch: `maajun/incident-<fingerprint>` (detected errors) or
   `maajun/report-<fingerprint>` (on-demand `maajun report`)
 - Title: `[maajun] KeyError: 'discount'`
-- Body: the incident report — what happened, root cause with file/line
-  references, suggested fix — plus the error source and fingerprint
-- Committed file: `docs/incidents/<fingerprint>.md` (the same report, so
-  incidents are documented in-repo even after the PR is closed)
+- Diff: the applied fix, plus `docs/incidents/<fingerprint>.md` so the
+  incident stays documented in-repo after the PR is closed
+- Body: the incident report, including an *Applied fix* section
 
 ## Deduplication
 

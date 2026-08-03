@@ -237,7 +237,12 @@ def report(
         else:
             with working(console, "Preparing workspace") as status:
                 result = asyncio.run(run_report(status.set))
-            label = "Report written" if daemon.local_mode else "PR opened"
+            if daemon.local_mode:
+                label = "Report written"
+            elif target.mode == "fix":
+                label = "PR opened"
+            else:
+                label = "Issue opened"
             console.print(f"\n[green]✓ {label}:[/green] {result}")
     except KeyboardInterrupt:
         console.print("\n[dim]Cancelled.[/dim]")
