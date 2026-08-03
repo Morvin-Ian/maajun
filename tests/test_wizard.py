@@ -188,8 +188,9 @@ def test_setup_preserves_a_second_repo(fake_keyring, api_key, tmp_path):
 # ---------------------------------------------------------------------------
 
 
-def test_github_actions_reuses_the_stored_github_token(fake_keyring, api_key, tmp_path):
-    """Nobody should have to paste a second token for the same account."""
+def test_github_actions_never_writes_the_token_to_config(fake_keyring, api_key, tmp_path):
+    """Regression: the wizard copied the keyring token into config.toml,
+    downgrading a secret that was safely stored."""
     config_path = tmp_path / "config.toml"
     AuthManager().set_github_token("ghp_stored")
 
@@ -199,7 +200,7 @@ def test_github_actions_reuses_the_stored_github_token(fake_keyring, api_key, tm
     ])
     config = Config.load(config_path)
     assert config.monitor.github_actions_repos == ["acme/webapp"]
-    assert config.monitor.github_actions_token == "ghp_stored"
+    assert "ghp_stored" not in config_path.read_text()
 
 
 def test_github_actions_is_skipped_without_a_token(fake_keyring, api_key, tmp_path):

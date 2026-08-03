@@ -48,7 +48,7 @@ poll_interval = 30
 # burst_window_seconds = 60
 
 # GitHub Actions — poll repos for failed workflow runs (optional).
-# github_actions_token = "github_pat_..."
+# Uses the same GitHub token as everything else; nothing secret goes here.
 # github_actions_repos = ["you/another-repo"]
 
 [daemon]
@@ -175,7 +175,8 @@ class MonitorConfig(_Base):
     # Emit nothing until burst_threshold events land within the window.
     burst_threshold: int = 1
     burst_window_seconds: float = 60.0
-    github_actions_token: str = ""
+    # Repos to poll for failed workflow runs. The GitHub token comes from
+    # the keyring/environment, never from this file.
     github_actions_repos: list[str] = Field(default_factory=list)
 
     @property
@@ -300,7 +301,6 @@ class Config(_Base):
             "burst_window_seconds",
         ):
             _set_if_customized(monitor, self.monitor, name)
-        _set_or_del(monitor, "github_actions_token", self.monitor.github_actions_token or None)
         if self.monitor.github_actions_repos:
             monitor["github_actions_repos"] = self.monitor.github_actions_repos
         else:

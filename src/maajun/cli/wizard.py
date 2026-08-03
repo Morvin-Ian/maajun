@@ -391,8 +391,9 @@ def _setup_error_sources(
             console.print("  [yellow]⚠ GitHub Actions needs a GitHub token — "
                           "skipped.[/yellow]")
         else:
-            # Reuse the GitHub token rather than asking for a second one.
-            config.monitor.github_actions_token = auth.get_github_token() or ""
+            # Only the repo list is stored. The token is read from the keyring
+            # or the environment at run time — writing it here would put a
+            # secret in a plaintext config file.
             config.monitor.github_actions_repos = repo_names
             console.print(
                 f"  [green]✓[/green] Watching Actions on {', '.join(repo_names)}"
