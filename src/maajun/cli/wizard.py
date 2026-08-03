@@ -205,6 +205,7 @@ def _setup_github(
     requested_repo: str | None,
     base_branch: str | None,
     mode: str | None,
+    test_command: str | None,
     reconfigure: bool,
 ) -> None:
     """Set the target repo and make sure a token is available. Never blocks."""
@@ -240,21 +241,47 @@ def _setup_github(
         if ask.interactive else (existing[0].mode if existing else "suggest")
     )
 
+    # Only fix mode produces a diff, so only fix mode has anything to verify.
+    current_test_command = existing[0].test_command if existing else ""
+    resolved_test_command = current_test_command
+    if resolved_mode == "fix":
+        if test_command is not None:
+            resolved_test_command = test_command
+        elif ask.interactive:
+            console.print(
+                "  [dim]Fix mode edits code. A test command lets maajun verify "
+                "the fix and put the result in the PR.[/dim]"
+            )
+            resolved_test_command = ask.text(
+                "Test command (Enter to skip)", current_test_command
+            )
+        if not resolved_test_command:
+            console.print(
+                "  [yellow]⚠ No test command — fix-mode PRs will be marked "
+                "unverified.[/yellow]"
+            )
+
     if existing and any(rc.repo == repo for rc in existing):
         for repo_config in config.github.repos:
             if repo_config.repo == repo:
                 repo_config.base_branch = branch
                 repo_config.mode = resolved_mode
+                repo_config.test_command = resolved_test_command
         if not config.github.repos:  # legacy single-repo form
             config.github.repo = repo
             config.github.base_branch = branch
             config.github.mode = resolved_mode
+            config.github.test_command = resolved_test_command
     elif existing:
-        config.add_repo(RepoConfig(repo=repo, base_branch=branch, mode=resolved_mode))
+        config.add_repo(RepoConfig(
+            repo=repo, base_branch=branch, mode=resolved_mode,
+            test_command=resolved_test_command,
+        ))
     else:
         config.github.repo = repo
         config.github.base_branch = branch
         config.github.mode = resolved_mode
+        config.github.test_command = resolved_test_command
 
     _setup_github_token(auth, ask, repo, reconfigure=reconfigure)
 
@@ -391,6 +418,10 @@ def setup(
         None, "--base-branch", "-b", help="Branch to open PRs against"
     ),
     mode: str | None = typer.Option(None, "--mode", "-m", help="'suggest' or 'fix'"),
+    test_command: str | None = typer.Option(
+        None, "--test-command",
+        help="Command that verifies a fix-mode edit, e.g. 'pytest -q'",
+    ),
     logs: str | None = typer.Option(
         None, "--logs", "-l", help="Comma-separated log files to watch"
     ),
@@ -436,7 +467,7 @@ def setup(
     _setup_github(
         auth, config, ask,
         requested_repo=repo, base_branch=base_branch, mode=mode,
-        reconfigure=reconfigure,
+        test_command=test_command, reconfigure=reconfigure,
     )
 
     _step(3, total, "Error sources", optional=True)

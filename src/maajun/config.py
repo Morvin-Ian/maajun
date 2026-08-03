@@ -29,9 +29,11 @@ provider = "deepseek"
 # reports under daemon.workdir instead of opening pull requests.
 repo = ""
 base_branch = "main"
-# "suggest": PRs contain only the incident report and suggested fix.
-# "fix": the agent may also change code inside its isolated workspace.
+# "suggest": a GitHub issue with the incident report and suggested fix.
+# "fix": the agent also edits code in its isolated clone and opens a PR.
 mode = "suggest"
+# Run after a fix-mode edit to verify it; the result goes in the PR body.
+# test_command = "pytest -q"
 
 [monitor]
 # Log files to watch for tracebacks and error lines.
@@ -103,6 +105,9 @@ class RepoConfig(_Base):
     # Log files watched for this repo, in addition to the global
     # monitor.log_files (which attach to the first configured repo).
     log_files: list[str] = Field(default_factory=list)
+    # Shell command run in the workspace after a fix-mode edit, to verify it.
+    # Its result goes in the PR body. Empty means no verification.
+    test_command: str = ""
 
     @field_validator("mode")
     @classmethod
@@ -124,6 +129,7 @@ class GitHubConfig(_Base):
     repo: str = ""  # Legacy: single repo "owner/name"
     base_branch: str = "main"
     mode: str = "suggest"
+    test_command: str = ""
     # Multiple repos with per-repo log file mapping (supersedes the scalars above).
     repos: list[RepoConfig] = Field(default_factory=list)
 
@@ -150,6 +156,7 @@ class GitHubConfig(_Base):
                 repo=self.repo,
                 base_branch=self.base_branch,
                 mode=self.mode,
+                test_command=self.test_command,
             )]
         return []
 
@@ -265,6 +272,8 @@ class Config(_Base):
                 repo_table["mode"] = repo_config.mode
                 if repo_config.log_files:
                     repo_table["log_files"] = repo_config.log_files
+                if repo_config.test_command:
+                    repo_table["test_command"] = repo_config.test_command
                 repos_table.append(repo_table)
             github["repos"] = repos_table
         else:
@@ -275,6 +284,7 @@ class Config(_Base):
             github["repo"] = self.github.repo
             github["base_branch"] = self.github.base_branch
             github["mode"] = self.github.mode
+            _set_or_del(github, "test_command", self.github.test_command or None)
 
         monitor = _table(doc, "monitor")
         monitor["log_files"] = self.monitor.log_files
@@ -315,6 +325,7 @@ class Config(_Base):
                 repo=self.github.repo,
                 base_branch=self.github.base_branch,
                 mode=self.github.mode,
+                test_command=self.github.test_command,
             )]
             self.github.repo = ""
         existing = [rc for rc in self.github.repos if rc.repo != repo.repo]

@@ -34,6 +34,7 @@ instruction.
 | `--repo OWNER/NAME` | Repository to open PRs on |
 | `-b, --base-branch NAME` | Branch to open PRs against |
 | `-m, --mode MODE` | `suggest` or `fix` |
+| `--test-command CMD` | Command that verifies a fix-mode edit, e.g. `pytest -q` |
 | `-l, --logs PATHS` | Comma-separated log files to watch |
 | `--github-actions` | Watch the configured repos for failed workflow runs |
 | `--non-interactive` | Never prompt; use flags and the environment |

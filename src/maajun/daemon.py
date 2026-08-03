@@ -21,8 +21,8 @@ from maajun.config import AIProviderConfig, Config, RepoConfig
 from maajun.costs import extract_usage
 from maajun.monitors import ErrorEvent, GitHubActionsMonitor, LogFileMonitor, Monitor
 from maajun.state import IncidentStore
-from maajun.utils import utc_day_start_iso
-from maajun.vcs import GitHubClient, GitWorkspace
+from maajun.utils import truncate, utc_day_start_iso
+from maajun.vcs import CommandResult, GitHubClient, GitWorkspace
 
 log = logging.getLogger(__name__)
 
@@ -457,6 +457,7 @@ class Daemon:
             )
 
         if opens_pull_request:
+            verification = await self._verify(repo_config, workspace, progress)
             progress("Opening PR")
             self._write_report(workspace, event, report)
             await workspace.commit_all(commit_message)
@@ -466,7 +467,7 @@ class Daemon:
                 head=branch,
                 base=repo_config.base_branch,
                 title=title,
-                body=self._pr_body(repo_config, event, report),
+                body=self._pr_body(repo_config, event, report, verification),
             )
             recorded_branch = branch
         else:
@@ -569,11 +570,64 @@ class Daemon:
             f"- Fingerprint: `{event.fingerprint}`\n"
         )
 
-    def _pr_body(self, repo_config: RepoConfig, event: ErrorEvent, report: str) -> str:
+    async def _verify(
+        self, repo_config: RepoConfig, workspace: GitWorkspace, progress: ProgressCallback
+    ) -> CommandResult | None:
+        """Run the repo's test_command against the agent's edits.
+
+        Not an agent capability: the command comes from config, so the model
+        cannot choose what runs. A failure is reported in the PR, not raised —
+        "the fix breaks the suite" is exactly the thing a reviewer needs to
+        see, and suppressing the PR would hide the analysis too.
+        """
+        if not repo_config.test_command:
+            return None
+        progress("Running tests")
+        result = await workspace.run_command(repo_config.test_command)
+        log.info(
+            "test_command %r exited %s in repo=%s",
+            repo_config.test_command, result.exit_code, repo_config.repo,
+        )
+        return result
+
+    def _pr_body(
+        self,
+        repo_config: RepoConfig,
+        event: ErrorEvent,
+        report: str,
+        verification: CommandResult | None = None,
+    ) -> str:
         return (
             f"{report}\n\n---\n"
             "This PR contains the applied fix and the incident report.\n\n"
+            f"{self._verification_section(repo_config, verification)}"
             f"{self._provenance(event)}"
+        )
+
+    @staticmethod
+    def _verification_section(
+        repo_config: RepoConfig, verification: CommandResult | None
+    ) -> str:
+        """A verdict on the fix, so the diff isn't reviewed on trust alone."""
+        if verification is None:
+            return (
+                "> ⚠️ **Unverified** — no `test_command` is configured for this "
+                "repo, so the fix was not tested.\n\n"
+            )
+        if verification.passed:
+            headline = f"✅ **Tests pass** — `{repo_config.test_command}`"
+        elif verification.exit_code is None:
+            headline = f"⚠️ **Could not run** `{repo_config.test_command}`"
+        else:
+            headline = (
+                f"❌ **Tests fail** (exit {verification.exit_code}) — "
+                f"`{repo_config.test_command}`"
+            )
+        output = truncate(verification.output, 3000, "\n… (truncated)")
+        return (
+            f"{headline}\n\n"
+            f"<details><summary>Output</summary>\n\n"
+            f"```\n{output or '(no output)'}\n```\n\n</details>\n\n"
         )
 
     def _issue_body(self, event: ErrorEvent, report: str) -> str:
