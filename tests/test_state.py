@@ -131,3 +131,92 @@ def test_cost_since_only_counts_recent_incidents(tmp_path):
 
     assert store.cost_since(utc_day_start_iso()) == 0.25
     assert store.total_cost() == 5.25
+
+
+# ---------------------------------------------------------------------------
+# Failed-incident retry
+# ---------------------------------------------------------------------------
+
+
+def _event(fingerprint="fp1"):
+    return ErrorEvent(
+        source="t", message="boom", details="boom", fingerprint=fingerprint,
+    )
+
+
+def test_failed_incident_is_retried(tmp_path):
+    """Regression: a transient GitHub 502 permanently blacklisted the error."""
+    store = IncidentStore(tmp_path / "i.db")
+    assert store.record(_event()) is True
+    store.mark_failed("fp1")
+
+    assert store.record(_event()) is True  # retried, not skipped
+
+
+def test_retries_stop_after_max_attempts(tmp_path):
+    from maajun.state import MAX_ATTEMPTS
+
+    store = IncidentStore(tmp_path / "i.db")
+    store.record(_event())
+    for _ in range(MAX_ATTEMPTS):
+        store.mark_failed("fp1")
+        store.record(_event())
+
+    assert store.record(_event()) is False
+    assert store.get("fp1")["attempts"] == MAX_ATTEMPTS
+
+
+def test_processed_incident_is_never_retried(tmp_path):
+    store = IncidentStore(tmp_path / "i.db")
+    store.record(_event())
+    store.mark_processed("fp1", branch="", pr_url="u")
+
+    assert store.record(_event()) is False
+
+
+def test_repeat_sighting_still_bumps_the_counter(tmp_path):
+    store = IncidentStore(tmp_path / "i.db")
+    store.record(_event())
+    store.mark_processed("fp1", branch="", pr_url="u")
+    store.record(_event())
+    store.record(_event())
+
+    assert store.get("fp1")["count"] == 3
+
+
+def test_exhausted_lists_permanently_failed_incidents(tmp_path):
+    from maajun.state import MAX_ATTEMPTS
+
+    store = IncidentStore(tmp_path / "i.db")
+    store.record(_event("gone"))
+    for _ in range(MAX_ATTEMPTS):
+        store.mark_failed("gone")
+    store.record(_event("fine"))
+    store.mark_processed("fine", branch="", pr_url="u")
+
+    assert [row["fingerprint"] for row in store.exhausted()] == ["gone"]
+
+
+def test_database_from_an_older_version_is_migrated(tmp_path):
+    """CREATE TABLE IF NOT EXISTS won't add a new column to an existing table."""
+    import sqlite3
+
+    path = tmp_path / "old.db"
+    conn = sqlite3.connect(path)
+    conn.execute(
+        "CREATE TABLE incidents (fingerprint TEXT PRIMARY KEY, source TEXT NOT NULL,"
+        " message TEXT NOT NULL, first_seen TEXT NOT NULL, last_seen TEXT NOT NULL,"
+        " count INTEGER NOT NULL DEFAULT 1, status TEXT NOT NULL DEFAULT 'new',"
+        " branch TEXT, pr_url TEXT, cost_usd REAL DEFAULT 0,"
+        " prompt_tokens INTEGER DEFAULT 0, completion_tokens INTEGER DEFAULT 0)"
+    )
+    conn.execute(
+        "INSERT INTO incidents VALUES"
+        " ('old1','s','m','t','t',1,'failed','','',0.5,0,0)"
+    )
+    conn.commit()
+    conn.close()
+
+    store = IncidentStore(path)
+    assert store.get("old1")["attempts"] == 0
+    assert store.record(_event("old1")) is True  # eligible for retry

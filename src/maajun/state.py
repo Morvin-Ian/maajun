@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import logging
 import sqlite3
 from pathlib import Path
 
 from maajun.monitors.base import ErrorEvent
 from maajun.utils import utcnow_iso
+
+log = logging.getLogger(__name__)
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS incidents (
@@ -19,11 +22,19 @@ CREATE TABLE IF NOT EXISTS incidents (
     pr_url      TEXT,
     cost_usd    REAL DEFAULT 0,
     prompt_tokens INTEGER DEFAULT 0,
-    completion_tokens INTEGER DEFAULT 0
+    completion_tokens INTEGER DEFAULT 0,
+    attempts    INTEGER NOT NULL DEFAULT 0
 )
 """
 
-# Incident lifecycle: new -> processed | failed
+# Incident lifecycle: new -> processed, or new -> failed -> new (retried) ->
+# ... -> failed permanently once MAX_ATTEMPTS is reached.
+
+# How many times a failed incident is retried before it is left alone. Incident
+# failures are usually transient (a GitHub 502, a rate limit, a dropped
+# connection); a handful of retries clears those without looping forever on an
+# error that genuinely cannot be processed.
+MAX_ATTEMPTS = 3
 
 
 class IncidentStore:
@@ -37,25 +48,60 @@ class IncidentStore:
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute("PRAGMA synchronous=NORMAL")
         self._conn.execute(SCHEMA)
+        self._migrate()
         self._conn.commit()
 
+    def _migrate(self) -> None:
+        """Add columns missing from a database created by an older version.
+
+        CREATE TABLE IF NOT EXISTS leaves an existing table alone, so a new
+        column has to be added explicitly or every query naming it fails on
+        an upgraded install.
+        """
+        present = {
+            row["name"]
+            for row in self._conn.execute("PRAGMA table_info(incidents)").fetchall()
+        }
+        for column, ddl in (("attempts", "INTEGER NOT NULL DEFAULT 0"),):
+            if column not in present:
+                self._conn.execute(f"ALTER TABLE incidents ADD COLUMN {column} {ddl}")
+
     def record(self, event: ErrorEvent) -> bool:
-        """Record a sighting. Returns True if this error is new."""
+        """Record a sighting. Returns True if this error should be handled.
+
+        True for a genuinely new error, and again for one whose last attempt
+        failed and still has retries left — otherwise a single transient
+        GitHub 502 would blacklist that error permanently.
+        """
         now = utcnow_iso()
-        cur = self._conn.execute(
+        existing = self._conn.execute(
+            "SELECT status, attempts FROM incidents WHERE fingerprint = ?",
+            (event.fingerprint,),
+        ).fetchone()
+
+        if existing is None:
+            self._conn.execute(
+                "INSERT INTO incidents (fingerprint, source, message, first_seen, last_seen)"
+                " VALUES (?, ?, ?, ?, ?)",
+                (event.fingerprint, event.source, event.message, now, now),
+            )
+            self._conn.commit()
+            return True
+
+        self._conn.execute(
             "UPDATE incidents SET last_seen = ?, count = count + 1 WHERE fingerprint = ?",
             (now, event.fingerprint),
         )
-        if cur.rowcount:
-            self._conn.commit()
-            return False
-        self._conn.execute(
-            "INSERT INTO incidents (fingerprint, source, message, first_seen, last_seen)"
-            " VALUES (?, ?, ?, ?, ?)",
-            (event.fingerprint, event.source, event.message, now, now),
-        )
         self._conn.commit()
-        return True
+        retryable = (
+            existing["status"] == "failed" and existing["attempts"] < MAX_ATTEMPTS
+        )
+        if retryable:
+            log.info(
+                "retrying failed incident fp=%s (attempt %d of %d)",
+                event.fingerprint, existing["attempts"] + 1, MAX_ATTEMPTS,
+            )
+        return retryable
 
     def mark_processed(
         self,
@@ -109,10 +155,22 @@ class IncidentStore:
         self._conn.commit()
 
     def mark_failed(self, fp: str) -> None:
+        """Mark an attempt as failed and count it toward the retry limit."""
         self._conn.execute(
-            "UPDATE incidents SET status = 'failed' WHERE fingerprint = ?", (fp,)
+            "UPDATE incidents SET status = 'failed', attempts = attempts + 1"
+            " WHERE fingerprint = ?",
+            (fp,),
         )
         self._conn.commit()
+
+    def exhausted(self) -> list[dict]:
+        """Incidents that failed MAX_ATTEMPTS times and are no longer retried."""
+        rows = self._conn.execute(
+            "SELECT * FROM incidents WHERE status = 'failed' AND attempts >= ?"
+            " ORDER BY last_seen DESC",
+            (MAX_ATTEMPTS,),
+        ).fetchall()
+        return [dict(row) for row in rows]
 
     def get(self, fp: str) -> dict | None:
         row = self._conn.execute(
