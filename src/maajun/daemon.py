@@ -1,8 +1,8 @@
 """Daemon — polls monitors, analyzes new errors, opens PRs.
 
-Flow per new error: dedup by fingerprint -> sync workspace -> branch ->
-agent analyzes (and fixes, if mode allows) -> incident report committed ->
-push -> pull request -> incident recorded.
+Flow per new error: dedup by fingerprint -> sync workspace -> agent
+analyzes -> in suggest mode a GitHub issue is filed with the report; in fix
+mode the fix is committed to a branch and opened as a pull request.
 
 Supports multiple repositories with per-repo log file mapping.
 """
@@ -182,6 +182,15 @@ class Daemon:
         if self.on_notice:
             self.on_notice(message, level)
 
+    def _artifact_label(self, monitor: Monitor) -> str:
+        """What this monitor's incidents produce, for user-facing lines."""
+        if self.local_mode:
+            return "Report written"
+        repo_config = self.monitor_to_repo.get(monitor.name)
+        if repo_config and repo_config.mode == "fix":
+            return "PR opened"
+        return "Issue opened"
+
     def _get_repo_for_monitor(self, monitor_name: str) -> tuple[RepoConfig, GitWorkspace]:
         """Get the repo config and workspace for a given monitor."""
         repo_config = self.monitor_to_repo.get(monitor_name)
@@ -284,8 +293,9 @@ class Daemon:
                 )
                 handled.append(event.fingerprint)
                 if destination:
-                    label = "Report written" if self.local_mode else "PR opened"
-                    self._notice(f"{label}: {destination}", "success")
+                    self._notice(
+                        f"{self._artifact_label(monitor)}: {destination}", "success"
+                    )
             except Exception as exc:
                 log.exception("incident fp=%s failed", event.fingerprint)
                 self._notice(f"Incident failed: {exc}", "error")
@@ -299,9 +309,9 @@ class Daemon:
         dry_run: bool = False,
         progress: ProgressCallback = _noop,
     ) -> str:
-        """Analyze one error and open a PR for it. Returns the PR URL.
+        """Analyze one error and publish it. Returns the issue or PR URL.
 
-        When dry_run=True, skips git/PR operations and prints the analysis.
+        When dry_run=True, skips git/GitHub operations and prints the analysis.
         """
         repo_config, workspace = self._get_repo_for_monitor(event.source)
         prompt = ANALYZE_PROMPT.format(
@@ -335,7 +345,7 @@ class Daemon:
         dry_run: bool = False,
         progress: ProgressCallback = _noop,
     ) -> str:
-        """Analyze a manually described issue and open a PR. Returns the PR URL."""
+        """Analyze a manually described issue. Returns the issue or PR URL."""
         workspace = self.workspaces[repo_config.repo]
         event = ErrorEvent(source="manual", message=description[:200], details=description)
         prompt = MANUAL_REPORT_PROMPT.format(
@@ -372,12 +382,16 @@ class Daemon:
         progress: ProgressCallback,
     ) -> str:
         """Shared pipeline for incident and manual reports: prepare workspace,
-        run the agent, then either print (dry run), write a local report, or
-        commit/push/open a PR."""
+        run the agent, then print (dry run), write a local report, file an
+        issue (suggest mode), or commit/push/open a PR (fix mode)."""
+        opens_pull_request = repo_config.mode == "fix"
         if not dry_run and not self.local_mode:
             progress("Preparing workspace")
+            # The clone is needed either way — the agent reads the code from
+            # it — but only fix mode has a diff to put on a branch.
             await workspace.sync(repo_config.base_branch)
-            await workspace.create_branch(branch, repo_config.base_branch)
+            if opens_pull_request:
+                await workspace.create_branch(branch, repo_config.base_branch)
 
         if repo_config.mode == "fix":
             prompt += FIX_PROMPT_SUFFIX.format(workspace=workspace.path)
@@ -409,31 +423,45 @@ class Daemon:
                 event, report, (prompt_tokens, completion_tokens, cost), progress
             )
 
-        progress("Opening PR")
-        self._write_report(workspace, event, report)
-        await workspace.commit_all(commit_message)
-        await workspace.push(branch)
+        if opens_pull_request:
+            progress("Opening PR")
+            self._write_report(workspace, event, report)
+            await workspace.commit_all(commit_message)
+            await workspace.push(branch)
+            url = await self.github.create_pull_request(
+                repo_config.repo,
+                head=branch,
+                base=repo_config.base_branch,
+                title=title,
+                body=self._pr_body(repo_config, event, report),
+            )
+            recorded_branch = branch
+        else:
+            # Suggest mode changes no code, so a PR would be an empty diff that
+            # still demands review and triggers CI. An issue is the artifact.
+            progress("Filing issue")
+            url = await self.github.create_issue(
+                repo_config.repo,
+                title=title,
+                body=self._issue_body(event, report),
+            )
+            recorded_branch = ""
 
-        pr_url = await self.github.create_pull_request(
-            repo_config.repo,
-            head=branch,
-            base=repo_config.base_branch,
-            title=title,
-            body=self._pr_body(repo_config, event, report),
-        )
         self.store.mark_processed(
             event.fingerprint,
-            branch=branch,
-            pr_url=pr_url,
+            branch=recorded_branch,
+            pr_url=url,
             cost_usd=cost,
             prompt_tokens=prompt_tokens,
             completion_tokens=completion_tokens,
         )
         log.info(
-            "opened PR %s for fp=%s in repo=%s (cost: $%.4f, tokens: %d/%d)",
-            pr_url, event.fingerprint, repo_config.repo, cost, prompt_tokens, completion_tokens,
+            "opened %s %s for fp=%s in repo=%s (cost: $%.4f, tokens: %d/%d)",
+            "PR" if opens_pull_request else "issue",
+            url, event.fingerprint, repo_config.repo, cost,
+            prompt_tokens, completion_tokens,
         )
-        return pr_url
+        return url
 
     def _save_local_report(
         self,
@@ -509,16 +537,24 @@ class Daemon:
         )
 
     def _pr_body(self, repo_config: RepoConfig, event: ErrorEvent, report: str) -> str:
-        mode_note = (
-            "This PR contains the applied fix and the incident report."
-            if repo_config.mode == "fix"
-            else "This PR contains the incident report only (suggest mode) — "
-            "no code was changed."
-        )
         return (
             f"{report}\n\n---\n"
-            f"{mode_note}\n\n"
+            "This PR contains the applied fix and the incident report.\n\n"
+            f"{self._provenance(event)}"
+        )
+
+    def _issue_body(self, event: ErrorEvent, report: str) -> str:
+        return (
+            f"{report}\n\n---\n\n"
+            f"## Error details\n\n```\n{event.details[:4000]}\n```\n\n"
+            f"{self._provenance(event)}"
+        )
+
+    @staticmethod
+    def _provenance(event: ErrorEvent) -> str:
+        return (
             f"- Source: `{event.source}`\n"
+            f"- First seen: {event.timestamp}\n"
             f"- Fingerprint: `{event.fingerprint}`\n"
             f"- Opened automatically by [maajun](https://github.com/Morvin-Ian/maajun)."
         )
