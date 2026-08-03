@@ -5,8 +5,9 @@ from __future__ import annotations
 import hashlib
 import logging
 import re
+import time
 from abc import ABC, abstractmethod
-from collections import OrderedDict
+from collections import OrderedDict, deque
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -45,6 +46,18 @@ class ErrorEvent:
 class Monitor(ABC):
     """An error source the daemon polls."""
 
+    def __init__(self, *, burst_threshold: int = 1, burst_window_seconds: float = 60.0):
+        """
+        burst_threshold: emit nothing until this many events land inside
+            burst_window_seconds. 1 (the default) emits every event
+            immediately. Use it to ignore one-off blips and only report
+            an error that is actually repeating.
+        burst_window_seconds: how long a held event stays eligible.
+        """
+        self._burst_threshold = max(1, burst_threshold)
+        self._burst_window_seconds = burst_window_seconds
+        self._burst_buffer: deque[tuple[float, ErrorEvent]] = deque()
+
     @abstractmethod
     async def poll(self) -> list[ErrorEvent]:
         """Return error events observed since the last poll."""
@@ -53,9 +66,42 @@ class Monitor(ABC):
         """Flush any carried-over state and return remaining events.
 
         Called before the daemon exits in --once mode to ensure no
-        pending errors are lost.
+        pending errors are lost — including a burst that never reached
+        its threshold.
         """
-        return []
+        return self._drain_burst_buffer()
+
+    def _apply_burst_threshold(self, events: list[ErrorEvent]) -> list[ErrorEvent]:
+        """Return the events to emit now, holding back an incomplete burst.
+
+        With thresholding off this is the identity. Otherwise events are
+        buffered until `burst_threshold` of them are in the window, at which
+        point the *whole* buffered burst is emitted — not just the batch that
+        happened to cross the line.
+        """
+        if self._burst_threshold <= 1:
+            return events
+        self._hold_for_burst(events)
+        if len(self._burst_buffer) < self._burst_threshold:
+            return []
+        return self._drain_burst_buffer()
+
+    def _hold_for_burst(self, events: list[ErrorEvent]) -> None:
+        """Buffer events and drop any that have aged out of the window.
+
+        Timed on the monotonic clock: an NTP step should not retroactively
+        expire a window on a long-running daemon.
+        """
+        now = time.monotonic()
+        self._burst_buffer.extend((now, event) for event in events)
+        cutoff = now - self._burst_window_seconds
+        while self._burst_buffer and self._burst_buffer[0][0] < cutoff:
+            self._burst_buffer.popleft()
+
+    def _drain_burst_buffer(self) -> list[ErrorEvent]:
+        events = [event for _, event in self._burst_buffer]
+        self._burst_buffer.clear()
+        return events
 
     @property
     @abstractmethod
@@ -76,7 +122,17 @@ class HTTPPollMonitor(Monitor):
     fetch-failure logging and seen-id bookkeeping.
     """
 
-    def __init__(self, client: httpx.AsyncClient):
+    def __init__(
+        self,
+        client: httpx.AsyncClient,
+        *,
+        burst_threshold: int = 1,
+        burst_window_seconds: float = 60.0,
+    ):
+        super().__init__(
+            burst_threshold=burst_threshold,
+            burst_window_seconds=burst_window_seconds,
+        )
         self._client = client
         # OrderedDict as an insertion-ordered set, so the oldest ids can be
         # evicted once the window is full.
@@ -99,7 +155,8 @@ class HTTPPollMonitor(Monitor):
 
         while len(self._seen) > MAX_SEEN_IDS:
             self._seen.popitem(last=False)
-        return events
+
+        return self._apply_burst_threshold(events)
 
     async def aclose(self) -> None:
         await self._client.aclose()

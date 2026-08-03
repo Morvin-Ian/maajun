@@ -6,6 +6,11 @@ from typing import get_args, get_origin
 import tomlkit
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
+from maajun.monitors.logfile import (
+    DEFAULT_ERROR_PATTERN,
+    DEFAULT_JSON_LEVEL_VALUES,
+    DEFAULT_TRACEBACK_HEADERS,
+)
 from maajun.providers.base import ProviderType
 from maajun.utils import PLACEHOLDER_REPO, is_valid_repo
 
@@ -27,14 +32,21 @@ base_branch = "main"
 mode = "suggest"
 
 [monitor]
-# Log files to watch for tracebacks and error lines.
-log_files = ["/var/log/myapp/error.log"]
-error_pattern = "\\\\b(ERROR|CRITICAL|FATAL)\\\\b"
 poll_interval = 30
 
-# GitHub Actions — poll repos for failed workflow runs (optional).
-# github_actions_token = "github_pat_..."
-# github_actions_repos = ["you/another-repo"]
+# Monitors can be configured two ways:
+#
+# 1) Legacy shorthand (still supported):
+#    log_files = ["/var/log/myapp/error.log"]
+#    error_pattern = "\\\\b(ERROR|CRITICAL|FATAL)\\\\b"
+#    github_actions_token = "github_pat_..."
+#    github_actions_repos = ["you/another-repo"]
+#
+# 2) Declarative instances (recommended for multiple types):
+#    [[monitor.instances]]
+#    type = "logfile"
+#    path = "/var/log/myapp/error.log"
+#    error_pattern = "\\\\b(ERROR|CRITICAL|FATAL)\\\\b"
 
 [daemon]
 # Where clones, the incident database, and state live.
@@ -146,13 +158,69 @@ class GitHubConfig(_Base):
         return []
 
 
+class MonitorInstanceConfig(_Base):
+    """One declaratively configured monitor: `[[monitor.instances]]`.
+
+    `type` selects a registered monitor class and every other key is passed
+    to its constructor, so this model stays open (extra="allow") rather than
+    duplicating each monitor's signature.
+    """
+
+    type: str
+    repo: str = ""
+    model_config = ConfigDict(extra="allow")
+
+    def monitor_kwargs(self) -> dict:
+        """Constructor kwargs for the monitor: everything but type/repo."""
+        return dict(self.model_extra or {})
+
+
 class MonitorConfig(_Base):
     log_files: list[str] = Field(default_factory=list)
-    error_pattern: str = r"\b(ERROR|CRITICAL|FATAL)\b"
+    error_pattern: str = DEFAULT_ERROR_PATTERN
     poll_interval: float = 30.0
+
+    # Log-line detection. Applied to every logfile monitor built from the
+    # log_files shorthand; per-instance overrides go in [[monitor.instances]].
+    json_level_field: str = ""
+    json_level_values: str = ",".join(sorted(DEFAULT_JSON_LEVEL_VALUES))
+    traceback_headers: list[str] = Field(
+        default_factory=lambda: list(DEFAULT_TRACEBACK_HEADERS)
+    )
+    # Emit nothing until burst_threshold events land within the window.
+    burst_threshold: int = 1
+    burst_window_seconds: float = 60.0
+    # Requires the optional watchdog extra: pip install 'maajun[watchdog]'
+    use_watchdog: bool = False
 
     github_actions_token: str = ""
     github_actions_repos: list[str] = Field(default_factory=list)
+
+    instances: list[MonitorInstanceConfig] = Field(default_factory=list)
+
+    @property
+    def json_level_value_set(self) -> frozenset[str]:
+        """json_level_values parsed into the set the monitors expect.
+
+        Stored as a comma-separated string so `maajun config` can set it.
+        """
+        return frozenset(
+            value.strip().lower()
+            for value in self.json_level_values.split(_LIST_SEP)
+            if value.strip()
+        )
+
+    def logfile_kwargs(self) -> dict:
+        """Detection settings shared by every shorthand logfile monitor."""
+        return dict(
+            error_pattern=self.error_pattern,
+            json_level_field=self.json_level_field,
+            json_level_values=self.json_level_value_set,
+            traceback_headers=tuple(self.traceback_headers),
+            burst_threshold=self.burst_threshold,
+            burst_window_seconds=self.burst_window_seconds,
+            use_watchdog=self.use_watchdog,
+        )
 
 
 class EmailConfig(_Base):
@@ -210,55 +278,79 @@ class Config(_Base):
             doc = tomlkit.document()
             doc.add(tomlkit.comment("Maajun daemon configuration."))
 
-        ai = _tbl(doc, "ai")
+        ai = _table(doc, "ai")
         ai["provider"] = self.ai.provider
         _set_or_del(ai, "model", self.ai.model)
         ai["temperature"] = self.ai.temperature
         ai["max_tokens"] = self.ai.max_tokens
         ai["thinking_mode"] = self.ai.thinking_mode
 
-        github = _tbl(doc, "github")
+        github = _table(doc, "github")
         if self.github.repos:
             # Multi-repo mode: replace any legacy scalar keys with an
             # array-of-tables so the two representations never coexist.
             for legacy in ("repo", "base_branch", "mode"):
                 github.pop(legacy, None)
-            aot = tomlkit.aot()
-            for rc in self.github.repos:
-                t = tomlkit.table()
-                t["repo"] = rc.repo
-                t["base_branch"] = rc.base_branch
-                t["mode"] = rc.mode
-                if rc.log_files:
-                    t["log_files"] = rc.log_files
-                aot.append(t)
-            github["repos"] = aot
+            repos_table = tomlkit.aot()
+            for repo_config in self.github.repos:
+                repo_table = tomlkit.table()
+                repo_table["repo"] = repo_config.repo
+                repo_table["base_branch"] = repo_config.base_branch
+                repo_table["mode"] = repo_config.mode
+                if repo_config.log_files:
+                    repo_table["log_files"] = repo_config.log_files
+                repos_table.append(repo_table)
+            github["repos"] = repos_table
         else:
             github.pop("repos", None)
             github["repo"] = self.github.repo or PLACEHOLDER_REPO
             github["base_branch"] = self.github.base_branch
             github["mode"] = self.github.mode
 
-        monitor = _tbl(doc, "monitor")
+        monitor = _table(doc, "monitor")
         monitor["log_files"] = self.monitor.log_files
         monitor["error_pattern"] = self.monitor.error_pattern
         monitor["poll_interval"] = self.monitor.poll_interval
+        # Detection tuning is written only when it differs from the default, so
+        # a simple config stays short — but a value the user set is never lost.
+        for name in (
+            "json_level_field",
+            "json_level_values",
+            "traceback_headers",
+            "burst_threshold",
+            "burst_window_seconds",
+            "use_watchdog",
+        ):
+            _set_if_customized(monitor, self.monitor, name)
         _set_or_del(monitor, "github_actions_token", self.monitor.github_actions_token or None)
         if self.monitor.github_actions_repos:
             monitor["github_actions_repos"] = self.monitor.github_actions_repos
         else:
             monitor.pop("github_actions_repos", None)
+        if self.monitor.instances:
+            instances = tomlkit.aot()
+            for instance in self.monitor.instances:
+                instance_table = tomlkit.table()
+                instance_table["type"] = instance.type
+                if instance.repo:
+                    instance_table["repo"] = instance.repo
+                for key, value in instance.monitor_kwargs().items():
+                    instance_table[key] = value
+                instances.append(instance_table)
+            monitor["instances"] = instances
+        else:
+            monitor.pop("instances", None)
 
-        daemon = _tbl(doc, "daemon")
+        daemon = _table(doc, "daemon")
         daemon["workdir"] = self.daemon.workdir
         email = self.daemon.email
         if email.smtp_host:
-            et = _tbl(daemon, "email")
-            et["smtp_host"] = email.smtp_host
-            et["smtp_port"] = email.smtp_port
-            et["username"] = email.username
-            et["from_addr"] = email.from_addr
-            et["to_addrs"] = email.to_addrs
+            email_table = _table(daemon, "email")
+            email_table["smtp_host"] = email.smtp_host
+            email_table["smtp_port"] = email.smtp_port
+            email_table["username"] = email.username
+            email_table["from_addr"] = email.from_addr
+            email_table["to_addrs"] = email.to_addrs
 
         path.write_text(tomlkit.dumps(doc))
         self._path = path
@@ -341,7 +433,7 @@ class Config(_Base):
         return "" if val is None else str(val)
 
 
-def _tbl(parent, name: str):
+def _table(parent, name: str):
     """Get an existing tomlkit table or create and attach a new one."""
     node = parent.get(name)
     if node is None:
@@ -356,6 +448,20 @@ def _set_or_del(table, name: str, value) -> None:
         table[name] = value
     else:
         table.pop(name, None)
+
+
+def _set_if_customized(table, model: BaseModel, name: str) -> None:
+    """Write a field only when it differs from its default.
+
+    Keeps generated configs free of a dozen tuning keys nobody touched, while
+    guaranteeing anything the user did set survives a save/load round trip.
+    """
+    value = getattr(model, name)
+    default = type(model).model_fields[name].get_default(call_default_factory=True)
+    if value == default:
+        table.pop(name, None)
+    else:
+        table[name] = value
 
 
 def _set_field(obj: BaseModel, field_name: str, value: str) -> None:

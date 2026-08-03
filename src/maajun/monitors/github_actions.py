@@ -7,11 +7,20 @@ from typing import Any
 import httpx
 
 from maajun.monitors.base import ErrorEvent, HTTPPollMonitor
+from maajun.monitors.registry import MonitorRegistry
 from maajun.utils import github_headers
 
 
+@MonitorRegistry.register("github-actions")
 class GitHubActionsMonitor(HTTPPollMonitor):
-    def __init__(self, token: str, repo: str, *, poll_interval: float | None = None):
+    def __init__(
+        self,
+        token: str,
+        repo: str,
+        *,
+        burst_threshold: int = 1,
+        burst_window_seconds: float = 60.0,
+    ):
         """
         Args:
             token: GitHub personal access token with repo scope.
@@ -19,7 +28,9 @@ class GitHubActionsMonitor(HTTPPollMonitor):
         """
         self.repo = repo
         super().__init__(
-            httpx.AsyncClient(headers=github_headers(token), timeout=30)
+            httpx.AsyncClient(headers=github_headers(token), timeout=30),
+            burst_threshold=burst_threshold,
+            burst_window_seconds=burst_window_seconds,
         )
 
     @property

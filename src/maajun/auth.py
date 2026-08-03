@@ -1,4 +1,6 @@
 import os
+import shutil
+import subprocess
 
 import keyring
 import keyring.errors
@@ -8,6 +10,9 @@ from maajun.providers.base import ProviderType
 SERVICE_NAME = "maajun"
 GITHUB_KEY_NAME = "github_token"
 GITHUB_TOKEN_ENV = "GITHUB_TOKEN"
+
+# Distinguishes "not looked up yet" from a cached "gh has no token".
+_UNSET = object()
 
 
 def _keyring_get(name: str) -> str | None:
@@ -43,6 +48,7 @@ class AuthManager:
 
     def __init__(self):
         self._cache = {}
+        self._gh_cli_token: str | None | object = _UNSET
 
     @staticmethod
     def _provider_env_var(provider: str) -> str:
@@ -97,12 +103,54 @@ class AuthManager:
 
     # -- GitHub -------------------------------------------------------
 
+    def _token_from_gh_cli(self) -> str | None:
+        """Borrow the token from a logged-in `gh` CLI, if one is installed.
+
+        Cached for the process lifetime: get_github_token() is called from
+        status checks and daemon startup, and forking gh on every call (with a
+        10s timeout each) is far too expensive to repeat.
+        """
+        if self._gh_cli_token is not _UNSET:
+            return self._gh_cli_token
+
+        token: str | None = None
+        if shutil.which("gh"):
+            try:
+                result = subprocess.run(
+                    ["gh", "auth", "token"],
+                    capture_output=True, text=True, check=True, timeout=10,
+                )
+                token = result.stdout.strip() or None
+            except (subprocess.SubprocessError, OSError):
+                # Not logged in, gh broken, or hung past the timeout —
+                # SubprocessError covers CalledProcessError and TimeoutExpired.
+                token = None
+        self._gh_cli_token = token
+        return token
+
+    def github_token_source(self) -> str | None:
+        """Where a GitHub token would come from: "env", "keyring", "gh", None.
+
+        Setup and status use this to tell the user which credential is in play
+        rather than just that one exists.
+        """
+        if os.environ.get(GITHUB_TOKEN_ENV, "").strip():
+            return "env"
+        if _keyring_get(GITHUB_KEY_NAME):
+            return "keyring"
+        if self._token_from_gh_cli():
+            return "gh"
+        return None
+
     def get_github_token(self) -> str | None:
-        """GitHub token: GITHUB_TOKEN env var first, then keyring."""
+        """GitHub token: env var → keyring → gh CLI."""
         env_token = os.environ.get(GITHUB_TOKEN_ENV, "").strip()
         if env_token:
             return env_token
-        return _keyring_get(GITHUB_KEY_NAME)
+        token = _keyring_get(GITHUB_KEY_NAME)
+        if token:
+            return token
+        return self._token_from_gh_cli()
 
     def set_github_token(self, token: str) -> None:
         _keyring_set(GITHUB_KEY_NAME, token.strip())
@@ -112,6 +160,7 @@ class AuthManager:
 
     def clear_github_token(self) -> None:
         _keyring_delete(GITHUB_KEY_NAME)
+        self._gh_cli_token = _UNSET
 
     def clear_all(self) -> None:
         """Clear all stored credentials"""
@@ -119,3 +168,4 @@ class AuthManager:
             self.clear_provider_key(provider)
         self.clear_github_token()
         self._cache = {}
+        self._gh_cli_token = _UNSET
