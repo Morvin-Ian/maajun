@@ -21,6 +21,7 @@ from maajun.config import AIProviderConfig, Config, RepoConfig
 from maajun.costs import extract_usage
 from maajun.monitors import ErrorEvent, GitHubActionsMonitor, LogFileMonitor, Monitor
 from maajun.state import IncidentStore
+from maajun.utils import utc_day_start_iso
 from maajun.vcs import GitHubClient, GitWorkspace
 
 log = logging.getLogger(__name__)
@@ -177,10 +178,37 @@ class Daemon:
         self.local_mode = local_mode
         self.progress = progress or _noop
         self.on_notice = on_notice
+        # UTC day we have already warned about hitting the spend cap on.
+        self._budget_warned_for = ""
 
     def _notice(self, message: str, level: str = "info") -> None:
         if self.on_notice:
             self.on_notice(message, level)
+
+    def _over_budget(self) -> bool:
+        """Whether today's spend has reached daemon.max_usd_per_day.
+
+        Checked before each incident, not after: the point is to refuse the
+        next AI call, and one incident's cost is only known once it is paid.
+        Warns once per day rather than on every skipped event.
+        """
+        cap = self.config.daemon.max_usd_per_day
+        if cap <= 0:
+            return False
+        day_start = utc_day_start_iso()
+        spent = self.store.cost_since(day_start)
+        if spent < cap:
+            return False
+        if self._budget_warned_for != day_start:
+            self._budget_warned_for = day_start
+            message = (
+                f"Daily spend cap reached: ${spent:.4f} of ${cap:.2f}. "
+                "Pausing analysis until tomorrow (UTC). "
+                "Raise it with 'maajun config daemon.max_usd_per_day <amount>'."
+            )
+            log.warning(message)
+            self._notice(message, "warn")
+        return True
 
     def _artifact_label(self, monitor: Monitor) -> str:
         """What this monitor's incidents produce, for user-facing lines."""
@@ -284,6 +312,11 @@ class Daemon:
         for event in events:
             if not self.store.record(event):
                 log.debug("known error fp=%s", event.fingerprint)
+                continue
+            if not dry_run and self._over_budget():
+                # Forget it so tomorrow's poll treats the error as new rather
+                # than silently dropping it forever.
+                self.store.forget(event.fingerprint)
                 continue
             log.info("new error fp=%s: %s", event.fingerprint, event.message)
             self._notice(f"New error: {event.message[:80]}", "info")

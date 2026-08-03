@@ -6,7 +6,7 @@ so callers can keep importing straight from `maajun.utils`.
 
 from __future__ import annotations
 
-from maajun.utils.dates import utcnow_iso
+from maajun.utils.dates import utc_day_start_iso, utcnow_iso
 from maajun.utils.github import (
     GITHUB_API_VERSION,
     PLACEHOLDER_REPO,
@@ -21,5 +21,6 @@ __all__ = [
     "github_headers",
     "is_valid_repo",
     "truncate",
+    "utc_day_start_iso",
     "utcnow_iso",
 ]

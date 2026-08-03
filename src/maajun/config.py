@@ -54,6 +54,8 @@ poll_interval = 30
 # workdir = "~/.local/share/maajun"
 # Local checkout to analyze when github.repo is empty (default: cwd).
 # repo_path = "/srv/myapp"
+# Stop analyzing once this much has been spent in a UTC day (0 = no cap).
+# max_usd_per_day = 5.0
 """
 
 
@@ -198,6 +200,10 @@ class DaemonConfig(_Base):
     # Local checkout to analyze when no GitHub repo is configured.
     # Empty means the current working directory.
     repo_path: str = ""
+    # Stop analyzing once this much has been spent in a UTC day. 0 = no cap.
+    # An unattended daemon plus a log that starts emitting novel errors is
+    # otherwise an unbounded bill.
+    max_usd_per_day: float = 0.0
 
 
 class Config(_Base):
@@ -293,6 +299,7 @@ class Config(_Base):
         daemon = _table(doc, "daemon")
         daemon["workdir"] = self.daemon.workdir
         _set_or_del(daemon, "repo_path", self.daemon.repo_path or None)
+        _set_if_customized(daemon, self.daemon, "max_usd_per_day")
 
         path.write_text(tomlkit.dumps(doc))
         self._path = path
