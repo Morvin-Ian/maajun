@@ -1,12 +1,3 @@
-"""The poll loop and the incident-handling flow.
-
-Flow per new error: dedup by fingerprint -> sync workspace -> agent
-analyzes -> in suggest mode a GitHub issue is filed with the report; in fix
-mode the fix is committed to a branch and opened as a pull request.
-
-Supports multiple repositories with per-repo log file mapping.
-"""
-
 from __future__ import annotations
 
 import asyncio

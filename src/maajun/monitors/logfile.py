@@ -1,5 +1,3 @@
-"""Tail a log file and emit ErrorEvents for tracebacks and error lines."""
-
 from __future__ import annotations
 
 import json
@@ -15,11 +13,8 @@ from maajun.monitors.defaults import (
     TRACEBACK_LOOKAHEAD_LINES,
 )
 
-# Headers that *are* the exception, rather than introducing one on a later line.
 _SELF_DESCRIBING_HEADERS = ("panic:", "Exception in thread ")
 
-# Levels severe enough that a traceback may be logged a line or two behind them
-# (the logging.exception pattern), so it's worth looking ahead to merge them.
 _SEVERE_LEVEL_RE = re.compile(r"\b(ERROR|CRITICAL|FATAL)\b")
 
 # Cap on carried-over text for tracebacks split across polls.
@@ -71,7 +66,6 @@ class LogFileMonitor(Monitor):
         self._inode: int | None = None
         self._carryover_text = ""
 
-    # -- Monitor interface ----------------------------------------------
 
     @property
     def name(self) -> str:
@@ -101,7 +95,6 @@ class LogFileMonitor(Monitor):
 
         return self._apply_burst_threshold(events)
 
-    # -- file I/O -------------------------------------------------------
 
     def _read_new(self) -> str:
         if not self.path.exists():
@@ -122,7 +115,6 @@ class LogFileMonitor(Monitor):
             self._offset = f.tell()
         return text
 
-    # -- parsing --------------------------------------------------------
 
     def _matches_error_level(self, line: str) -> bool:
         """Whether a line reports an error, by JSON level or by regex."""
@@ -227,8 +219,6 @@ class LogFileMonitor(Monitor):
         i = start + 1
         while i < len(lines):
             line = lines[i]
-            # Indented frames, chained-exception headers, and the blank lines
-            # Go puts between goroutines all continue the trace.
             if line.startswith((" ", "\t")) or self._is_traceback_start(line) or not line.strip():
                 block.append(line)
                 i += 1

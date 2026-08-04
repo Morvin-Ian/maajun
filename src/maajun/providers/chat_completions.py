@@ -30,32 +30,16 @@ MAX_DELAY = 30.0
 
 NON_RETRYABLE = (AuthenticationError,)
 
-class ChatCompletionsProvider(AIProvider):
-    """Every behavior shared by providers that speak /chat/completions.
-
-    This is the protocol, not a vendor: DeepSeek, OpenAI, and most
-    self-hosted gateways expose the same API, so retries, streaming, tool
-    serialization, and response parsing all live here. A vendor module is
-    only an endpoint, a pair of model names, and any content quirks to
-    strip — see deepseek.py and openai.py.
-    """
-
-    #: Provider name, matching its ProviderType value.
+class ChatCompletionsProvider(AIProvider): 
     name: str = ""
-    #: API endpoint. None uses the OpenAI SDK's default.
     base_url: str | None = None
-    #: Model used when none is configured.
     default_model: str = ""
-    #: Model used when ai.thinking_mode is on.
     thinking_model: str = ""
 
     def __init__(self, config: dict[str, Any]):
         super().__init__(config)
         self.api_key = config.get("api_key")
         self.base_url = config.get("base_url") or self.base_url
-        # An explicit ai.model wins over thinking_mode: naming a model is a
-        # specific instruction, thinking_mode is only a shorthand for "use the
-        # reasoning model". The reverse silently ignored what the user asked for.
         configured_model = config.get("model")
         if configured_model:
             self.model = configured_model
@@ -64,8 +48,6 @@ class ChatCompletionsProvider(AIProvider):
         else:
             self.model = self.default_model
         self.client: AsyncOpenAI | None = None
-        # Cache the serialized tool schema, keyed by the tools list's identity,
-        # so it isn't rebuilt on every round of a multi-round tool loop.
         self._tool_cache: tuple[int, list[dict[str, Any]]] | None = None
 
     def _prepared_tools(self, tools: list[ToolDefinition] | None) -> list[dict[str, Any]] | None:

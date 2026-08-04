@@ -1,5 +1,3 @@
-"""GitHub Actions monitor — polls for failed workflow runs."""
-
 from __future__ import annotations
 
 from typing import Any
@@ -19,11 +17,6 @@ class GitHubActionsMonitor(HTTPPollMonitor):
         burst_threshold: int = 1,
         burst_window_seconds: float = 60.0,
     ):
-        """
-        Args:
-            token: GitHub personal access token with repo scope.
-            repo: "owner/name" format.
-        """
         self.repo = repo
         super().__init__(
             httpx.AsyncClient(headers=github_headers(token), timeout=30),

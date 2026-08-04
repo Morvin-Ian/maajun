@@ -1,10 +1,3 @@
-"""Shared Typer app, console, and interactive helpers for the CLI package.
-
-Every command module registers on the single `app` defined here, so the CLI
-stays flat (`maajun login`, `maajun watch`, …) even though the commands live
-in separate modules.
-"""
-
 from __future__ import annotations
 
 import getpass
@@ -27,7 +20,6 @@ def implemented_providers() -> list[str]:
 
 
 def configured_providers(auth: AuthManager) -> list[str]:
-    """Providers that are both implemented and have a stored key"""
     return [p for p in implemented_providers() if auth.has_api_key(p)]
 
 

@@ -1,5 +1,3 @@
-"""Monitor contract: every error source produces normalized ErrorEvents."""
-
 from __future__ import annotations
 
 import hashlib
@@ -20,10 +18,12 @@ log = logging.getLogger(__name__)
 _HEX_RE = re.compile(r"0x[0-9a-fA-F]+")
 _NUM_RE = re.compile(r"\d+")
 
+# Cap on remembered item ids. The APIs return only the most recent items
+# per poll, so a bounded window is enough to dedup — and it stops _seen from
+# growing without limit over a long-running daemon.
+MAX_SEEN_IDS = 5000
 
 def fingerprint(text: str) -> str:
-    """Stable hash of an error, insensitive to line numbers, addresses,
-    timestamps, and other volatile digits."""
     normalized = _HEX_RE.sub("", text)
     normalized = _NUM_RE.sub("", normalized)
     normalized = " ".join(normalized.split())
@@ -107,12 +107,6 @@ class Monitor(ABC):
     @abstractmethod
     def name(self) -> str:
         pass
-
-
-# Cap on remembered item ids. The APIs return only the most recent items
-# per poll, so a bounded window is enough to dedup — and it stops _seen from
-# growing without limit over a long-running daemon.
-MAX_SEEN_IDS = 5000
 
 
 class HTTPPollMonitor(Monitor):
