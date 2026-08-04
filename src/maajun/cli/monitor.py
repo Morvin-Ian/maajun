@@ -1,5 +1,3 @@
-"""Monitoring commands: watch, report, add-repo, and the status preflight."""
-
 from __future__ import annotations
 
 import asyncio
@@ -49,10 +47,7 @@ def watch(
         None, "--mode", "-m", help="Override mode: 'suggest' or 'fix'"
     ),
 ):
-    """Monitor configured error sources; document each new error in a PR"""
 
-    # A live spinner and interleaved log lines fight over the terminal, so the
-    # spinner UI is used only for an interactive, non-dry run; otherwise we log.
     use_spinner = not verbose and not dry_run and sys.stdin.isatty()
     logging.basicConfig(
         level=logging.DEBUG if verbose else (logging.WARNING if use_spinner else logging.INFO),

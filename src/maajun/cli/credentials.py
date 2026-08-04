@@ -1,5 +1,3 @@
-"""Credential commands: login, provider-list, key management, sign-out."""
-
 from __future__ import annotations
 
 import asyncio
@@ -18,7 +16,6 @@ from maajun.providers.factory import ProviderFactory
 
 
 def _validate_key(auth: AuthManager, provider: str) -> None:
-    """Check a freshly saved key against the provider API, if implemented"""
     if provider not in implemented_providers():
         console.print(f"[dim]{provider} support is coming soon; key stored for later.[/dim]")
         return
@@ -48,7 +45,6 @@ def _validate_key(auth: AuthManager, provider: str) -> None:
 
 @app.command()
 def provider_list():
-    """Show status of all providers"""
     auth = AuthManager()
     implemented = implemented_providers()
 
@@ -72,7 +68,6 @@ def provider_list():
 
 @app.command(name="sign-out")
 def sign_out():
-    """Clear all stored API keys"""
     auth = AuthManager()
     auth.clear_all()
     console.print("[green]✓ All API keys cleared.[/green]")

@@ -1,5 +1,3 @@
-"""DeepSeek — OpenAI-compatible, with DSML tool-call markup to strip."""
-
 import re
 
 from .base import ProviderType

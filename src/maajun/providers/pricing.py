@@ -1,33 +1,19 @@
-"""Token pricing, used to cost each analysis.
-
-Lives with the providers because that is what it prices — and it is not
-cosmetic: `daemon.max_usd_per_day` decides whether to analyse the next
-incident from these numbers, so a missing entry moves the cap.
-"""
-
 from __future__ import annotations
 
 import logging
 
 log = logging.getLogger(__name__)
 
-# USD per 1M tokens. Keys are matched as prefixes, so dated model names
-# (gpt-4o-2024-08-06) resolve to their family.
-#
-# VERIFY THESE against your provider's current price list before relying on
-# the spend cap — published rates change, and a stale number silently shifts
-# where the cap fires.
+
 PRICING: dict[str, dict[str, float]] = {
     # DeepSeek, as of July 2026
     "deepseek-v4-flash": {"input": 0.27, "output": 1.10},
     "deepseek-v4-pro": {"input": 1.10, "output": 4.40},
-    # OpenAI list prices; confirm at https://openai.com/api/pricing/
     "gpt-4o-mini": {"input": 0.15, "output": 0.60},
     "gpt-4o": {"input": 2.50, "output": 10.00},
 }
 
-# Used when a model has no entry. Deliberately not cheap: under-pricing an
-# unknown model would let the spend cap overshoot.
+
 DEFAULT_PRICING: dict[str, float] = {"input": 1.00, "output": 3.00}
 
 FALLBACK_MODEL = "deepseek-v4-flash"

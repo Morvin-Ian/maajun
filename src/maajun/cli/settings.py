@@ -1,7 +1,3 @@
-"""The welcome callback and settings housekeeping: `config` and `reset`.
-
-Named settings, not config, so it does not collide with `maajun.config` —
-that module holds the models, this one holds the commands that edit them."""
 
 from __future__ import annotations
 

@@ -1,9 +1,3 @@
-"""`maajun incidents` — what the daemon has done, and what it cost.
-
-Spend and failures were only inspectable by running sqlite3 against the
-incident database, which makes cost tracking and the spend cap half-features.
-"""
-
 from __future__ import annotations
 
 from pathlib import Path
@@ -21,11 +15,6 @@ _STATUS_STYLES = {"processed": "green", "failed": "red", "new": "yellow"}
 
 
 def _link(url: str | None) -> str:
-    """A short reference the table can fit, hyperlinked where supported.
-
-    A full GitHub URL is wider than the column, so it was silently truncated
-    to something you could neither read nor click.
-    """
     if not url:
         return "—"
     if url.startswith("http"):

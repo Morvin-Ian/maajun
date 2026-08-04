@@ -19,7 +19,6 @@ def _keyring_get(name: str) -> str | None:
     try:
         return keyring.get_password(SERVICE_NAME, name)
     except keyring.errors.KeyringError:
-        # Headless machines often have no keyring backend; fall back to env.
         return None
 
 
@@ -60,10 +59,6 @@ class AuthManager:
         if not key_name:
             return None
 
-        env_key = os.environ.get(self._provider_env_var(provider), "").strip()
-        if env_key:
-            return env_key
-
         if provider in self._cache:
             return self._cache[provider]
 
@@ -101,7 +96,6 @@ class AuthManager:
         _keyring_delete(key_name)
         self._cache.pop(provider, None)
 
-    # -- GitHub -------------------------------------------------------
 
     def _token_from_gh_cli(self) -> str | None:
         """Borrow the token from a logged-in `gh` CLI, if one is installed.
@@ -129,13 +123,6 @@ class AuthManager:
         return token
 
     def github_token_source(self) -> str | None:
-        """Where a GitHub token would come from: "env", "keyring", "gh", None.
-
-        Setup and status use this to tell the user which credential is in play
-        rather than just that one exists.
-        """
-        if os.environ.get(GITHUB_TOKEN_ENV, "").strip():
-            return "env"
         if _keyring_get(GITHUB_KEY_NAME):
             return "keyring"
         if self._token_from_gh_cli():
@@ -143,10 +130,6 @@ class AuthManager:
         return None
 
     def get_github_token(self) -> str | None:
-        """GitHub token: env var → keyring → gh CLI."""
-        env_token = os.environ.get(GITHUB_TOKEN_ENV, "").strip()
-        if env_token:
-            return env_token
         token = _keyring_get(GITHUB_KEY_NAME)
         if token:
             return token
@@ -163,7 +146,6 @@ class AuthManager:
         self._gh_cli_token = _UNSET
 
     def clear_all(self) -> None:
-        """Clear all stored credentials"""
         for provider in self.SUPPORTED_PROVIDERS:
             self.clear_provider_key(provider)
         self.clear_github_token()

@@ -1,12 +1,3 @@
-"""`maajun setup` — the one command that configures everything.
-
-Only the AI API key is required. A GitHub repo and token, log files, and
-GitHub Actions are each offered and each skippable, so a first run can be
-three keystrokes and still leave a working install.
-
-Re-running is safe: every question defaults to what is already configured, and
-nothing is asked twice unless --reconfigure is passed.
-"""
 
 from __future__ import annotations
 
@@ -35,8 +26,7 @@ from maajun.providers.factory import ProviderFactory
 from maajun.utils import is_valid_repo
 from maajun.vcs import GitHubClient, GitHubError
 
-# One entry per *implemented* provider. An entry for a provider with no module
-# advertises a choice the wizard cannot honor.
+
 PROVIDER_SIGNUP_URLS = {
     "deepseek": "https://platform.deepseek.com",
     "openai": "https://platform.openai.com/api-keys",
@@ -47,17 +37,7 @@ GITHUB_TOKEN_URL = "https://github.com/settings/personal-access-tokens"
 _GITHUB_REMOTE_RE = re.compile(r"github\.com[:/]([^/\s]+/[^/\s]+?)(?:\.git)?/?$")
 
 
-# ---------------------------------------------------------------------------
-# Autodetection
-# ---------------------------------------------------------------------------
-
-
 def detect_repo_from_git(directory: Path | None = None) -> str | None:
-    """"owner/name" from the origin remote of the checkout we're standing in.
-
-    Saves the most error-prone question in the wizard: users routinely paste a
-    full URL, or the wrong one of several repos, when the answer is right here.
-    """
     try:
         result = subprocess.run(
             ["git", "-C", str(directory or Path.cwd()), "remote", "get-url", "origin"],
@@ -68,18 +48,8 @@ def detect_repo_from_git(directory: Path | None = None) -> str | None:
     match = _GITHUB_REMOTE_RE.search(result.stdout.strip())
     return match.group(1) if match else None
 
-
-# ---------------------------------------------------------------------------
-# Prompt helpers
-# ---------------------------------------------------------------------------
-
-
 class _Asker:
-    """Prompts that fall back to defaults when running non-interactively.
-
-    Lets one code path serve both `maajun setup` and
-    `maajun setup --non-interactive` in CI, instead of two drifting copies.
-    """
+    """Prompts that fall back to defaults when running non-interactively."""
 
     def __init__(self, interactive: bool):
         self.interactive = interactive
@@ -110,14 +80,7 @@ def _step(number: int, total: int, title: str, optional: bool = False) -> None:
     console.print(f"\n[bold cyan]({number}/{total})[/bold cyan] [bold]{title}[/bold]{tag}")
 
 
-# ---------------------------------------------------------------------------
-# Step 1: the AI provider and its key (the only hard requirement)
-# ---------------------------------------------------------------------------
-
-
 def _validate_api_key(provider: str, key: str, base_url: str | None = None) -> bool:
-    # Honor a configured gateway: validating against the vendor's own endpoint
-    # would reject a key that is only valid at the proxy.
     instance = ProviderFactory.create_provider(
         ProviderType(provider), {"api_key": key, "base_url": base_url}
     )
@@ -139,7 +102,6 @@ def _setup_provider(
     reconfigure: bool,
     base_url: str | None = None,
 ) -> str:
-    """Choose a provider and make sure a key is stored. Exits if none is."""
     implemented = implemented_providers()
     configured = configured_providers(auth)
 
@@ -201,11 +163,6 @@ def _store_api_key(auth: AuthManager, provider: str, key: str) -> None:
         )
 
 
-# ---------------------------------------------------------------------------
-# Step 2: GitHub (optional)
-# ---------------------------------------------------------------------------
-
-
 def _setup_github(
     auth: AuthManager,
     config: Config,
@@ -217,7 +174,6 @@ def _setup_github(
     test_command: str | None,
     reconfigure: bool,
 ) -> None:
-    """Set the target repo and make sure a token is available. Never blocks."""
     existing = config.github.get_all_repos()
     current = existing[0].repo if existing else ""
     # Only ever a prefilled suggestion: silently adopting the surrounding
@@ -358,11 +314,6 @@ def _report_push_access(auth: AuthManager, repo: str) -> None:
         )
 
 
-# ---------------------------------------------------------------------------
-# Step 3: error sources (optional)
-# ---------------------------------------------------------------------------
-
-
 def _setup_error_sources(
     auth: AuthManager,
     config: Config,
@@ -409,12 +360,6 @@ def _setup_error_sources(
             )
 
 
-
-# ---------------------------------------------------------------------------
-# The command
-# ---------------------------------------------------------------------------
-
-
 @app.command()
 def setup(
     config_path: Path | None = typer.Option(
@@ -448,16 +393,6 @@ def setup(
         help="Ask again for credentials that are already stored",
     ),
 ):
-    """Set up everything in one command — keys, GitHub, and error sources.
-
-    Only the AI API key is required; every other step can be skipped with
-    Enter and configured later. Safe to re-run: answers default to your
-    current configuration.
-
-    Secrets are read from the environment in --non-interactive mode
-    (DEEPSEEK_API_KEY, GITHUB_TOKEN) rather than from flags, so they never
-    land in shell history.
-    """
     path = config_path or default_config_path()
     ask = _Asker(interactive=not non_interactive)
     auth = AuthManager()
@@ -494,7 +429,6 @@ def setup(
 
 
 def _print_summary(config: Config, auth: AuthManager) -> None:
-    """Show the status checks inline, so setup ends with a real verdict."""
     repos = config.github.get_all_repos()
     sections, ok = build_status(
         config,

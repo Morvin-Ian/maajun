@@ -1,9 +1,3 @@
-"""Preflight status checks for `maajun status`.
-
-Pure assembly of the check list (plus the one network probe) lives here so it
-can be unit-tested without a CliRunner; cli.py owns the console and rendering.
-"""
-
 from __future__ import annotations
 
 import os
@@ -87,11 +81,6 @@ def build_status(
     repos: list[RepoConfig],
     network: tuple[str | None, dict[str, bool]] | None,
 ) -> tuple[list[Section], bool]:
-    """Assemble the status sections and the overall pass/fail.
-
-    `network` is the gather_github result when a probe ran, or None when it was
-    skipped (no token, --no-network, or no repos configured).
-    """
     ai = Section("AI provider", [
         Check(f"API key for {provider}", has_key, "" if has_key else "run 'maajun setup'"),
     ])
