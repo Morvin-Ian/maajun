@@ -1,11 +1,3 @@
-"""Git workspace — an isolated clone the daemon works in.
-
-Token auth uses GIT_ASKPASS so the token never lands in the remote URL,
-.git/config, or the process list.
-
-Git commands shell out and can take seconds (clone, fetch, push), so each
-runs in a worker thread — the async callers never block the event loop.
-"""
 
 from __future__ import annotations
 
