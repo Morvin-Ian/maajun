@@ -18,15 +18,15 @@ from maajun.progress import WorkingStatus, working
 from maajun.utils import is_valid_repo, truncate
 from maajun.vcs import GitHubClient
 
-_NOTICE_STYLES = {"info": "cyan", "success": "green", "warn": "yellow", "error": "red"}
+NOTICE_STYLES = {"info": "cyan", "success": "green", "warn": "yellow", "error": "red"}
 
 
-def _watch_with_spinner(daemon, *, once: bool) -> None:
+def watch_with_spinner(daemon, *, once: bool) -> None:
     """Run the daemon under a live spinner, printing notices above it."""
     status = WorkingStatus("Watching for errors")
 
     def notice(message: str, level: str) -> None:
-        style = _NOTICE_STYLES.get(level, "dim")
+        style = NOTICE_STYLES.get(level, "dim")
         console.print(f"[{style}]{message}[/{style}]")
 
     daemon.progress = status.set
@@ -117,7 +117,7 @@ def watch(
 
     try:
         if use_spinner:
-            _watch_with_spinner(daemon, once=once)
+            watch_with_spinner(daemon, once=once)
         else:
             asyncio.run(daemon.run(once=once, dry_run=dry_run))
     except KeyboardInterrupt:
@@ -247,35 +247,55 @@ def report(
 @app.command(name="add-repo")
 def add_repo(
     repo: str = typer.Argument(help="Repository to watch, as owner/name"),
-    base_branch: str = typer.Option(
-        "main", "--base-branch", "-b", help="Branch to open PRs against"
+    base_branch: str | None = typer.Option(
+        None, "--base-branch", "-b",
+        help="Branch to open PRs against (new repos default to main)",
     ),
-    mode: str = typer.Option("suggest", "--mode", "-m", help="'suggest' or 'fix'"),
-    log_files: str = typer.Option(
-        "", "--log-files", "-l", help="Comma-separated log paths for this repo"
+    mode: str | None = typer.Option(
+        None, "--mode", "-m", help="'suggest' or 'fix' (new repos default to suggest)"
+    ),
+    log_files: str | None = typer.Option(
+        None, "--log-files", "-l", help="Comma-separated log paths for this repo"
     ),
     config_path: Path | None = typer.Option(None, "--config", "-c", help="Config file location"),
 ):
-    """Add a repository to watch (enables multi-repo mode).
+    """Add a repository to watch.
 
-    The first call migrates an existing single-repo config into the repo list.
+    Re-adding a repo already in the list updates only the settings you pass,
+    leaving its other settings alone.
     """
     if not is_valid_repo(repo):
         console.print(f'[red]✗ "{repo}" is not in owner/name form.[/red]')
         raise typer.Exit(1)
-    if mode not in ("suggest", "fix"):
+    if mode is not None and mode not in ("suggest", "fix"):
         console.print(f"[red]✗ Invalid mode: {mode}. Use 'suggest' or 'fix'.[/red]")
         raise typer.Exit(1)
 
     config = load_config(config_path)
-    logs = [path.strip() for path in log_files.split(",") if path.strip()]
-    config.add_repo(RepoConfig(
-        repo=repo, base_branch=base_branch, mode=mode, log_files=logs,
-    ))
+    logs = (
+        None if log_files is None
+        else [path.strip() for path in log_files.split(",") if path.strip()]
+    )
+
+    # Flags default to None so an omitted one means "leave it as it is" rather
+    # than "reset it to the default" — re-running add-repo to change the mode
+    # used to silently revert the base branch and drop the test command.
+    entry = next((rc for rc in config.github.repos if rc.repo == repo), None)
+    updated = entry is not None
+    if entry is None:
+        entry = RepoConfig(repo=repo)
+        config.add_repo(entry)
+    if base_branch is not None:
+        entry.base_branch = base_branch
+    if mode is not None:
+        entry.mode = mode
+    if logs is not None:
+        entry.log_files = logs
     config.save(config_path)
 
     names = ", ".join(repo_config.repo for repo_config in config.github.repos)
-    console.print(f"[green]✓ Added {repo} ({mode}).[/green]")
+    verb = "Updated" if updated else "Added"
+    console.print(f"[green]✓ {verb} {repo} ({entry.mode}).[/green]")
     console.print(f"[dim]Now watching: {names}[/dim]")
 
 
