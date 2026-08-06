@@ -11,7 +11,8 @@ log = logging.getLogger(__name__)
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS incidents (
-    fingerprint TEXT PRIMARY KEY,
+    fingerprint TEXT NOT NULL,
+    repo        TEXT NOT NULL DEFAULT '',
     source      TEXT NOT NULL,
     message     TEXT NOT NULL,
     first_seen  TEXT NOT NULL,
@@ -23,17 +24,26 @@ CREATE TABLE IF NOT EXISTS incidents (
     cost_usd    REAL DEFAULT 0,
     prompt_tokens INTEGER DEFAULT 0,
     completion_tokens INTEGER DEFAULT 0,
-    attempts    INTEGER NOT NULL DEFAULT 0
+    attempts    INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (fingerprint, repo)
 )
 """
 
+_COLUMNS = frozenset({
+    "fingerprint", "repo", "source", "message", "first_seen", "last_seen",
+    "count", "status", "branch", "pr_url", "cost_usd", "prompt_tokens",
+    "completion_tokens", "attempts",
+})
+
+# local mode.
+NO_REPO = ""
+
+
+class StoreError(RuntimeError):
+    """An incident database that cannot be used as it stands."""
+
 # Incident lifecycle: new -> processed, or new -> failed -> new (retried) ->
 # ... -> failed permanently once MAX_ATTEMPTS is reached.
-
-# How many times a failed incident is retried before it is left alone. Incident
-# failures are usually transient (a GitHub 502, a rate limit, a dropped
-# connection); a handful of retries clears those without looping forever on an
-# error that genuinely cannot be processed.
 MAX_ATTEMPTS = 3
 
 
@@ -48,23 +58,32 @@ class IncidentStore:
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute("PRAGMA synchronous=NORMAL")
         self._conn.execute(SCHEMA)
-        self._migrate()
+        self._check_schema()
         self._conn.commit()
 
-    def _migrate(self) -> None:
-        """Add columns missing from a database created by an older version.
+    def _check_schema(self) -> None:
+        """Reject a database written by an older version.
 
-        CREATE TABLE IF NOT EXISTS leaves an existing table alone, so a new
-        column has to be added explicitly or every query naming it fails on
-        an upgraded install.
+        CREATE TABLE IF NOT EXISTS leaves an existing table alone, so an
+        outdated one survives to the first query that names a column it does
+        not have — a SQL error mid-incident. Fail at open instead, and say
+        what to do about it.
+
+        The database is a record of which errors have already been handled, so
+        deleting it is safe: each still-current error is reported once more.
         """
-        present = {
+        missing = _COLUMNS - {
             row["name"]
             for row in self._conn.execute("PRAGMA table_info(incidents)").fetchall()
         }
-        for column, ddl in (("attempts", "INTEGER NOT NULL DEFAULT 0"),):
-            if column not in present:
-                self._conn.execute(f"ALTER TABLE incidents ADD COLUMN {column} {ddl}")
+        if not missing:
+            return
+        self._conn.close()
+        raise StoreError(
+            f"{self.path} was written by an older version of maajun and is "
+            f"missing: {', '.join(sorted(missing))}. Delete it to start a fresh "
+            "one — already-handled errors will be reported once more."
+        )
 
     def record(self, event: ErrorEvent) -> bool:
         """Record a sighting. Returns True if this error should be handled.
@@ -72,25 +91,33 @@ class IncidentStore:
         True for a genuinely new error, and again for one whose last attempt
         failed and still has retries left — otherwise a single transient
         GitHub 502 would blacklist that error permanently.
+
+        Scoped to `event.repo`: the same traceback in two repos is two
+        incidents, because it needs two issues in two places. Deduping on the
+        error text alone meant whichever repo was polled first claimed the
+        error and the others were silently dropped as already known.
         """
         now = utcnow_iso()
         existing = self._conn.execute(
-            "SELECT status, attempts FROM incidents WHERE fingerprint = ?",
-            (event.fingerprint,),
+            "SELECT status, attempts FROM incidents"
+            " WHERE fingerprint = ? AND repo = ?",
+            (event.fingerprint, event.repo),
         ).fetchone()
 
         if existing is None:
             self._conn.execute(
-                "INSERT INTO incidents (fingerprint, source, message, first_seen, last_seen)"
-                " VALUES (?, ?, ?, ?, ?)",
-                (event.fingerprint, event.source, event.message, now, now),
+                "INSERT INTO incidents"
+                " (fingerprint, repo, source, message, first_seen, last_seen)"
+                " VALUES (?, ?, ?, ?, ?, ?)",
+                (event.fingerprint, event.repo, event.source, event.message, now, now),
             )
             self._conn.commit()
             return True
 
         self._conn.execute(
-            "UPDATE incidents SET last_seen = ?, count = count + 1 WHERE fingerprint = ?",
-            (now, event.fingerprint),
+            "UPDATE incidents SET last_seen = ?, count = count + 1"
+            " WHERE fingerprint = ? AND repo = ?",
+            (now, event.fingerprint, event.repo),
         )
         self._conn.commit()
         retryable = (
@@ -98,14 +125,16 @@ class IncidentStore:
         )
         if retryable:
             log.info(
-                "retrying failed incident fp=%s (attempt %d of %d)",
-                event.fingerprint, existing["attempts"] + 1, MAX_ATTEMPTS,
+                "retrying failed incident fp=%s repo=%s (attempt %d of %d)",
+                event.fingerprint, event.repo or NO_REPO,
+                existing["attempts"] + 1, MAX_ATTEMPTS,
             )
         return retryable
 
     def mark_processed(
         self,
         fp: str,
+        repo: str = NO_REPO,
         *,
         branch: str,
         pr_url: str,
@@ -116,8 +145,8 @@ class IncidentStore:
         self._conn.execute(
             "UPDATE incidents SET status = 'processed', branch = ?, pr_url = ?,"
             " cost_usd = ?, prompt_tokens = ?, completion_tokens = ?"
-            " WHERE fingerprint = ?",
-            (branch, pr_url, cost_usd, prompt_tokens, completion_tokens, fp),
+            " WHERE fingerprint = ? AND repo = ?",
+            (branch, pr_url, cost_usd, prompt_tokens, completion_tokens, fp, repo),
         )
         self._conn.commit()
 
@@ -149,17 +178,19 @@ class IncidentStore:
         ).fetchone()
         return {"prompt_tokens": row["prompt"], "completion_tokens": row["completion"]}
 
-    def forget(self, fp: str) -> None:
-        """Drop an incident so a future poll treats the error as new."""
-        self._conn.execute("DELETE FROM incidents WHERE fingerprint = ?", (fp,))
+    def forget(self, fp: str, repo: str = NO_REPO) -> None:
+        """Drop one repo's incident so a future poll treats the error as new."""
+        self._conn.execute(
+            "DELETE FROM incidents WHERE fingerprint = ? AND repo = ?", (fp, repo)
+        )
         self._conn.commit()
 
-    def mark_failed(self, fp: str) -> None:
+    def mark_failed(self, fp: str, repo: str = NO_REPO) -> None:
         """Mark an attempt as failed and count it toward the retry limit."""
         self._conn.execute(
             "UPDATE incidents SET status = 'failed', attempts = attempts + 1"
-            " WHERE fingerprint = ?",
-            (fp,),
+            " WHERE fingerprint = ? AND repo = ?",
+            (fp, repo),
         )
         self._conn.commit()
 
@@ -172,17 +203,31 @@ class IncidentStore:
         ).fetchall()
         return [dict(row) for row in rows]
 
-    def get(self, fp: str) -> dict | None:
+    def get(self, fp: str, repo: str = NO_REPO) -> dict | None:
         row = self._conn.execute(
-            "SELECT * FROM incidents WHERE fingerprint = ?", (fp,)
+            "SELECT * FROM incidents WHERE fingerprint = ? AND repo = ?", (fp, repo)
         ).fetchone()
         return dict(row) if row else None
 
-    def all(self) -> list[dict]:
-        rows = self._conn.execute(
-            "SELECT * FROM incidents ORDER BY last_seen DESC"
-        ).fetchall()
+    def all(self, repo: str | None = None) -> list[dict]:
+        """Every incident, newest sighting first; one repo's when `repo` is given."""
+        if repo is None:
+            rows = self._conn.execute(
+                "SELECT * FROM incidents ORDER BY last_seen DESC"
+            ).fetchall()
+        else:
+            rows = self._conn.execute(
+                "SELECT * FROM incidents WHERE repo = ? ORDER BY last_seen DESC",
+                (repo,),
+            ).fetchall()
         return [dict(r) for r in rows]
+
+    def repos(self) -> list[str]:
+        """Distinct repos that have incidents, so a caller can offer a filter."""
+        rows = self._conn.execute(
+            "SELECT DISTINCT repo FROM incidents ORDER BY repo"
+        ).fetchall()
+        return [row["repo"] for row in rows]
 
     def close(self) -> None:
         self._conn.close()

@@ -22,15 +22,15 @@ def _store(data):
     return IncidentStore(data / "incidents.db")
 
 
-def _add(store, fingerprint, *, message, cost=0.0, failures=0, url=""):
+def _add(store, fingerprint, *, message, cost=0.0, failures=0, url="", repo=""):
     store.record(ErrorEvent(
         source="logfile:/x.log", message=message, details=message,
-        fingerprint=fingerprint,
+        fingerprint=fingerprint, repo=repo,
     ))
     for _ in range(failures):
-        store.mark_failed(fingerprint)
+        store.mark_failed(fingerprint, repo)
     if url:
-        store.mark_processed(fingerprint, branch="", pr_url=url, cost_usd=cost)
+        store.mark_processed(fingerprint, repo, branch="", pr_url=url, cost_usd=cost)
 
 
 def test_no_database_yet_is_explained_not_an_error(workdir):
@@ -132,3 +132,89 @@ def test_limit_caps_the_rows(workdir):
     result = runner.invoke(app, ["incidents", "-c", str(config_path), "-n", "2"])
     assert result.output.count("$") >= 1  # rendered
     assert sum(f"fp{n}" in result.output for n in range(5)) == 2
+
+
+# ---------------------------------------------------------------------------
+# Telling repos apart
+# ---------------------------------------------------------------------------
+
+
+def test_the_repo_column_appears_once_more_than_one_repo_has_incidents(workdir):
+    """Two repos' issues both render as '#1' — the repo is what separates them."""
+    config_path, data = workdir
+    store = _store(data)
+    _add(store, "fp1", message="KeyError: user_id", repo="acme/api",
+         url="https://github.com/acme/api/issues/1")
+    _add(store, "fp1", message="KeyError: user_id", repo="acme/web",
+         url="https://github.com/acme/web/issues/1")
+    store.close()
+
+    result = runner.invoke(app, ["incidents", "-c", str(config_path)])
+    assert result.exit_code == 0
+    assert "acme/api" in result.output
+    assert "acme/web" in result.output
+
+
+def test_a_single_repo_install_keeps_the_narrower_table(workdir):
+    config_path, data = workdir
+    store = _store(data)
+    _add(store, "fp1", message="boom", repo="acme/api", url="u")
+    _add(store, "fp2", message="bang", repo="acme/api", url="u")
+    store.close()
+
+    result = runner.invoke(app, ["incidents", "-c", str(config_path)])
+    assert "Repo" not in result.output
+
+
+def test_repo_filter_shows_only_that_repos_incidents(workdir):
+    config_path, data = workdir
+    store = _store(data)
+    _add(store, "apionly", message="api broke", repo="acme/api", url="u")
+    _add(store, "webonly", message="web broke", repo="acme/web", url="u")
+    store.close()
+
+    result = runner.invoke(
+        app, ["incidents", "-c", str(config_path), "--repo", "acme/web"]
+    )
+    assert result.exit_code == 0
+    assert "webonly" in result.output
+    assert "apionly" not in result.output
+
+
+def test_repo_filter_on_an_unknown_repo_lists_the_known_ones(workdir):
+    config_path, data = workdir
+    store = _store(data)
+    _add(store, "fp1", message="boom", repo="acme/api", url="u")
+    store.close()
+
+    result = runner.invoke(
+        app, ["incidents", "-c", str(config_path), "-r", "acme/typo"]
+    )
+    assert result.exit_code == 0
+    assert "No incidents recorded for acme/typo" in result.output
+    assert "acme/api" in result.output
+
+
+def test_repo_filter_narrows_the_failed_list_too(workdir):
+    config_path, data = workdir
+    store = _store(data)
+    _add(store, "gone", message="api gone", repo="acme/api", failures=MAX_ATTEMPTS)
+    _add(store, "gone", message="web gone", repo="acme/web", failures=MAX_ATTEMPTS)
+    store.close()
+
+    result = runner.invoke(
+        app, ["incidents", "-c", str(config_path), "--failed", "-r", "acme/web"]
+    )
+    assert "web gone" in result.output
+    assert "api gone" not in result.output
+
+
+def test_local_mode_incidents_are_labelled_not_left_blank(workdir):
+    config_path, data = workdir
+    store = _store(data)
+    _add(store, "local1", message="on disk", repo="", url="/reports/local1.md")
+    _add(store, "fp2", message="in github", repo="acme/api", url="u")
+    store.close()
+
+    result = runner.invoke(app, ["incidents", "-c", str(config_path)])
+    assert "(local)" in result.output

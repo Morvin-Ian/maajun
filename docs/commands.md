@@ -15,10 +15,9 @@ Three steps, of which only the first is required:
    implemented) and stores a validated API key in the keyring.
 2. **GitHub** *(optional)* — target repo, base branch, and
    [mode](monitoring.md#modes). Suggests the repo from your `origin`
-   remote, and reports whether a token already exists in `$GITHUB_TOKEN`,
-   the keyring, or `gh auth login`. Checks that the token authenticates
-   *and* can push, so a misconfigured token fails here rather than at
-   3 a.m.
+   remote, and reports whether a token is already stored. Checks that the
+   token authenticates *and* can push, so a misconfigured token fails here
+   rather than at 3 a.m.
 3. **Error sources** *(optional)* — log files, and GitHub Actions
    (reusing the GitHub token rather than asking for a second one).
 
@@ -37,34 +36,41 @@ instruction.
 | `--test-command CMD` | Command that verifies a fix-mode edit, e.g. `pytest -q` |
 | `-l, --logs PATHS` | Comma-separated log files to watch |
 | `--github-actions` | Watch the configured repos for failed workflow runs |
-| `--non-interactive` | Never prompt; use flags and the environment |
+| `--non-interactive` | Never prompt; take everything from flags |
 | `--reconfigure` | Ask again for credentials that are already stored |
 
-In `--non-interactive` mode secrets are read from the environment
-(`DEEPSEEK_API_KEY`, `GITHUB_TOKEN`) rather than from flags, so they never
-land in shell history.
+`--non-interactive` never prompts, so it cannot store a credential that
+isn't there yet — it exits non-zero if the provider has no key in the
+keyring. Run `maajun setup` interactively once per machine, then use
+`--non-interactive` to reconfigure repos and monitors unattended.
 
 ### `maajun incidents`
 
 List handled incidents with status, sighting count, cost, and the issue or
-PR each produced, plus today's spend against `daemon.max_usd_per_day`.
+PR each produced, plus today's spend against `daemon.max_usd_per_day`. A
+**Repo** column appears once more than one repo has incidents — two repos'
+issues can both render as `#1`, so the repo is what tells them apart.
+Local-mode incidents show as `(local)`.
 
 | Flag | Meaning |
 |------|---------|
 | `-n, --limit N` | How many to show (default 20) |
 | `--failed` | Only incidents that failed 3 times and are no longer retried |
+| `-r, --repo OWNER/NAME` | Only incidents attributed to this repo |
 
 ### `maajun add-repo REPO`
 
-Add another repository to watch, which turns on **multi-repo mode**. The
-first call migrates an existing single-repo config into a `[[github.repos]]`
-list; re-adding the same repo updates its entry rather than duplicating it.
+Add a repository to watch. Repositories are always `[[github.repos]]`
+entries, one per repo, so this is how the first one gets configured too.
+Re-adding a repo already in the list updates only the settings you pass,
+leaving the rest of its entry alone and keeping its position — the first
+repo is the one global `monitor.log_files` attach to, so order matters.
 
 | Flag | Meaning |
 |------|---------|
-| `-b, --base-branch NAME` | Branch PRs target (default `main`) |
-| `-m, --mode MODE` | `suggest` or `fix` (default `suggest`) |
-| `-l, --log-files PATHS` | Comma-separated log paths for this repo |
+| `-b, --base-branch NAME` | Branch PRs target (new repos default to `main`) |
+| `-m, --mode MODE` | `suggest` or `fix` (new repos default to `suggest`) |
+| `-l, --log-files PATHS` | Comma-separated log paths for this repo (replaces the list) |
 | `-c, --config PATH` | Config file location |
 
 See [multiple repositories](monitoring.md#multiple-repositories).
@@ -92,15 +98,27 @@ maajun config                      # print the whole config
 maajun config github.mode          # print one value (secrets show as ***)
 maajun config github.mode fix      # set a value
 maajun config monitor.log_files /var/log/a.log,/var/log/b.log
+maajun config github.test_command "pytest -q" -r team/api   # one repo only
 ```
 
-Keys use dot notation (`ai.*`, `github.repo/base_branch/mode`,
-`monitor.*`, `daemon.workdir`). Values are type-checked
-and validated before saving — an invalid value (e.g. an unknown mode) is
-rejected and the file is left unchanged. Setting `github.mode` also
-updates every repo in a multi-repo config. Writes are comment-preserving:
-your comments and formatting survive. To add or manage repositories in
-multi-repo mode, use [`add-repo`](#maajun-add-repo-repo).
+| Flag | Meaning |
+|------|---------|
+| `-r, --repo OWNER/NAME` | Apply a `github.*` key to that repository only |
+| `-c, --config PATH` | Config file location |
+
+Keys use dot notation (`ai.*`, `github.repo/base_branch/mode/test_command`,
+`monitor.*`, `daemon.*`). Values are type-checked and validated before
+saving — an invalid value (e.g. an unknown mode) is rejected and the file
+is left unchanged. Writes are comment-preserving: your comments and
+formatting survive.
+
+A `github.*` key that also exists per repo (`base_branch`, `mode`,
+`test_command`, `log_files`) is written to **every** configured repo, so
+one command still covers wanting the same setting everywhere. Use
+`--repo` to change a single repository instead. To add or remove a
+repository, use [`add-repo`](#maajun-add-repo-repo): there is no
+`github.repo` key, since a repository is an entry in the list rather than
+a top-level setting.
 
 ### `maajun watch`
 
@@ -181,7 +199,15 @@ up again.
 
 ## Where secrets live
 
-1. **Environment variables win**: `DEEPSEEK_API_KEY` (per provider,
-   `<PROVIDER>_API_KEY`) and `GITHUB_TOKEN`. Use these on servers.
-2. Otherwise the OS keyring (gnome-keyring / macOS Keychain), service
-   name `maajun`.
+The OS keyring (gnome-keyring / macOS Keychain), under the service name
+`maajun` — and nowhere else. Environment variables are not read, so there
+is exactly one place to look when `status` and the daemon disagree about a
+credential.
+
+Nothing else is a source — not environment variables, and not a
+`gh auth login` session. maajun never shells out to another tool for a
+credential: a borrowed token can change without maajun being told, and
+`status` could not then vouch for what the daemon will push with.
+
+maajun therefore needs a working keyring backend; on a headless server,
+install one (`keyrings.alt`, `gnome-keyring`) before running `setup`.

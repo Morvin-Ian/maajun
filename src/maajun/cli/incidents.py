@@ -6,15 +6,16 @@ import typer
 from rich.panel import Panel
 from rich.table import Table
 
-from maajun.cli._shared import app, console
+from maajun.cli._shared import app, console, load_config
 from maajun.config import Config
-from maajun.daemon.store import MAX_ATTEMPTS, IncidentStore
+from maajun.daemon.core import LOCAL_REPO_LABEL
+from maajun.daemon.store import MAX_ATTEMPTS, IncidentStore, StoreError
 from maajun.utils import truncate, utc_day_start_iso
 
-_STATUS_STYLES = {"processed": "green", "failed": "red", "new": "yellow"}
+STATUS_STYLES = {"processed": "green", "failed": "red", "new": "yellow"}
 
 
-def _link(url: str | None) -> str:
+def format_links(url: str | None) -> str:
     if not url:
         return "—"
     if url.startswith("http"):
@@ -34,27 +35,42 @@ def incidents(
     failed: bool = typer.Option(
         False, "--failed", help="Only incidents that failed and are no longer retried"
     ),
+    repo: str | None = typer.Option(
+        None, "--repo", "-r", help="Only incidents attributed to this repo (owner/name)"
+    ),
 ):
-    """List handled incidents with their status, cost, and links."""
-    config = Config.load(config_path)
+    """List handled incidents with their repo, status, cost, and links."""
+    config = load_config(config_path)
     workdir = Path(config.daemon.workdir).expanduser()
     database = workdir / "incidents.db"
     if not database.exists():
         console.print(
-            f"[dim]No incidents yet — {database} does not exist. "
+            "[dim]No incidents yet. "
             "Run [bold]maajun watch[/bold] first.[/dim]"
         )
         return
 
-    store = IncidentStore(database)
     try:
-        rows = store.exhausted() if failed else store.all()[:limit]
-        _render(store, rows, config, failed=failed)
+        store = IncidentStore(database)
+    except StoreError as e:
+        console.print(f"[red]✗ {e}[/red]")
+        raise typer.Exit(1) from e
+    try:
+        if repo is not None and repo not in store.repos():
+            console.print(f"[yellow]No incidents recorded for {repo}.[/yellow]")
+            known = [name for name in store.repos() if name]
+            if known:
+                console.print(f"[dim]Repos with incidents: {', '.join(known)}[/dim]")
+            return
+        rows = store.exhausted() if failed else store.all(repo)[:limit]
+        if failed and repo is not None:
+            rows = [row for row in rows if row["repo"] == repo]
+        render_incidents(store, rows, config, failed=failed)
     finally:
         store.close()
 
 
-def _render(
+def render_incidents(
     store: IncidentStore, rows: list[dict], config: Config, *, failed: bool
 ) -> None:
     title = "Exhausted incidents" if failed else "Incidents"
@@ -69,8 +85,11 @@ def _render(
             return
 
     if rows:
+        show_repo = len({row["repo"] for row in rows}) > 1
         table = Table(title=title)
         table.add_column("Fingerprint", style="dim", no_wrap=True)
+        if show_repo:
+            table.add_column("Repo", no_wrap=True)
         table.add_column("Status")
         table.add_column("Error")
         table.add_column("Seen", justify="right")
@@ -79,24 +98,27 @@ def _render(
 
         for row in rows:
             status = row["status"]
-            style = _STATUS_STYLES.get(status, "dim")
+            style = STATUS_STYLES.get(status, "dim")
             label = status
             if status == "failed":
                 label = f"{status} ({row['attempts']}/{MAX_ATTEMPTS})"
-            table.add_row(
-                row["fingerprint"],
+            cells = [row["fingerprint"]]
+            if show_repo:
+                cells.append(row["repo"] or LOCAL_REPO_LABEL)
+            cells.extend([
                 f"[{style}]{label}[/{style}]",
                 truncate(row["message"], 60, "…"),
                 str(row["count"]),
                 f"${row['cost_usd']:.4f}" if row["cost_usd"] else "—",
-                _link(row["pr_url"]),
-            )
+                format_links(row["pr_url"]),
+            ])
+            table.add_row(*cells)
         console.print(table)
 
-    _render_totals(store, config)
+    render_totals(store, config)
 
 
-def _render_totals(store: IncidentStore, config: Config) -> None:
+def render_totals(store: IncidentStore, config: Config) -> None:
     tokens = store.total_tokens()
     spent_today = store.cost_since(utc_day_start_iso())
     cap = config.daemon.max_usd_per_day

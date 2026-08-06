@@ -10,23 +10,23 @@ from rich.live import Live
 from rich.panel import Panel
 
 from maajun.auth import AuthManager
-from maajun.cli._shared import app, console, pick_repo
+from maajun.cli._shared import app, console, load_config, pick_repo
 from maajun.cli.status_checks import build_status, gather_github
-from maajun.config import Config, RepoConfig
+from maajun.config import RepoConfig
 from maajun.daemon import build_daemon, build_daemon_for_report
 from maajun.progress import WorkingStatus, working
 from maajun.utils import is_valid_repo, truncate
 from maajun.vcs import GitHubClient
 
-_NOTICE_STYLES = {"info": "cyan", "success": "green", "warn": "yellow", "error": "red"}
+NOTICE_STYLES = {"info": "cyan", "success": "green", "warn": "yellow", "error": "red"}
 
 
-def _watch_with_spinner(daemon, *, once: bool) -> None:
+def watch_with_spinner(daemon, *, once: bool) -> None:
     """Run the daemon under a live spinner, printing notices above it."""
     status = WorkingStatus("Watching for errors")
 
     def notice(message: str, level: str) -> None:
-        style = _NOTICE_STYLES.get(level, "dim")
+        style = NOTICE_STYLES.get(level, "dim")
         console.print(f"[{style}]{message}[/{style}]")
 
     daemon.progress = status.set
@@ -54,13 +54,12 @@ def watch(
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
 
-    config = Config.load(config_path)
+    config = load_config(config_path)
 
     if mode:
         if mode not in ("suggest", "fix"):
             console.print(f"[red]✗ Invalid mode: {mode}. Use 'suggest' or 'fix'.[/red]")
             raise typer.Exit(1)
-        config.github.mode = mode
         for repo_config in config.github.repos:
             repo_config.mode = mode
 
@@ -91,7 +90,7 @@ def watch(
         )
 
         def repo_of(monitor) -> str:
-            repo_config = daemon.monitor_to_repo.get(monitor.name)
+            repo_config = daemon.monitor_to_repo.get(id(monitor))
             return repo_config.repo if repo_config else "unknown"
 
         monitors_text = "\n".join(
@@ -105,7 +104,7 @@ def watch(
             border_style="blue",
         ))
     else:
-        repo_config = repos[0] if repos else config.github
+        repo_config = repos[0]
         console.print(Panel(
             f"[bold]Maajun watch[/bold]{mode_source}\n\n"
             f"Repo:     [cyan]{repo_config.repo}[/cyan] "
@@ -118,7 +117,7 @@ def watch(
 
     try:
         if use_spinner:
-            _watch_with_spinner(daemon, once=once)
+            watch_with_spinner(daemon, once=once)
         else:
             asyncio.run(daemon.run(once=once, dry_run=dry_run))
     except KeyboardInterrupt:
@@ -152,13 +151,12 @@ def report(
             format="%(asctime)s %(levelname)s %(name)s: %(message)s",
         )
 
-    config = Config.load(config_path)
+    config = load_config(config_path)
 
     if mode:
         if mode not in ("suggest", "fix"):
             console.print(f"[red]✗ Invalid mode: {mode}. Use 'suggest' or 'fix'.[/red]")
             raise typer.Exit(1)
-        config.github.mode = mode
         for repo_config in config.github.repos:
             repo_config.mode = mode
 
@@ -249,35 +247,55 @@ def report(
 @app.command(name="add-repo")
 def add_repo(
     repo: str = typer.Argument(help="Repository to watch, as owner/name"),
-    base_branch: str = typer.Option(
-        "main", "--base-branch", "-b", help="Branch to open PRs against"
+    base_branch: str | None = typer.Option(
+        None, "--base-branch", "-b",
+        help="Branch to open PRs against (new repos default to main)",
     ),
-    mode: str = typer.Option("suggest", "--mode", "-m", help="'suggest' or 'fix'"),
-    log_files: str = typer.Option(
-        "", "--log-files", "-l", help="Comma-separated log paths for this repo"
+    mode: str | None = typer.Option(
+        None, "--mode", "-m", help="'suggest' or 'fix' (new repos default to suggest)"
+    ),
+    log_files: str | None = typer.Option(
+        None, "--log-files", "-l", help="Comma-separated log paths for this repo"
     ),
     config_path: Path | None = typer.Option(None, "--config", "-c", help="Config file location"),
 ):
-    """Add a repository to watch (enables multi-repo mode).
+    """Add a repository to watch.
 
-    The first call migrates an existing single-repo config into the repo list.
+    Re-adding a repo already in the list updates only the settings you pass,
+    leaving its other settings alone.
     """
     if not is_valid_repo(repo):
         console.print(f'[red]✗ "{repo}" is not in owner/name form.[/red]')
         raise typer.Exit(1)
-    if mode not in ("suggest", "fix"):
+    if mode is not None and mode not in ("suggest", "fix"):
         console.print(f"[red]✗ Invalid mode: {mode}. Use 'suggest' or 'fix'.[/red]")
         raise typer.Exit(1)
 
-    config = Config.load(config_path)
-    logs = [path.strip() for path in log_files.split(",") if path.strip()]
-    config.add_repo(RepoConfig(
-        repo=repo, base_branch=base_branch, mode=mode, log_files=logs,
-    ))
+    config = load_config(config_path)
+    logs = (
+        None if log_files is None
+        else [path.strip() for path in log_files.split(",") if path.strip()]
+    )
+
+    # Flags default to None so an omitted one means "leave it as it is" rather
+    # than "reset it to the default" — re-running add-repo to change the mode
+    # used to silently revert the base branch and drop the test command.
+    entry = next((rc for rc in config.github.repos if rc.repo == repo), None)
+    updated = entry is not None
+    if entry is None:
+        entry = RepoConfig(repo=repo)
+        config.add_repo(entry)
+    if base_branch is not None:
+        entry.base_branch = base_branch
+    if mode is not None:
+        entry.mode = mode
+    if logs is not None:
+        entry.log_files = logs
     config.save(config_path)
 
     names = ", ".join(repo_config.repo for repo_config in config.github.repos)
-    console.print(f"[green]✓ Added {repo} ({mode}).[/green]")
+    verb = "Updated" if updated else "Added"
+    console.print(f"[green]✓ {verb} {repo} ({entry.mode}).[/green]")
     console.print(f"[dim]Now watching: {names}[/dim]")
 
 
@@ -302,7 +320,7 @@ def status(
     ),
 ):
     """Check that credentials, repos, and log files are ready for `watch`."""
-    config = Config.load(config_path)
+    config = load_config(config_path)
     auth = AuthManager()
 
     provider = config.ai.provider
