@@ -6,13 +6,26 @@ import sys
 import typer
 from prompt_toolkit.shortcuts import prompt as pt_prompt
 from rich.console import Console
+from rich.markup import escape
 
 from maajun.auth import AuthManager
-from maajun.config import AIProviderConfig, Config, RepoConfig
+from maajun.config import AIProviderConfig, Config, ConfigError, RepoConfig
 from maajun.providers.factory import ProviderFactory
 
 app = typer.Typer(invoke_without_command=True)
 console = Console()
+
+
+def load_config(path) -> Config:
+    try:
+        return Config.load(path)
+    except ConfigError as e:
+        console.print(f"[red]✗ {escape(str(e))}[/red]")
+        raise typer.Exit(1) from e
+    except (OSError, ValueError) as e:
+        # tomllib raises TOMLDecodeError (a ValueError) on a malformed file.
+        console.print(f"[red]✗ Could not read the config: {escape(str(e))}[/red]")
+        raise typer.Exit(1) from e
 
 
 def implemented_providers() -> list[str]:

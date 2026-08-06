@@ -96,10 +96,10 @@ def build_status(
             warn=True, counts=False,
         ))
     else:
+        # "stored" is exact again now the keyring is the only source.
         github.checks.append(Check(
             "GitHub token stored", has_token,
-            "" if has_token else "run 'maajun setup', export GITHUB_TOKEN, "
-                                "or run 'gh auth login'",
+            "" if has_token else "run 'maajun setup' to store one",
         ))
         if network is None:
             for repo_config in repos:

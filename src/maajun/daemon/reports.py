@@ -1,10 +1,3 @@
-"""How an incident is rendered — issue bodies, PR bodies, files, dry-run output.
-
-Pure formatting, separated from the pipeline that produces it: wording and
-layout change far more often than the orchestration around them, and none of
-this needs the Daemon's state.
-"""
-
 from __future__ import annotations
 
 from pathlib import Path
@@ -25,6 +18,8 @@ MAX_TEST_OUTPUT = 3000
 def provenance(event: ErrorEvent) -> str:
     """Where this came from, so an artifact is traceable back to the event."""
     return (
+        f"- Repo: `{event.repo}`\n" if event.repo else ""
+    ) + (
         f"- Source: `{event.source}`\n"
         f"- First seen: {event.timestamp}\n"
         f"- Fingerprint: `{event.fingerprint}`\n"
@@ -87,6 +82,9 @@ def report_markdown(event: ErrorEvent, report: str) -> str:
     return (
         f"{report}\n\n---\n\n"
         f"## Error details\n\n```\n{event.details}\n```\n\n"
+    ) + (
+        f"- Repo: `{event.repo}`\n" if event.repo else ""
+    ) + (
         f"- Source: `{event.source}`\n"
         f"- First seen: {event.timestamp}\n"
         f"- Fingerprint: `{event.fingerprint}`\n"

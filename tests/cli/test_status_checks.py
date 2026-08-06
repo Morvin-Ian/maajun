@@ -8,11 +8,15 @@ def _labels(sections):
     return [c.label for s in sections for c in s.checks]
 
 
+def _find(sections, label):
+    return next(c for s in sections for c in s.checks if c.label == label)
+
+
 def test_all_green(tmp_path):
     logf = tmp_path / "app.log"
     logf.write_text("")
     config = Config(
-        github=GitHubConfig(repo="owner/name"),
+        github=GitHubConfig(repos=[RepoConfig(repo="owner/name")]),
         monitor=MonitorConfig(log_files=[str(logf)]),
     )
     repos = config.github.get_all_repos()
@@ -30,7 +34,7 @@ def test_all_green(tmp_path):
 
 
 def test_missing_credentials_fail(tmp_path):
-    config = Config(github=GitHubConfig(repo="owner/name"),
+    config = Config(github=GitHubConfig(repos=[RepoConfig(repo="owner/name")]),
                     monitor=MonitorConfig(log_files=[str(tmp_path / "a.log")]))
     sections, ok = build_status(
         config, provider="deepseek", has_key=False, has_token=False,
@@ -53,7 +57,7 @@ def test_no_repo_configured_is_a_warning_not_a_failure():
 def test_missing_token_fails_once_a_repo_is_configured():
     """Asking for PRs without a token is a real misconfiguration."""
     config = Config(
-        github=GitHubConfig(repo="owner/name"),
+        github=GitHubConfig(repos=[RepoConfig(repo="owner/name")]),
         monitor=MonitorConfig(log_files=["/x.log"]),
     )
     sections, ok = build_status(
@@ -85,7 +89,7 @@ def test_reachability_not_checked_does_not_fail(tmp_path):
     logf = tmp_path / "app.log"
     logf.write_text("")
     config = Config(
-        github=GitHubConfig(repo="owner/name"),
+        github=GitHubConfig(repos=[RepoConfig(repo="owner/name")]),
         monitor=MonitorConfig(log_files=[str(logf)]),
     )
     sections, ok = build_status(
@@ -100,7 +104,7 @@ def test_cannot_push_fails(tmp_path):
     logf = tmp_path / "app.log"
     logf.write_text("")
     config = Config(
-        github=GitHubConfig(repo="owner/name"),
+        github=GitHubConfig(repos=[RepoConfig(repo="owner/name")]),
         monitor=MonitorConfig(log_files=[str(logf)]),
     )
     sections, ok = build_status(
@@ -111,7 +115,10 @@ def test_cannot_push_fails(tmp_path):
 
 
 def test_no_monitors_at_all_still_fails():
-    config = Config(github=GitHubConfig(repo="owner/name"), monitor=MonitorConfig())
+    config = Config(
+        github=GitHubConfig(repos=[RepoConfig(repo="owner/name")]),
+        monitor=MonitorConfig(),
+    )
     sections, ok = build_status(
         config, provider="deepseek", has_key=True, has_token=True,
         repos=[RepoConfig(repo="owner/name")], network=None,
@@ -127,7 +134,7 @@ def test_no_monitors_at_all_still_fails():
 
 def _status_for_log(tmp_path, log_path):
     config = Config(
-        github=GitHubConfig(repo="owner/name"),
+        github=GitHubConfig(repos=[RepoConfig(repo="owner/name")]),
         monitor=MonitorConfig(log_files=[str(log_path)]),
     )
     return build_status(
@@ -168,3 +175,30 @@ def test_missing_log_file_is_still_only_a_warning(tmp_path):
     check = next(c for s in sections for c in s.checks if c.label.startswith("Log file"))
     assert ok is True
     assert check.warn is True
+
+
+def test_token_check_says_stored_because_the_keyring_is_the_only_source():
+    sections, _ = build_status(
+        _config(), provider="deepseek", has_key=True, has_token=True,
+        repos=[RepoConfig(repo="owner/name")], network=None,
+    )
+    check = _find(sections, "GitHub token stored")
+    assert check.ok
+    assert check.detail == ""
+
+
+def test_missing_token_still_says_how_to_supply_one():
+    sections, ok = build_status(
+        _config(), provider="deepseek", has_key=True, has_token=False,
+        repos=[RepoConfig(repo="owner/name")], network=None,
+    )
+    check = _find(sections, "GitHub token stored")
+    assert not check.ok and not ok
+    assert "maajun setup" in check.detail
+    # Neither the environment nor gh is a source any more.
+    assert "GITHUB_TOKEN" not in check.detail
+    assert "gh auth" not in check.detail
+
+
+def _config() -> Config:
+    return Config(monitor=MonitorConfig(log_files=["/x.log"]))

@@ -1,5 +1,3 @@
-"""GitHub REST API conventions, shared by the client and the Actions monitor."""
-
 from __future__ import annotations
 
 GITHUB_API_VERSION = "2022-11-28"

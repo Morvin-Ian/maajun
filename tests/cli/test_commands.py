@@ -5,9 +5,22 @@ import keyring.errors
 import pytest
 from typer.testing import CliRunner
 
+from maajun.auth import AuthManager
 from maajun.cli import app
 
 runner = CliRunner()
+
+
+def flat(text: str) -> str:
+    """CLI output with runs of whitespace collapsed to single spaces.
+
+    Rich wraps at the console width, so a message that interpolates a path can
+    break between any two words once that path is long enough — "Delete it"
+    arrives as "Delete\nit". CI's tmp_path is longer than a local one, so
+    asserting on the raw text passes here and fails there. Flatten first and
+    the assertion stops depending on where the wrap lands.
+    """
+    return " ".join(text.split())
 
 
 @pytest.fixture
@@ -52,8 +65,6 @@ def test_main_shows_welcome_when_no_providers(fake_keyring):
 
 
 def test_main_shows_providers_when_configured(fake_keyring, monkeypatch):
-    from maajun.auth import AuthManager
-
     auth = AuthManager()
     auth.set_api_key("deepseek", "sk-test")
 
@@ -94,8 +105,6 @@ def test_provider_list(fake_keyring):
 
 
 def test_sign_out(fake_keyring):
-    from maajun.auth import AuthManager
-
     auth = AuthManager()
     auth.set_api_key("deepseek", "sk-test")
 
@@ -117,18 +126,16 @@ def test_sign_out(fake_keyring):
 def test_watch_fails_without_api_key(fake_keyring, tmp_path):
     """The API key is the one hard requirement."""
     config_path = tmp_path / "config.toml"
-    config_path.write_text('[github]\nrepo = "owner/name"\n')
+    config_path.write_text('[[github.repos]]\nrepo = "owner/name"\n')
     result = runner.invoke(app, ["watch", "--config", str(config_path)])
     assert result.exit_code == 1
     assert "No API key" in result.output
 
 
 def test_watch_fails_when_a_repo_is_set_but_no_token(fake_keyring, tmp_path, monkeypatch):
-    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test")
-    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
-    monkeypatch.setattr("maajun.auth.shutil.which", lambda name: None)
+    AuthManager().set_api_key("deepseek", "sk-test")
     config_path = tmp_path / "config.toml"
-    config_path.write_text('[github]\nrepo = "owner/name"\n')
+    config_path.write_text('[[github.repos]]\nrepo = "owner/name"\n')
     result = runner.invoke(app, ["watch", "--config", str(config_path)])
     assert result.exit_code == 1
     assert "no GitHub token" in result.output
@@ -136,7 +143,7 @@ def test_watch_fails_when_a_repo_is_set_but_no_token(fake_keyring, tmp_path, mon
 
 def test_watch_without_a_repo_runs_in_local_mode(fake_keyring, tmp_path, monkeypatch):
     """GitHub is optional: with no repo, errors are analyzed into local reports."""
-    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test")
+    AuthManager().set_api_key("deepseek", "sk-test")
     log_file = tmp_path / "app.log"
     log_file.write_text("")
     config_path = tmp_path / "config.toml"
@@ -181,7 +188,7 @@ def test_watch_help():
 
 def test_watch_dry_run_still_requires_an_api_key(fake_keyring, tmp_path):
     config_path = tmp_path / "config.toml"
-    config_path.write_text('[github]\nrepo = "owner/name"\n')
+    config_path.write_text('[[github.repos]]\nrepo = "owner/name"\n')
     result = runner.invoke(app, ["watch", "--dry-run", "--config", str(config_path)])
     assert result.exit_code == 1
     assert "No API key" in result.output
@@ -194,7 +201,7 @@ def test_watch_dry_run_still_requires_an_api_key(fake_keyring, tmp_path):
 
 def test_config_set_persists_and_validates(tmp_path):
     config_path = tmp_path / "config.toml"
-    config_path.write_text('[github]\nrepo = "owner/name"\nmode = "suggest"\n')
+    config_path.write_text('[[github.repos]]\nrepo = "owner/name"\nmode = "suggest"\n')
 
     result = runner.invoke(app, ["config", "github.mode", "fix", "--config", str(config_path)])
     assert result.exit_code == 0
@@ -207,25 +214,26 @@ def test_config_set_persists_and_validates(tmp_path):
 
 def test_status_reports_missing_credentials(fake_keyring, tmp_path):
     config_path = tmp_path / "config.toml"
-    config_path.write_text('[github]\nrepo = "owner/name"\n[monitor]\nlog_files = []\n')
+    config_path.write_text('[monitor]\nlog_files = []\n[[github.repos]]\nrepo = "owner/name"\n')
 
     result = runner.invoke(app, ["status", "--config", str(config_path)])
     assert result.exit_code == 1  # missing API key + token
     assert "maajun setup" in result.output
-    assert "GITHUB_TOKEN" in result.output or "gh auth login" in result.output
+    assert "maajun setup" in result.output
 
 
 def test_status_all_green(fake_keyring, tmp_path, monkeypatch):
     monkeypatch.setattr("maajun.cli.monitor.GitHubClient", _FakeGitHubClient)
-    monkeypatch.setenv("GITHUB_TOKEN", "ghp_test")
-    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test")
+    auth = AuthManager()
+    auth.set_api_key("deepseek", "sk-test")
+    auth.set_github_token("ghp_test")
 
     logf = tmp_path / "app.log"
     logf.write_text("")
     config_path = tmp_path / "config.toml"
     config_path.write_text(
         f'[ai]\nprovider = "deepseek"\n'
-        f'[github]\nrepo = "owner/name"\n'
+        f'[[github.repos]]\nrepo = "owner/name"\n'
         f'[monitor]\nlog_files = ["{logf}"]\n'
     )
 
@@ -234,9 +242,9 @@ def test_status_all_green(fake_keyring, tmp_path, monkeypatch):
     assert "Ready" in result.output
 
 
-def test_add_repo_migrates_and_appends(tmp_path):
+def test_add_repo_appends_to_the_list(tmp_path):
     config_path = tmp_path / "config.toml"
-    config_path.write_text('[github]\nrepo = "owner/first"\nmode = "suggest"\n')
+    config_path.write_text('[[github.repos]]\nrepo = "owner/first"\nmode = "suggest"\n')
 
     r1 = runner.invoke(
         app, ["add-repo", "owner/second", "-m", "fix", "--config", str(config_path)]
@@ -247,7 +255,6 @@ def test_add_repo_migrates_and_appends(tmp_path):
 
     cfg = Config.load(config_path)
     assert [rc.repo for rc in cfg.github.repos] == ["owner/first", "owner/second"]
-    assert cfg.github.repo == ""  # legacy scalar cleared
 
     bad = runner.invoke(app, ["add-repo", "not-a-repo", "--config", str(config_path)])
     assert bad.exit_code == 1
@@ -258,18 +265,13 @@ def test_reset_removes_everything(fake_keyring, tmp_path, monkeypatch):
     data_home = tmp_path / "data"
     monkeypatch.setenv("XDG_CONFIG_HOME", str(cfg_home))
     monkeypatch.setenv("XDG_DATA_HOME", str(data_home))
-    # Env vars take precedence over the keyring — clear any that leaked in.
-    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
-    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
-
-    from maajun.auth import AuthManager
 
     auth = AuthManager()
     auth.set_api_key("deepseek", "sk-test")
     auth.set_github_token("ghp_test")
 
     (cfg_home / "maajun").mkdir(parents=True)
-    (cfg_home / "maajun" / "config.toml").write_text('[github]\nrepo = "owner/name"\n')
+    (cfg_home / "maajun" / "config.toml").write_text('[[github.repos]]\nrepo = "owner/name"\n')
     (data_home / "maajun").mkdir(parents=True)
     (data_home / "maajun" / "incidents.db").write_text("")
 
@@ -288,9 +290,95 @@ def test_reset_cancels_without_confirmation(fake_keyring, tmp_path, monkeypatch)
     monkeypatch.setenv("XDG_CONFIG_HOME", str(cfg_home))
     monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
     (cfg_home / "maajun").mkdir(parents=True)
-    (cfg_home / "maajun" / "config.toml").write_text("[github]\n")
+    (cfg_home / "maajun" / "config.toml").write_text("")
 
     result = runner.invoke(app, ["reset"], input="no\n")
     assert result.exit_code == 0
     assert "Cancelled" in result.output
     assert (cfg_home / "maajun").exists()  # nothing deleted
+
+
+def test_an_old_format_config_is_a_clean_error_not_a_traceback(tmp_path):
+    """The [github] in the message must survive Rich, which reads it as a tag."""
+    config_path = tmp_path / "config.toml"
+    config_path.write_text('[github]\nrepo = "owner/name"\nmode = "fix"\n')
+
+    result = runner.invoke(app, ["status", "--config", str(config_path)])
+    assert result.exit_code == 1
+    assert "Traceback" not in result.output
+    assert "[github]" in flat(result.output)
+    assert "old single-repo format" in flat(result.output)
+    assert "maajun add-repo owner/name" in flat(result.output)
+
+
+def test_malformed_toml_is_a_clean_error_not_a_traceback(tmp_path):
+    config_path = tmp_path / "config.toml"
+    config_path.write_text("[github\n")
+
+    result = runner.invoke(app, ["incidents", "--config", str(config_path)])
+    assert result.exit_code == 1
+    assert "Traceback" not in result.output
+    assert "Could not read the config" in flat(result.output)
+
+
+def test_incidents_explains_an_outdated_database(tmp_path):
+    import sqlite3
+
+    data = tmp_path / "data"
+    data.mkdir()
+    conn = sqlite3.connect(data / "incidents.db")
+    conn.execute(
+        "CREATE TABLE incidents (fingerprint TEXT PRIMARY KEY, source TEXT NOT NULL,"
+        " message TEXT NOT NULL, first_seen TEXT NOT NULL, last_seen TEXT NOT NULL,"
+        " count INTEGER NOT NULL DEFAULT 1, status TEXT NOT NULL DEFAULT 'new',"
+        " branch TEXT, pr_url TEXT, cost_usd REAL DEFAULT 0,"
+        " prompt_tokens INTEGER DEFAULT 0, completion_tokens INTEGER DEFAULT 0)"
+    )
+    conn.commit()
+    conn.close()
+
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(f'[daemon]\nworkdir = "{data}"\n')
+
+    result = runner.invoke(app, ["incidents", "--config", str(config_path)])
+    assert result.exit_code == 1
+    assert "Traceback" not in result.output
+    assert "older version of maajun" in flat(result.output)
+    assert "Delete it to start a fresh one" in flat(result.output)
+
+
+def test_re_adding_a_repo_only_changes_what_you_pass(tmp_path):
+    """Regression: re-running add-repo to change the mode silently reverted the
+    base branch to "main" and dropped the test command."""
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(
+        '[[github.repos]]\nrepo = "acme/api"\nbase_branch = "develop"\n'
+        'mode = "fix"\ntest_command = "pytest -q"\n'
+        'log_files = ["/var/log/api.log"]\n'
+    )
+
+    result = runner.invoke(
+        app, ["add-repo", "acme/api", "-m", "suggest", "--config", str(config_path)]
+    )
+    assert result.exit_code == 0
+    assert "Updated acme/api" in result.output
+
+    from maajun.config import Config
+
+    entry = Config.load(config_path).github.repos[0]
+    assert entry.mode == "suggest"          # the one thing we asked to change
+    assert entry.base_branch == "develop"   # untouched
+    assert entry.test_command == "pytest -q"
+    assert entry.log_files == ["/var/log/api.log"]
+
+
+def test_a_new_repo_still_gets_the_documented_defaults(tmp_path):
+    config_path = tmp_path / "config.toml"
+    result = runner.invoke(app, ["add-repo", "acme/api", "--config", str(config_path)])
+    assert result.exit_code == 0
+    assert "Added acme/api" in result.output
+
+    from maajun.config import Config
+
+    entry = Config.load(config_path).github.repos[0]
+    assert (entry.base_branch, entry.mode, entry.log_files) == ("main", "suggest", [])

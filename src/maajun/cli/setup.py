@@ -9,12 +9,13 @@ from pathlib import Path
 import typer
 from rich.panel import Panel
 
-from maajun.auth import GITHUB_TOKEN_ENV, AuthManager
+from maajun.auth import AuthManager
 from maajun.cli._shared import (
     app,
     configured_providers,
     console,
     implemented_providers,
+    load_config,
     prompt_line,
     prompt_mode,
     prompt_secret,
@@ -25,7 +26,6 @@ from maajun.providers.base import ProviderType
 from maajun.providers.factory import ProviderFactory
 from maajun.utils import is_valid_repo
 from maajun.vcs import GitHubClient, GitHubError
-
 
 PROVIDER_SIGNUP_URLS = {
     "deepseek": "https://platform.deepseek.com",
@@ -126,10 +126,12 @@ def _setup_provider(
     if signup:
         console.print(f"  [dim]Get a key at {signup}[/dim]")
     if not ask.interactive:
-        env_var = f"{provider.upper()}_API_KEY"
+        # Keys live only in the keyring, and a key cannot be prompted for
+        # here — so an unattended run can configure repos and monitors on a
+        # machine that is already set up, but cannot bootstrap a fresh one.
         console.print(
-            f"[red]✗ No API key for {provider}. Set {env_var} or run "
-            "'maajun setup' interactively.[/red]"
+            f"[red]✗ No API key for {provider} in the keyring. Run "
+            "'maajun setup' interactively once to store one.[/red]"
         )
         raise typer.Exit(1)
 
@@ -157,10 +159,12 @@ def _store_api_key(auth: AuthManager, provider: str, key: str) -> None:
     try:
         auth.set_api_key(provider, key)
     except RuntimeError as e:
+        # The keyring is the only store, so this is fatal rather than a
+        # fallback — say so instead of implying the key was kept.
         console.print(
-            f"  [yellow]⚠ Could not use the keyring: {e}\n"
-            f"    Export it instead: {provider.upper()}_API_KEY=...[/yellow]"
+            f"  [red]✗ Could not store the key: {e}[/red]"
         )
+        raise typer.Exit(1) from e
 
 
 def _setup_github(
@@ -226,27 +230,19 @@ def _setup_github(
                 "unverified.[/yellow]"
             )
 
-    if existing and any(rc.repo == repo for rc in existing):
-        for repo_config in config.github.repos:
-            if repo_config.repo == repo:
-                repo_config.base_branch = branch
-                repo_config.mode = resolved_mode
-                repo_config.test_command = resolved_test_command
-        if not config.github.repos:  # legacy single-repo form
-            config.github.repo = repo
-            config.github.base_branch = branch
-            config.github.mode = resolved_mode
-            config.github.test_command = resolved_test_command
-    elif existing:
+    # Update the entry in place when this repo is already configured, rather
+    # than replacing it — setup never asks about log_files, so rebuilding the
+    # entry from these three answers would drop the ones already set.
+    entry = next((rc for rc in config.github.repos if rc.repo == repo), None)
+    if entry is not None:
+        entry.base_branch = branch
+        entry.mode = resolved_mode
+        entry.test_command = resolved_test_command
+    else:
         config.add_repo(RepoConfig(
             repo=repo, base_branch=branch, mode=resolved_mode,
             test_command=resolved_test_command,
         ))
-    else:
-        config.github.repo = repo
-        config.github.base_branch = branch
-        config.github.mode = resolved_mode
-        config.github.test_command = resolved_test_command
 
     _setup_github_token(auth, ask, repo, reconfigure=reconfigure)
 
@@ -254,14 +250,8 @@ def _setup_github(
 def _setup_github_token(
     auth: AuthManager, ask: _Asker, repo: str, *, reconfigure: bool
 ) -> None:
-    source = auth.github_token_source()
-    if source and not reconfigure:
-        described = {
-            "env": f"${GITHUB_TOKEN_ENV}",
-            "keyring": "the keyring",
-            "gh": "the gh CLI",
-        }[source]
-        console.print(f"  [green]✓[/green] GitHub token found in {described}")
+    if auth.has_github_token() and not reconfigure:
+        console.print("  [green]✓[/green] GitHub token already stored")
         _report_push_access(auth, repo)
         return
 
@@ -273,18 +263,15 @@ def _setup_github_token(
     token = ask.secret("GitHub token (input hidden, Enter to skip)")
     if not token:
         console.print(
-            f"  [yellow]⚠ No token — PRs will fail until you export "
-            f"{GITHUB_TOKEN_ENV} or run 'gh auth login'.[/yellow]"
+            "  [yellow]⚠ No token — PRs will fail until you re-run "
+            "'maajun setup' and provide one.[/yellow]"
         )
         return
     try:
         auth.set_github_token(token)
         console.print("  [green]✓[/green] Token stored")
     except RuntimeError as e:
-        console.print(
-            f"  [yellow]⚠ Could not use the keyring: {e}\n"
-            f"    Export it instead: {GITHUB_TOKEN_ENV}=...[/yellow]"
-        )
+        console.print(f"  [red]✗ Could not store the token: {e}[/red]")
         return
     _report_push_access(auth, repo)
 
@@ -396,7 +383,7 @@ def setup(
     path = config_path or default_config_path()
     ask = _Asker(interactive=not non_interactive)
     auth = AuthManager()
-    config = Config.load(path)
+    config = load_config(path)
 
     console.print(Panel(
         "[bold]Maajun setup[/bold]\n\n"
@@ -430,11 +417,12 @@ def setup(
 
 def _print_summary(config: Config, auth: AuthManager) -> None:
     repos = config.github.get_all_repos()
+    has_token = auth.has_github_token()
     sections, ok = build_status(
         config,
         provider=config.ai.provider,
         has_key=auth.has_api_key(config.ai.provider),
-        has_token=auth.has_github_token(),
+        has_token=has_token,
         repos=repos,
         network=None,
     )
