@@ -112,7 +112,7 @@ def setup(tmp_path, remote):
         monitors=[monitor],
         store=store,
         workspaces={"owner/name": workspace},
-        monitor_to_repo={monitor.name: repo_config},
+        monitor_to_repo={id(monitor): repo_config},
         github=github,
         agent_factory_for_repo=lambda rc, ws: lambda: agent,
     )
@@ -143,8 +143,10 @@ async def test_suggest_mode_files_an_issue(setup):
     assert "IndexError" in issue["title"]
     assert "Root cause" in issue["body"]
     assert "IndexError: list index out of range" in issue["body"]  # error details
-    assert store.get(fp)["pr_url"].endswith("/issues/1")
-    assert store.get(fp)["branch"] == ""
+    assert store.get(fp, "owner/name")["pr_url"].endswith("/issues/1")
+    assert store.get(fp, "owner/name")["branch"] == ""
+    # The incident is filed under the repo it was attributed to, not globally.
+    assert store.get(fp) is None
 
 
 async def test_suggest_mode_pushes_no_branch(setup):
@@ -165,7 +167,7 @@ async def test_suggest_mode_pushes_no_branch(setup):
 async def test_fix_mode_opens_a_pull_request_with_the_report_committed(setup):
     """Fix mode has a real diff, so it still gets a branch and a PR."""
     daemon, logfile, agent, github, store, remote = setup
-    daemon.monitor_to_repo[daemon.monitors[0].name].mode = "fix"
+    daemon.repo_for(daemon.monitors[0]).mode = "fix"
 
     with open(logfile, "a") as f:
         f.write(TRACEBACK)
@@ -187,7 +189,7 @@ async def test_fix_mode_opens_a_pull_request_with_the_report_committed(setup):
     assert show.returncode == 0
     assert "Root cause" in show.stdout
 
-    row = store.get(fp)
+    row = store.get(fp, "owner/name")
     assert row["status"] == "processed"
     assert row["pr_url"] == "https://github.com/owner/name/pull/1"
     assert row["branch"] == f"maajun/incident-{fp}"
@@ -228,7 +230,7 @@ async def test_failed_incident_is_marked_and_loop_survives(setup):
 async def test_fix_mode_commits_agent_changes(setup):
     daemon, logfile, agent, github, store, remote = setup
     # Update the repo config mode to "fix"
-    repo_config = daemon.monitor_to_repo[list(daemon.monitor_to_repo.keys())[0]]
+    repo_config = daemon.repo_for(daemon.monitors[0])
     repo_config.mode = "fix"
     workspace = daemon.workspaces["owner/name"]
     agent.edit_path = workspace.path / "main.py"
@@ -306,7 +308,7 @@ async def test_dry_run_skips_git_and_pr(setup):
 
 async def test_manual_report_opens_pr_and_reports_progress(setup):
     daemon, logfile, agent, github, store, remote = setup
-    repo_config = daemon.monitor_to_repo[next(iter(daemon.monitor_to_repo))]
+    repo_config = daemon.repo_for(daemon.monitors[0])
     phases: list[str] = []
 
     url = await daemon.handle_manual_report(
@@ -321,7 +323,7 @@ async def test_manual_report_opens_pr_and_reports_progress(setup):
 
 async def test_manual_report_dry_run_only_analyzes(setup):
     daemon, logfile, agent, github, store, remote = setup
-    repo_config = daemon.monitor_to_repo[next(iter(daemon.monitor_to_repo))]
+    repo_config = daemon.repo_for(daemon.monitors[0])
     phases: list[str] = []
 
     pr_url = await daemon.handle_manual_report(
@@ -391,7 +393,7 @@ async def test_shutdown_event_stops_daemon():
     SHUTDOWN_EVENT.clear()
 
     config = Config(
-        github=GitHubConfig(repo="owner/name", base_branch="main"),
+        github=GitHubConfig(repos=[RepoConfig(repo="owner/name", base_branch="main")]),
         monitor=MonitorConfig(log_files=["/dev/null"], poll_interval=9999),
     )
     workspace = GitWorkspace(Path("/tmp/ws"), "owner/name", remote_url="http://x")
@@ -444,7 +446,7 @@ def local_setup(tmp_path):
         monitors=[monitor],
         store=store,
         workspaces={"": LocalWorkspace(checkout)},
-        monitor_to_repo={monitor.name: repo_config},
+        monitor_to_repo={id(monitor): repo_config},
         github=None,
         agent_factory_for_repo=lambda rc, ws: lambda: agent,
         repo_configs=[repo_config],
@@ -624,7 +626,7 @@ async def test_dry_run_ignores_the_cap(setup):
 
 
 def _fix_mode(daemon, *, test_command: str = "") -> None:
-    repo_config = daemon.monitor_to_repo[daemon.monitors[0].name]
+    repo_config = daemon.repo_for(daemon.monitors[0])
     repo_config.mode = "fix"
     repo_config.test_command = test_command
 
@@ -697,7 +699,7 @@ async def test_tests_run_in_the_workspace_not_the_cwd(setup):
 async def test_suggest_mode_does_not_run_tests(setup):
     """There is no diff to verify, so don't spend the time."""
     daemon, logfile, agent, github, store, remote = setup
-    repo_config = daemon.monitor_to_repo[daemon.monitors[0].name]
+    repo_config = daemon.repo_for(daemon.monitors[0])
     repo_config.test_command = "echo SHOULD_NOT_RUN"
     phases: list[str] = []
     daemon.progress = phases.append
@@ -767,7 +769,7 @@ async def test_local_mode_without_git_history_omits_the_section(tmp_path):
         monitors=[monitor],
         store=IncidentStore(tmp_path / "work" / "i.db"),
         workspaces={"": LocalWorkspace(checkout)},
-        monitor_to_repo={monitor.name: repo_config},
+        monitor_to_repo={id(monitor): repo_config},
         github=None,
         agent_factory_for_repo=lambda rc, ws: lambda: agent,
         repo_configs=[repo_config],
@@ -889,3 +891,182 @@ async def test_cycle_limit_counts_failed_attempts_too(setup):
 
     attempted = [row for row in store.all() if row["status"] == "failed"]
     assert len(attempted) == 2
+
+
+# ---------------------------------------------------------------------------
+# Multi-repo: two repos, one daemon
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def multi_setup(tmp_path, remote):
+    """Two repos watching two log files, plus one log file they share.
+
+    Both clone the same bare remote — the test is about routing and
+    attribution, not about git.
+    """
+    shared_log = tmp_path / "shared.log"
+    api_log = tmp_path / "api.log"
+    for path in (shared_log, api_log):
+        path.write_text("")
+
+    api = RepoConfig(
+        repo="acme/api", base_branch="main", mode="suggest",
+        log_files=[str(shared_log), str(api_log)],
+    )
+    web = RepoConfig(
+        repo="acme/web", base_branch="main", mode="suggest",
+        log_files=[str(shared_log)],
+    )
+    config = Config(
+        github=GitHubConfig(repos=[api, web]),
+        monitor=MonitorConfig(poll_interval=1),
+        daemon=DaemonConfig(workdir=str(tmp_path / "work")),
+    )
+    store = IncidentStore(tmp_path / "work" / "incidents.db")
+    github = FakeGitHub()
+    monitors = [
+        LogFileMonitor(shared_log),   # -> acme/api
+        LogFileMonitor(api_log),      # -> acme/api
+        LogFileMonitor(shared_log),   # -> acme/web
+    ]
+    daemon = Daemon(
+        config,
+        monitors=monitors,
+        store=store,
+        workspaces={
+            "acme/api": GitWorkspace(
+                tmp_path / "work" / "ws", "acme/api", remote_url=str(remote)
+            ),
+            "acme/web": GitWorkspace(
+                tmp_path / "work" / "ws", "acme/web", remote_url=str(remote)
+            ),
+        },
+        monitor_to_repo={
+            id(monitors[0]): api, id(monitors[1]): api, id(monitors[2]): web,
+        },
+        github=github,
+        agent_factory_for_repo=lambda rc, ws: lambda: FakeAgent(),
+        repo_configs=[api, web],
+    )
+    return daemon, shared_log, api_log, github, store
+
+
+async def test_a_shared_log_file_files_an_issue_in_every_repo(multi_setup):
+    """Regression: the second repo's copy was dropped as an already-known error."""
+    daemon, shared_log, _, github, store = multi_setup
+
+    with open(shared_log, "a") as f:
+        f.write(TRACEBACK)
+
+    await daemon.poll_once()
+
+    assert sorted(issue["repo"] for issue in github.issues) == ["acme/api", "acme/web"]
+
+
+async def test_each_repos_incident_is_recorded_against_that_repo(multi_setup):
+    daemon, shared_log, _, github, store = multi_setup
+
+    with open(shared_log, "a") as f:
+        f.write(TRACEBACK)
+
+    handled = await daemon.poll_once()
+    fp = handled[0]
+
+    assert store.get(fp, "acme/api")["pr_url"] == "https://github.com/acme/api/issues/1"
+    assert store.get(fp, "acme/web")["pr_url"] == "https://github.com/acme/web/issues/2"
+
+
+async def test_an_error_in_one_repos_own_log_stays_in_that_repo(multi_setup):
+    daemon, _, api_log, github, store = multi_setup
+
+    with open(api_log, "a") as f:
+        f.write(TRACEBACK)
+
+    await daemon.poll_once()
+
+    assert [issue["repo"] for issue in github.issues] == ["acme/api"]
+
+
+async def test_the_issue_body_names_the_repo_the_error_was_attributed_to(multi_setup):
+    """`source` says which log file saw it, which is not the same thing."""
+    daemon, shared_log, _, github, store = multi_setup
+
+    with open(shared_log, "a") as f:
+        f.write(TRACEBACK)
+
+    await daemon.poll_once()
+
+    by_repo = {issue["repo"]: issue["body"] for issue in github.issues}
+    assert "- Repo: `acme/api`" in by_repo["acme/api"]
+    assert "- Repo: `acme/web`" in by_repo["acme/web"]
+    assert f"- Source: `logfile:{shared_log}`" in by_repo["acme/web"]
+
+
+async def test_notices_name_the_repo(multi_setup):
+    daemon, shared_log, _, github, store = multi_setup
+    notices = []
+    daemon.on_notice = lambda message, level: notices.append((level, message))
+
+    with open(shared_log, "a") as f:
+        f.write(TRACEBACK)
+
+    await daemon.poll_once()
+
+    assert "New error in acme/api:" in "\n".join(m for _, m in notices)
+    assert "New error in acme/web:" in "\n".join(m for _, m in notices)
+    assert "Issue opened for acme/web:" in "\n".join(m for _, m in notices)
+
+
+async def test_per_repo_mode_is_honoured_independently(multi_setup):
+    """acme/web in fix mode opens a PR; acme/api stays on issues."""
+    daemon, shared_log, _, github, store = multi_setup
+    daemon.repo_for(daemon.monitors[2]).mode = "fix"
+
+    with open(shared_log, "a") as f:
+        f.write(TRACEBACK)
+
+    await daemon.poll_once()
+
+    assert [issue["repo"] for issue in github.issues] == ["acme/api"]
+    assert [call["repo"] for call in github.calls] == ["acme/web"]
+
+
+async def test_one_repos_failure_does_not_block_the_other(multi_setup):
+    """A GitHub error for acme/api must not cost acme/web its issue."""
+    daemon, shared_log, _, github, store = multi_setup
+
+    async def create_issue(repo, *, title, body):
+        if repo == "acme/api":
+            raise RuntimeError("boom")
+        github.issues.append({"repo": repo, "title": title, "body": body})
+        return f"https://github.com/{repo}/issues/{len(github.issues)}"
+
+    github.create_issue = create_issue
+
+    with open(shared_log, "a") as f:
+        f.write(TRACEBACK)
+
+    handled = await daemon.poll_once()
+    fp = handled[0]
+
+    assert [issue["repo"] for issue in github.issues] == ["acme/web"]
+    assert store.get(fp, "acme/api")["status"] == "failed"
+    assert store.get(fp, "acme/web")["status"] == "processed"
+
+
+async def test_one_unwired_monitor_does_not_stop_the_others(multi_setup):
+    """A monitor with no repo is skipped, not allowed to abort the poll cycle."""
+    daemon, shared_log, api_log, github, store = multi_setup
+    orphan = LogFileMonitor(api_log)  # deliberately absent from monitor_to_repo
+    daemon.monitors = [orphan, *daemon.monitors]
+    notices = []
+    daemon.on_notice = lambda message, level: notices.append(message)
+
+    with open(shared_log, "a") as f:
+        f.write(TRACEBACK)
+
+    await daemon.poll_once()
+
+    assert sorted(issue["repo"] for issue in github.issues) == ["acme/api", "acme/web"]
+    assert any("is not usable" in message for message in notices)

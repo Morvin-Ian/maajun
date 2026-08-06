@@ -37,6 +37,12 @@ class ErrorEvent:
     details: str  # full traceback / log excerpt
     fingerprint: str = ""
     timestamp: str = field(default_factory=utcnow_iso)
+    # The repo this error is attributed to, as "owner/name". Monitors leave it
+    # empty: a log file does not know which repository it belongs to. The
+    # daemon stamps it from the monitor's configured repo before the event is
+    # recorded, so everything downstream — dedup, the incident row, the
+    # notice, the report — can name the repo instead of guessing from `source`.
+    repo: str = ""
 
     def __post_init__(self) -> None:
         if not self.fingerprint:

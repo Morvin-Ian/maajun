@@ -1,5 +1,3 @@
-"""Wiring — turn config plus stored credentials into a runnable Daemon."""
-
 from __future__ import annotations
 
 import logging
@@ -25,7 +23,7 @@ class _DaemonDeps:
         if not api_key:
             raise RuntimeError(
                 f"No API key for {config.ai.provider}. Run `maajun setup` "
-                f"or set {config.ai.provider.upper()}_API_KEY."
+                "to store one in the keyring."
             )
 
         workdir = Path(config.daemon.workdir).expanduser()
@@ -46,7 +44,7 @@ class _DaemonDeps:
             if not token:
                 raise RuntimeError(
                     "A repo is configured but there is no GitHub token. "
-                    "Run `maajun setup`, export GITHUB_TOKEN, or run `gh auth login`."
+                    "Run `maajun setup` to store one."
                 )
             self.token = token
             self.github = GitHubClient(token)
@@ -84,34 +82,49 @@ def _local_repo_path(config: Config) -> Path:
 
 def _build_monitors(
     config: Config, repos: list[RepoConfig], auth: AuthManager | None = None
-) -> tuple[list[Monitor], dict[str, RepoConfig]]:
+) -> tuple[list[Monitor], dict[int, RepoConfig]]:
     """Build monitors and map each to the repo whose PRs it should open.
 
-    `auth` supplies the GitHub Actions token, which lives in the keyring or the
-    environment — never in the config file.
+
+    legitimately watch the same log file, and name-keying silently collapsed
+    them onto whichever repo was configured last. The daemon owns every
+    monitor for its whole lifetime, so object identity is stable.
+
+    `auth` supplies the GitHub Actions token, which lives in the keyring —
+    never in the config file.
     """
     auth = auth or AuthManager()
     monitor_cfg = config.monitor
     monitors: list[Monitor] = []
-    monitor_to_repo: dict[str, RepoConfig] = {}
+    monitor_to_repo: dict[int, RepoConfig] = {}
     default_repo = repos[0] if repos else None
 
     def attach(monitor: Monitor, repo_config: RepoConfig | None) -> None:
         monitors.append(monitor)
         if repo_config is not None:
-            monitor_to_repo[monitor.name] = repo_config
+            monitor_to_repo[id(monitor)] = repo_config
+
+    # (log path, repo) pairs already watched. The same path can feed two
+    # different repos, but watching it twice *for one repo* just reads the
+    # file twice and throws the second copy away at the dedup step.
+    watched: set[tuple[str, str]] = set()
+
+    def attach_logfile(path: str, repo_config: RepoConfig | None) -> None:
+        key = (path, repo_config.repo if repo_config else "")
+        if key in watched:
+            log.debug("log file %s already watched for repo %s", *key)
+            return
+        watched.add(key)
+        attach(LogFileMonitor(path, **monitor_cfg.logfile_kwargs()), repo_config)
 
     # Global log_files attach to the first repo.
     for path in monitor_cfg.log_files:
-        attach(LogFileMonitor(path, **monitor_cfg.logfile_kwargs()), default_repo)
+        attach_logfile(path, default_repo)
 
     # Per-repo log_files attach to their own repo, in addition to the above.
     for repo_config in repos:
         for path in repo_config.log_files:
-            attach(
-                LogFileMonitor(path, **monitor_cfg.logfile_kwargs()),
-                repo_config,
-            )
+            attach_logfile(path, repo_config)
 
     # GitHub Actions. Silently skipped without a token: `status` reports it,
     # and one unusable monitor should not stop the log monitors from running.
@@ -123,7 +136,19 @@ def _build_monitors(
         )
     if actions_token:
         for repo in monitor_cfg.github_actions_repos:
-            matched = next((rc for rc in repos if rc.repo == repo), default_repo)
+            matched = next((rc for rc in repos if rc.repo == repo), None)
+            if matched is None:
+                matched = default_repo
+                # Without a [[github.repos]] entry there is no clone to analyze
+                # and no repo to file against, so the failures land on the first
+                # configured repo. Say so — this used to happen silently, and a
+                # typo in the slug quietly misfiled every CI failure.
+                log.warning(
+                    "monitor.github_actions_repos includes %s, which is not a "
+                    "configured repo; its failed runs will be filed against %s. "
+                    "Add it with 'maajun add-repo %s' to file them on itself.",
+                    repo, matched.repo if matched else "no repo", repo,
+                )
             attach(GitHubActionsMonitor(
                 actions_token,
                 repo,
@@ -135,10 +160,7 @@ def _build_monitors(
 
 
 def build_daemon(config: Config, auth: AuthManager | None = None) -> Daemon:
-    """Wire a Daemon from config + stored credentials.
-
-    Supports both legacy single-repo and new multi-repo configuration.
-    """
+    """Wire a Daemon from config + stored credentials."""
     auth = auth or AuthManager()
     deps = _DaemonDeps(config, auth)
     monitors, monitor_to_repo = _build_monitors(config, deps.repos, auth)

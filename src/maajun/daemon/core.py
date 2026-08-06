@@ -24,36 +24,17 @@ from maajun.vcs import CommandResult, GitHubClient, GitWorkspace
 log = logging.getLogger(__name__)
 
 SHUTDOWN_EVENT = asyncio.Event()
-
-# Advances a UI spinner's phase label ("Analyzing with AI", ...).
-ProgressCallback = Callable[[str], None]
-# Emits a user-facing line: (message, level) where level is one of
-# "info" | "success" | "warn" | "error".
-NoticeCallback = Callable[[str, str], None]
-
-
-def _noop(_: str) -> None:
-    pass
-
-
-
 # How many commits of history to offer the model for deploy blame.
 RECENT_COMMIT_LIMIT = 15
-
 LOCAL_REPO_LABEL = "(local)"
 
+ProgressCallback = Callable[[str], None]
+NoticeCallback = Callable[[str, str], None]
 
-class LocalWorkspace:
-    """Stands in for GitWorkspace when no GitHub repo is configured.
-
-    Only `path` is used: in local mode the pipeline analyzes a checkout that
-    is already on disk and writes its report beside the incident database, so
-    there is nothing to clone, branch, commit, or push.
-    """
-
-    def __init__(self, path: Path):
-        self.path = path
-        self.repo = LOCAL_REPO_LABEL
+# Used since None is not callable and the daemon's constructor requires a
+# callable for progress and notice.
+def no_operation(_: str) -> None:
+    pass
 
 
 def make_permission_policy(mode: str, workspace: Path) -> PermissionCallback | None:
@@ -73,6 +54,17 @@ def make_permission_policy(mode: str, workspace: Path) -> PermissionCallback | N
         return Path(path).expanduser().resolve().is_relative_to(root)
 
     return approve
+class LocalWorkspace:
+    """Stands in for GitWorkspace when no GitHub repo is configured.
+
+    Only `path` is used: in local mode the pipeline analyzes a checkout that
+    is already on disk and writes its report beside the incident database, so
+    there is nothing to clone, branch, commit, or push.
+    """
+
+    def __init__(self, path: Path):
+        self.path = path
+        self.repo = LOCAL_REPO_LABEL
 
 
 class Daemon:
@@ -83,7 +75,7 @@ class Daemon:
         monitors: list[Monitor],
         store: IncidentStore,
         workspaces: dict[str, GitWorkspace],
-        monitor_to_repo: dict[str, RepoConfig],
+        monitor_to_repo: dict[int, RepoConfig],
         github: GitHubClient | None,
         agent_factory_for_repo,
         repo_configs: list[RepoConfig] | None = None,
@@ -99,7 +91,9 @@ class Daemon:
             monitors: List of monitors to poll
             store: Incident deduplication store
             workspaces: Map of repo name -> GitWorkspace (or LocalWorkspace)
-            monitor_to_repo: Map of monitor name -> RepoConfig
+            monitor_to_repo: Map of id(monitor) -> RepoConfig. Keyed by object
+                identity so two repos can watch the same log file without one
+                overwriting the other;.
             github: GitHub API client, or None in local mode
             agent_factory_for_repo: (repo_config, workspace) -> () -> Agent
             repo_configs: Repos to act on, already normalized by _DaemonDeps
@@ -119,7 +113,7 @@ class Daemon:
         self.repo_configs = repo_configs or config.github.get_all_repos()
         self.report_dir = report_dir or Path(config.daemon.workdir).expanduser() / "reports"
         self.local_mode = local_mode
-        self.progress = progress or _noop
+        self.progress = progress or no_operation
         self.on_notice = on_notice
         # UTC day we have already warned about hitting the spend cap on.
         self._budget_warned_for = ""
@@ -131,12 +125,7 @@ class Daemon:
             self.on_notice(message, level)
 
     def _over_budget(self) -> bool:
-        """Whether today's spend has reached daemon.max_usd_per_day.
-
-        Checked before each incident, not after: the point is to refuse the
-        next AI call, and one incident's cost is only known once it is paid.
-        Warns once per day rather than on every skipped event.
-        """
+        """Whether today's spend has reached daemon.max_usd_per_day."""
         cap = self.config.daemon.max_usd_per_day
         if cap <= 0:
             return False
@@ -196,24 +185,29 @@ class Daemon:
         )
         return True
 
-    def _artifact_label(self, monitor: Monitor) -> str:
-        """What this monitor's incidents produce, for user-facing lines."""
+    def _artifact_label(self, repo_config: RepoConfig) -> str:
+        """What this repo's incidents produce, for user-facing lines."""
         if self.local_mode:
             return "Report written"
-        repo_config = self.monitor_to_repo.get(monitor.name)
-        if repo_config and repo_config.mode == "fix":
+        if repo_config.mode == "fix":
             return "PR opened"
         return "Issue opened"
 
-    def _get_repo_for_monitor(self, monitor_name: str) -> tuple[RepoConfig, GitWorkspace]:
-        """Get the repo config and workspace for a given monitor."""
-        repo_config = self.monitor_to_repo.get(monitor_name)
+    def repo_for(self, monitor: Monitor) -> RepoConfig:
+        """The repo a monitor's errors belong to."""
+        repo_config = self.monitor_to_repo.get(id(monitor))
         if repo_config is None:
-            raise ValueError(f"No repo configured for monitor: {monitor_name}")
+            raise ValueError(f"No repo configured for monitor: {monitor.name}")
+        return repo_config
+
+    def _workspace_for(self, repo_config: RepoConfig) -> GitWorkspace:
         workspace = self.workspaces.get(repo_config.repo)
         if not workspace:
             raise ValueError(f"No workspace for repo: {repo_config.repo}")
-        return repo_config, workspace
+        return workspace
+
+    def _repo_label(self, repo_config: RepoConfig) -> str:
+        return repo_config.repo or LOCAL_REPO_LABEL
 
     async def run(self, *, once: bool = False, dry_run: bool = False) -> None:
         log.info(
@@ -294,50 +288,76 @@ class Daemon:
 
         Shared by the polling loop and the --once flush so both paths dedup,
         mark failures, and send failure notifications identically.
+
+        A monitor that resolves to no repo or no workspace is skipped rather
+        than raised: with several repos in one daemon, one broken wiring must
+        not take the other repos' monitors down with it.
         """
+        try:
+            repo_config = self.repo_for(monitor)
+            workspace = self._workspace_for(repo_config)
+        except ValueError as exc:
+            log.error("skipping monitor %s: %s", monitor.name, exc)
+            self._notice(f"Monitor {monitor.name} is not usable: {exc}", "error")
+            return []
+        label = self._repo_label(repo_config)
         handled: list[str] = []
         for event in events:
+            # Attribute the error before it is recorded: the monitor knows
+            # which repo it was configured for, the event does not.
+            event.repo = repo_config.repo
             if not self.store.record(event):
-                log.debug("known error fp=%s", event.fingerprint)
+                log.debug("known error fp=%s repo=%s", event.fingerprint, label)
                 continue
             if not dry_run and (self._over_budget() or self._cycle_full()):
                 # Forget it so a later poll treats the error as new rather
                 # than silently dropping it forever.
-                self.store.forget(event.fingerprint)
+                self.store.forget(event.fingerprint, event.repo)
                 continue
-            log.info("new error fp=%s: %s", event.fingerprint, event.message)
-            self._notice(f"New error: {event.message[:80]}", "info")
+            log.info(
+                "new error fp=%s repo=%s: %s",
+                event.fingerprint, label, event.message,
+            )
+            self._notice(f"New error in {label}: {event.message[:80]}", "info")
             # Counted before the attempt, not after it succeeds: the limit
             # exists to bound AI calls, and a failed incident has already
             # made (and paid for) one.
             self._handled_this_cycle += 1
             try:
                 destination = await self.handle_incident(
-                    event, dry_run=dry_run, progress=self.progress
+                    event, repo_config, workspace,
+                    dry_run=dry_run, progress=self.progress,
                 )
                 handled.append(event.fingerprint)
                 if destination:
                     self._notice(
-                        f"{self._artifact_label(monitor)}: {destination}", "success"
+                        f"{self._artifact_label(repo_config)} for {label}: "
+                        f"{destination}",
+                        "success",
                     )
             except Exception as exc:
-                log.exception("incident fp=%s failed", event.fingerprint)
-                self._notice(f"Incident failed: {exc}", "error")
-                self.store.mark_failed(event.fingerprint)
+                log.exception("incident fp=%s repo=%s failed", event.fingerprint, label)
+                self._notice(f"Incident in {label} failed: {exc}", "error")
+                self.store.mark_failed(event.fingerprint, event.repo)
         return handled
 
     async def handle_incident(
         self,
         event: ErrorEvent,
+        repo_config: RepoConfig,
+        workspace: GitWorkspace,
         *,
         dry_run: bool = False,
-        progress: ProgressCallback = _noop,
+        progress: ProgressCallback = no_operation,
     ) -> str:
         """Analyze one error and publish it. Returns the issue or PR URL.
 
+        The repo and workspace are passed in by the caller, which knows the
+        monitor the event came from; they are not re-derived from the event.
+
         When dry_run=True, skips git/GitHub operations and prints the analysis.
         """
-        repo_config, workspace = self._get_repo_for_monitor(event.source)
+        event.repo = repo_config.repo
         prompt = ANALYZE_PROMPT.format(
             workspace=workspace.path,
             source=event.source,
@@ -368,11 +388,16 @@ class Daemon:
         repo_config: RepoConfig,
         *,
         dry_run: bool = False,
-        progress: ProgressCallback = _noop,
+        progress: ProgressCallback = no_operation,
     ) -> str:
         """Analyze a manually described issue. Returns the issue or PR URL."""
-        workspace = self.workspaces[repo_config.repo]
-        event = ErrorEvent(source="manual", message=description[:200], details=description)
+        workspace = self._workspace_for(repo_config)
+        event = ErrorEvent(
+            source="manual",
+            message=description[:200],
+            details=description,
+            repo=repo_config.repo,
+        )
         prompt = MANUAL_REPORT_PROMPT.format(
             workspace=workspace.path,
             description=description[:8000],
@@ -442,11 +467,11 @@ class Daemon:
 
         if dry_run:
             reports.print_dry_run(
-                dry_run_header, repo_config.repo or LOCAL_REPO_LABEL, report,
+                dry_run_header, self._repo_label(repo_config), report,
                 (prompt_tokens, completion_tokens, cost), dry_run_extra,
             )
             if forget_on_dry_run:
-                self.store.forget(event.fingerprint)
+                self.store.forget(event.fingerprint, event.repo)
             return ""
 
         if self.local_mode:
@@ -483,6 +508,7 @@ class Daemon:
 
         self.store.mark_processed(
             event.fingerprint,
+            event.repo,
             branch=recorded_branch,
             pr_url=url,
             cost_usd=cost,
@@ -514,6 +540,7 @@ class Daemon:
         report_path = reports.write_report_file(self.report_dir, event, report)
         self.store.mark_processed(
             event.fingerprint,
+            event.repo,
             branch="",
             pr_url=str(report_path),
             cost_usd=cost,
