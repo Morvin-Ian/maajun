@@ -333,3 +333,40 @@ def test_incidents_explains_an_outdated_database(tmp_path):
     assert "Traceback" not in result.output
     assert "older version" in result.output
     assert "Delete it" in result.output
+
+
+def test_re_adding_a_repo_only_changes_what_you_pass(tmp_path):
+    """Regression: re-running add-repo to change the mode silently reverted the
+    base branch to "main" and dropped the test command."""
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(
+        '[[github.repos]]\nrepo = "acme/api"\nbase_branch = "develop"\n'
+        'mode = "fix"\ntest_command = "pytest -q"\n'
+        'log_files = ["/var/log/api.log"]\n'
+    )
+
+    result = runner.invoke(
+        app, ["add-repo", "acme/api", "-m", "suggest", "--config", str(config_path)]
+    )
+    assert result.exit_code == 0
+    assert "Updated acme/api" in result.output
+
+    from maajun.config import Config
+
+    entry = Config.load(config_path).github.repos[0]
+    assert entry.mode == "suggest"          # the one thing we asked to change
+    assert entry.base_branch == "develop"   # untouched
+    assert entry.test_command == "pytest -q"
+    assert entry.log_files == ["/var/log/api.log"]
+
+
+def test_a_new_repo_still_gets_the_documented_defaults(tmp_path):
+    config_path = tmp_path / "config.toml"
+    result = runner.invoke(app, ["add-repo", "acme/api", "--config", str(config_path)])
+    assert result.exit_code == 0
+    assert "Added acme/api" in result.output
+
+    from maajun.config import Config
+
+    entry = Config.load(config_path).github.repos[0]
+    assert (entry.base_branch, entry.mode, entry.log_files) == ("main", "suggest", [])
