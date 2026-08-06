@@ -15,6 +15,13 @@ from maajun.providers.base import ProviderType
 from maajun.utils import PLACEHOLDER_REPO, is_valid_repo
 
 _LIST_SEP = ","
+LEGACY_GITHUB_SCALARS = ("repo", "base_branch", "mode", "test_command")
+_PER_REPO_FIELDS = ("base_branch", "mode", "log_files", "test_command")
+
+
+class ConfigError(ValueError):
+    """A config file that cannot be used as written."""
+
 
 STARTER_CONFIG = """\
 # Maajun daemon configuration.
@@ -23,15 +30,18 @@ STARTER_CONFIG = """\
 provider = "deepseek"
 # thinking_mode = true
 
-[github]
-# Repository the daemon documents errors in and opens PRs against, as
-# "owner/name". Optional: left empty, maajun analyzes errors and writes
-# reports under daemon.workdir instead of opening pull requests.
-repo = ""
-base_branch = "main"
+# Repositories the daemon documents errors in and opens PRs against. One
+# [[github.repos]] entry each, added with `maajun add-repo owner/name`.
+# Optional: with no entries, maajun analyzes errors and writes reports under
+# daemon.workdir instead of opening pull requests.
+# [[github.repos]]
+# repo = "owner/name"
+# base_branch = "main"
 # "suggest": a GitHub issue with the incident report and suggested fix.
 # "fix": the agent also edits code in its isolated clone and opens a PR.
-mode = "suggest"
+# mode = "suggest"
+# Log files watched for this repo, on top of the global monitor.log_files.
+# log_files = ["/var/log/myapp/error.log"]
 # Run after a fix-mode edit to verify it; the result goes in the PR body.
 # test_command = "pytest -q"
 
@@ -54,7 +64,7 @@ poll_interval = 30
 [daemon]
 # Where clones, the incident database, and state live.
 # workdir = "~/.local/share/maajun"
-# Local checkout to analyze when github.repo is empty (default: cwd).
+# Local checkout to analyze when no repositories are configured (default: cwd).
 # repo_path = "/srv/myapp"
 # Stop analyzing once this much has been spent in a UTC day (0 = no cap).
 # max_usd_per_day = 5.0            # default: 5.0
@@ -82,10 +92,8 @@ def default_data_dir() -> Path:
 
 class AIProviderConfig(_Base):
     provider: str = ProviderType.DEEPSEEK.value
-    model: str | None = None  # None -> provider default
+    model: str | None = None  
     api_key: str | None = None
-    # Override the provider's endpoint, for an OpenAI-compatible gateway
-    # (a proxy, a self-hosted server, a router). None -> the provider's own.
     base_url: str | None = None
     temperature: float = 0.3
     max_tokens: int = 4096
@@ -101,17 +109,10 @@ class AIProviderConfig(_Base):
 
 
 class RepoConfig(_Base):
-    """Configuration for a single repository."""
     repo: str = ""  # "owner/name"
     base_branch: str = "main"
-    # "suggest": the PR contains only the analysis report.
-    # "fix": the agent may also edit code inside the workspace.
     mode: str = "suggest"
-    # Log files watched for this repo, in addition to the global
-    # monitor.log_files (which attach to the first configured repo).
     log_files: list[str] = Field(default_factory=list)
-    # Shell command run in the workspace after a fix-mode edit, to verify it.
-    # Its result goes in the PR body. Empty means no verification.
     test_command: str = ""
 
     @field_validator("mode")
@@ -130,40 +131,17 @@ class RepoConfig(_Base):
 
 
 class GitHubConfig(_Base):
-    """GitHub configuration. Supports single repo (legacy) or multiple repos."""
-    repo: str = ""  # Legacy: single repo "owner/name"
-    base_branch: str = "main"
-    mode: str = "suggest"
-    test_command: str = ""
-    # Multiple repos with per-repo log file mapping (supersedes the scalars above).
+    """GitHub configuration: a list of repositories, each with its own settings.
+
+    A repository is always an entry in `repos`, even when there is only one.
+    The older form — `repo`/`base_branch`/`mode` as scalars directly under
+    [github] — is not read at all; reject_legacy_github refuses it at load.
+    """
+
     repos: list[RepoConfig] = Field(default_factory=list)
 
-    @field_validator("mode")
-    @classmethod
-    def validate_mode(cls, value: str) -> str:
-        if value not in ("suggest", "fix"):
-            raise ValueError('mode must be "suggest" or "fix"')
-        return value
-
-    @field_validator("repo")
-    @classmethod
-    def validate_repo(cls, value: str) -> str:
-        if value and not is_valid_repo(value):
-            raise ValueError('repo must be in "owner/name" form')
-        return value
-
     def get_all_repos(self) -> list[RepoConfig]:
-        """Get all configured repos, normalizing legacy single-repo format."""
-        if self.repos:
-            return self.repos
-        if self.repo:
-            return [RepoConfig(
-                repo=self.repo,
-                base_branch=self.base_branch,
-                mode=self.mode,
-                test_command=self.test_command,
-            )]
-        return []
+        return self.repos
 
 
 class MonitorConfig(_Base):
@@ -180,8 +158,7 @@ class MonitorConfig(_Base):
     # Emit nothing until burst_threshold events land within the window.
     burst_threshold: int = 1
     burst_window_seconds: float = 60.0
-    # Repos to poll for failed workflow runs. The GitHub token comes from
-    # the keyring/environment, never from this file.
+    # Repos to poll for failed workflow runs. 
     github_actions_repos: list[str] = Field(default_factory=list)
 
     @property
@@ -197,7 +174,6 @@ class MonitorConfig(_Base):
         )
 
     def logfile_kwargs(self) -> dict:
-        """Detection settings shared by every shorthand logfile monitor."""
         return dict(
             error_pattern=self.error_pattern,
             json_level_field=self.json_level_field,
@@ -210,17 +186,8 @@ class MonitorConfig(_Base):
 
 class DaemonConfig(_Base):
     workdir: str = str(default_data_dir())
-    # Local checkout to analyze when no GitHub repo is configured.
-    # Empty means the current working directory.
     repo_path: str = ""
-    # Stop analyzing once this much has been spent in a UTC day. 0 = no cap.
-    # An unattended daemon plus a log that starts emitting novel errors is
-    # otherwise an unbounded bill, so this defaults to a ceiling rather than
-    # to off: the first surprise should be a paused daemon, not an invoice.
     max_usd_per_day: float = 5.0
-    # Most incidents to analyze in a single poll cycle. 0 = unlimited. Bounds
-    # the burst the daily cap can't: fifty novel errors at once would otherwise
-    # be fifty back-to-back AI calls.
     max_incidents_per_cycle: int = 10
 
 
@@ -242,6 +209,7 @@ class Config(_Base):
             return config
         with open(path, "rb") as f:
             data = tomllib.load(f)
+        reject_legacy_github(data, path)
         loaded = cls.model_validate(data)
         loaded._path = path
         return loaded
@@ -271,11 +239,9 @@ class Config(_Base):
         ai["thinking_mode"] = self.ai.thinking_mode
 
         github = _table(doc, "github")
+        for legacy in LEGACY_GITHUB_SCALARS:
+            github.pop(legacy, None)
         if self.github.repos:
-            # Multi-repo mode: replace any legacy scalar keys with an
-            # array-of-tables so the two representations never coexist.
-            for legacy in ("repo", "base_branch", "mode"):
-                github.pop(legacy, None)
             repos_table = tomlkit.aot()
             for repo_config in self.github.repos:
                 repo_table = tomlkit.table()
@@ -287,16 +253,13 @@ class Config(_Base):
                 if repo_config.test_command:
                     repo_table["test_command"] = repo_config.test_command
                 repos_table.append(repo_table)
+            # Trailing blank line, or the table that follows in the document
+            # ends up butted directly against the last repo entry.
+            repos_table[-1].add(tomlkit.nl())
             github["repos"] = repos_table
         else:
+            # Local mode: no repos at all, rather than a repo spelled "".
             github.pop("repos", None)
-            # Write the repo as-is. Substituting PLACEHOLDER_REPO for an empty
-            # value used to read back as a *configured* repo, so the daemon
-            # went looking for a token to push to a repository nobody owns.
-            github["repo"] = self.github.repo
-            github["base_branch"] = self.github.base_branch
-            github["mode"] = self.github.mode
-            _set_or_del(github, "test_command", self.github.test_command or None)
 
         monitor = _table(doc, "monitor")
         monitor["log_files"] = self.monitor.log_files
@@ -327,23 +290,14 @@ class Config(_Base):
         self._path = path
 
     def add_repo(self, repo: "RepoConfig") -> None:
-        """Append a repo, migrating a legacy single-repo config into the list.
+        for index, existing in enumerate(self.github.repos):
+            if existing.repo == repo.repo:
+                self.github.repos = [
+                    *self.github.repos[:index], repo, *self.github.repos[index + 1:]
+                ]
+                return
+        self.github.repos = [*self.github.repos, repo]
 
-        Replaces an existing entry with the same `repo` name instead of
-        duplicating it.
-        """
-        if not self.github.repos and self.github.repo:
-            self.github.repos = [RepoConfig(
-                repo=self.github.repo,
-                base_branch=self.github.base_branch,
-                mode=self.github.mode,
-                test_command=self.github.test_command,
-            )]
-            self.github.repo = ""
-        existing = [rc for rc in self.github.repos if rc.repo != repo.repo]
-        self.github.repos = [*existing, repo]
-
-    # -- dot-notation get/set ------------------------------------------------
 
     def _resolve(self, key: str) -> tuple[BaseModel, str]:
         """Map a dotted key to (owning model, field name). Raises ValueError
@@ -374,30 +328,137 @@ class Config(_Base):
             raise ValueError(f"Unknown field: {key}")
         return obj, field_name
 
-    def set(self, key: str, value: str) -> None:
+    def _resolve_repo_field(self, key: str) -> str:
+        """Validate a dotted key as a per-repo field and return the field name."""
+        section, _, field_name = key.partition(".")
+        if section != "github" or not field_name:
+            raise ValueError(f"--repo applies to github.* keys only; got '{key}'.")
+        settable = [name for name in RepoConfig.model_fields if name != "repo"]
+        if field_name not in settable:
+            raise ValueError(
+                f"Unknown per-repo field: {field_name}. "
+                f'Expected one of: {", ".join(settable)}.'
+            )
+        return field_name
+
+    def _repo_entry(self, repo: str) -> "RepoConfig":
+        """The RepoConfig for `repo`, or a ValueError naming how to add it."""
+        entry = next((rc for rc in self.github.repos if rc.repo == repo), None)
+        if entry is None:
+            raise ValueError(
+                f"Repository '{repo}' is not configured. "
+                f"Add it with 'maajun add-repo {repo}'."
+            )
+        return entry
+
+    def _per_repo_key(self, key: str) -> str | None:
+        """The RepoConfig field a bare `github.<field>` key refers to, if any.
+
+        `github.mode` and friends have no top-level scalar to write any more —
+        they name a field that exists once per repository — so they are handled
+        before _resolve, which would otherwise reject them as unknown.
+        """
+        section, _, field_name = key.partition(".")
+        if section != "github":
+            return None
+        return field_name if field_name in _PER_REPO_FIELDS else None
+
+    def set(self, key: str, value: str, repo: str | None = None) -> None:
         """Set a config value using dot notation (e.g. 'github.mode' = 'fix').
+
+        With `repo`, the value is written to that repository's entry only.
+        Without it, a per-repo github.* field is applied to every configured
+        repository, so one command still covers the common case.
 
         The value is type-coerced and validated by the model's validators;
         an invalid value raises ValueError.
         """
-        obj, field_name = self._resolve(key)
-        _set_field(obj, field_name, value)
-        # Keep per-repo modes aligned when the top-level mode is set.
-        if obj is self.github and field_name == "mode":
-            for rc in self.github.repos:
-                rc.mode = value
+        if repo is not None:
+            field_name = self._resolve_repo_field(key)
+            _set_field(self._repo_entry(repo), field_name, value)
+            return
 
-    def get(self, key: str) -> str:
+        field_name = self._per_repo_key(key)
+        if field_name is not None:
+            if not self.github.repos:
+                raise ValueError(
+                    f"No repositories are configured, so {key} has nothing to "
+                    "apply to. Add one with 'maajun add-repo <owner/name>'."
+                )
+            for repo_config in self.github.repos:
+                _set_field(repo_config, field_name, value)
+            return
+
+        obj, field_name = self._resolve(key)
+        if obj is self.github and field_name == "repos":
+            raise ValueError(
+                "github.repos is a list of repositories, not a single value. "
+                "Use 'maajun add-repo <owner/name>' to add one."
+            )
+        _set_field(obj, field_name, value)
+
+    def get(self, key: str, repo: str | None = None) -> str:
         """Get a config value using dot notation. Secrets are masked."""
+        if repo is not None:
+            field_name = self._resolve_repo_field(key)
+            return _render_value(getattr(self._repo_entry(repo), field_name))
+
+        field_name = self._per_repo_key(key)
+        if field_name is not None:
+            repos = self.github.repos
+            if not repos:
+                return ""
+            if len(repos) == 1:
+                return _render_value(getattr(repos[0], field_name))
+            # Several repos can disagree, so name which value belongs to which.
+            return ", ".join(
+                f"{rc.repo}={_render_value(getattr(rc, field_name))}" for rc in repos
+            )
+
         obj, field_name = self._resolve(key)
         if field_name == "api_key" and getattr(obj, field_name):
             return "***"
-        val = getattr(obj, field_name)
-        if isinstance(val, list):
-            if val and isinstance(val[0], RepoConfig):
-                return ", ".join(repo_config.repo for repo_config in val)
-            return ", ".join(str(v) for v in val)
-        return "" if val is None else str(val)
+        return _render_value(getattr(obj, field_name))
+
+
+def reject_legacy_github(data: dict, path: Path) -> None:
+    """Refuse the pre-multi-repo [github] shape rather than ignoring it.
+
+    Raised at load time so the failure names the file and the fix, instead of
+    surfacing later as a daemon that mysteriously opens no pull requests.
+    """
+    github = data.get("github")
+    if not isinstance(github, dict):
+        return
+    present = [key for key in LEGACY_GITHUB_SCALARS if key in github]
+    if not present:
+        return
+
+    keys = ", ".join(present)
+    verb = "is" if len(present) == 1 else "are"
+    repo = github.get("repo")
+    if repo:
+        fix = f"Run: maajun add-repo {repo}"
+    else:
+        # repo = "" was how the old format spelled local mode; that is now
+        # simply the absence of any [[github.repos]] entry.
+        fix = (
+            "Delete those keys — local mode is now just a config with no "
+            "[[github.repos]] entry."
+        )
+    raise ConfigError(
+        f"{path}: [github] {keys} {verb} the old single-repo format, which is "
+        f"no longer supported.\n{fix}"
+    )
+
+
+def _render_value(val) -> str:
+    """A config value as the CLI shows it: lists joined, None as empty."""
+    if isinstance(val, list):
+        if val and isinstance(val[0], RepoConfig):
+            return ", ".join(repo_config.repo for repo_config in val)
+        return ", ".join(str(v) for v in val)
+    return "" if val is None else str(val)
 
 
 def _table(parent, name: str):
@@ -497,15 +558,16 @@ def render_config(config: "Config") -> str:
             parts.append(f'    repo = [green]"{repo_config.repo}"[/green]')
             parts.append(f'    base_branch = [green]"{repo_config.base_branch}"[/green]')
             parts.append(f'    mode = [green]"{repo_config.mode}"[/green]')
+            if repo_config.test_command:
+                parts.append(
+                    f'    test_command = [green]"{repo_config.test_command}"[/green]'
+                )
             if repo_config.log_files:
                 parts.append(f"    log_files = [green]{repo_config.log_files}[/green]")
-    elif config.github.repo:
-        parts.append(f'  repo = [green]"{config.github.repo}"[/green]')
-        parts.append(f'  base_branch = [green]"{config.github.base_branch}"[/green]')
-        parts.append(f'  mode = [green]"{config.github.mode}"[/green]')
     else:
         parts.append(
-            f'  repo = [yellow]"{PLACEHOLDER_REPO}"[/yellow] [dim](not configured)[/dim]'
+            f'  [dim]no repositories — add one with[/dim] '
+            f"maajun add-repo [yellow]{PLACEHOLDER_REPO}[/yellow]"
         )
 
     parts.append("\n[bold cyan]\\[monitor][/bold cyan]")

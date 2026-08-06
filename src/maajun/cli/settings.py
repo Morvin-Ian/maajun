@@ -12,6 +12,7 @@ from maajun.cli._shared import (
     app,
     configured_providers,
     console,
+    load_config,
     prompt_line,
 )
 from maajun.config import (
@@ -74,36 +75,47 @@ def _command_summaries(ctx: typer.Context) -> list[tuple[str, str]]:
 def config(
     key: str | None = typer.Argument(None, help="Config key (e.g., 'github.mode')"),
     value: str | None = typer.Argument(None, help="Value to set"),
+    repo: str | None = typer.Option(
+        None, "--repo", "-r",
+        help="Apply a github.* key to this repository only (owner/name)",
+    ),
     config_path: Path | None = typer.Option(None, "--config", "-c", help="Config file location"),
 ):
     """View or set configuration values.
 
+    A github.* key with no --repo applies to every configured repository, so
+    one command still covers the common case of wanting the same setting
+    everywhere.
+
     Examples:
       maajun config                      # Show all config
       maajun config github.mode          # Show mode
-      maajun config github.mode fix      # Set mode to fix
+      maajun config github.mode fix      # Set mode to fix, on every repo
+      maajun config github.mode fix -r acme/api          # ...on one repo
+      maajun config github.test_command "pytest -q" -r acme/api
       maajun config monitor.log_files /var/log/app/error.log,/var/log/app2/error.log
     """
-    config = Config.load(config_path)
+    config = load_config(config_path)
 
     if key is None:
         console.print(Panel("[bold]Current Configuration[/bold]", border_style="blue"))
         console.print(render_config(config))
         return
 
+    scope = f" [dim](repo: {repo})[/dim]" if repo else ""
     if value is None:
         try:
-            val = config.get(key)
-            console.print(f"[green]{key}[/green] = [bold]{val}[/bold]")
+            val = config.get(key, repo)
+            console.print(f"[green]{key}[/green] = [bold]{val}[/bold]{scope}")
         except ValueError as e:
             console.print(f"[red]✗ {e}[/red]")
             raise typer.Exit(1) from e
         return
 
     try:
-        config.set(key, value)
+        config.set(key, value, repo)
         config.save(config_path)
-        console.print(f"[green]✓ Set {key} = {value}[/green]")
+        console.print(f"[green]✓ Set {key} = {value}[/green]{scope}")
     except ValueError as e:
         console.print(f"[red]✗ {e}[/red]")
         raise typer.Exit(1) from e
