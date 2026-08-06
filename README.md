@@ -70,21 +70,21 @@ maajun watch             # run the daemon
 
 `setup` asks for the provider and its key, then offers GitHub, log files, and
 GitHub Actions in turn — each skippable with Enter, so a minimal install is a key and a log
-path. It detects the repo from your `origin` remote, reuses an existing
-`GITHUB_TOKEN` or `gh auth login` session, and re-runs safely: every prompt
-defaults to your current configuration.
+path. It detects the repo from your `origin` remote, and re-runs safely: every
+prompt defaults to your current configuration.
 
-For unattended setup, every prompt has a flag and secrets come from the
-environment:
+Every prompt also has a flag, so once a key is in the keyring the rest can be
+reconfigured unattended:
 
 ```bash
-DEEPSEEK_API_KEY=... GITHUB_TOKEN=... \
-  maajun setup --non-interactive --repo you/yourapp --logs /var/log/app/error.log
+maajun setup --non-interactive --repo you/yourapp --logs /var/log/app/error.log
 
-OPENAI_API_KEY=... GITHUB_TOKEN=... \
-  maajun setup --non-interactive --provider openai --repo you/yourapp \
-    --logs /var/log/app/error.log
+maajun setup --non-interactive --provider openai --repo you/yourapp \
+  --logs /var/log/app/error.log
 ```
+
+`--non-interactive` cannot store a *new* API key — there is nowhere to prompt —
+so run `maajun setup` interactively once per machine first.
 
 Without a configured repo, maajun runs in **local mode**: errors are still
 detected and analyzed, but each report is written to
@@ -163,7 +163,6 @@ during `maajun setup`.
 | Default model | `deepseek-v4-flash` | `gpt-4o-mini` |
 | With `ai.thinking_mode` | `deepseek-v4-pro` | `gpt-4o` |
 | API key | [platform.deepseek.com](https://platform.deepseek.com) | [platform.openai.com/api-keys](https://platform.openai.com/api-keys) |
-| Environment variable | `DEEPSEEK_API_KEY` | `OPENAI_API_KEY` |
 
 Switch at any time — the key for each provider is stored separately, so moving
 back and forth costs nothing:
@@ -187,7 +186,8 @@ edits it in place with validation and comment preservation:
 ```bash
 maajun config                      # print the whole config (secrets masked)
 maajun config github.mode          # print one value
-maajun config github.mode fix      # set a value
+maajun config github.mode fix      # set a value (every repo, if several)
+maajun config github.mode fix -r team/api    # ...or just one of them
 ```
 
 A minimal config:
@@ -198,8 +198,10 @@ provider = "deepseek"         # or "openai"
 # model = "gpt-4o-mini"       # provider default if omitted
 # thinking_mode = true        # use the provider's reasoning model
 
-[github]
-repo = "owner/name"           # "" for local mode
+# One [[github.repos]] entry per repository, added with `maajun add-repo`.
+# Omit the section entirely for local mode.
+[[github.repos]]
+repo = "owner/name"
 base_branch = "main"
 mode = "suggest"
 # test_command = "pytest -q"  # verifies a fix-mode edit; result goes in the PR
@@ -219,9 +221,15 @@ the daemon refuses to start with nothing to watch. See the
 [monitoring guide](https://github.com/Morvin-Ian/maajun/blob/main/docs/monitoring.md)
 for every key, detection tuning, and multi-repo setups.
 
-Credentials are never stored in this file. Environment variables win
-(`DEEPSEEK_API_KEY`, `OPENAI_API_KEY`, `GITHUB_TOKEN`); otherwise keys are read
-from the OS keyring under the service name `maajun`.
+Credentials are never stored in this file. Keys and tokens are read only
+from the OS keyring, under the service name `maajun` — `maajun setup` puts them
+there. Nothing else is consulted — not environment variables, and not a
+`gh auth login` session — so there is exactly one place to look when `status`
+and the daemon disagree, and the token maajun pushes with cannot change without
+maajun being told.
+
+This means maajun needs a working keyring backend. On a headless server,
+install one (`keyrings.alt`, `gnome-keyring`) before running `setup`.
 
 ## Commands
 
@@ -231,8 +239,8 @@ from the OS keyring under the service name `maajun`.
 | `maajun status` | Preflight check of credentials, repo access, and monitors |
 | `maajun watch` | Run the monitoring daemon (`--once`, `--dry-run`, `-m`) |
 | `maajun report "…"` | Investigate an issue you describe, on demand |
-| `maajun incidents` | List handled incidents with status, cost, and links |
-| `maajun config [KEY] [VALUE]` | View or change settings |
+| `maajun incidents` | List handled incidents with repo, status, cost, and links |
+| `maajun config [KEY] [VALUE]` | View or change settings (`--repo` for one repo) |
 | `maajun add-repo OWNER/NAME` | Watch an additional repository |
 | `maajun provider-list` | Show provider support and stored keys |
 | `maajun sign-out` | Clear stored credentials |

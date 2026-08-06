@@ -194,8 +194,10 @@ either fully published or untouched, never half-done.
 
 - The GitHub token is passed to git via `GIT_ASKPASS`, so it never
   appears in remote URLs, `.git/config`, or the process list.
-- Secrets live in the OS keyring; on headless servers, environment
-  variables (`GITHUB_TOKEN`, `DEEPSEEK_API_KEY`) take precedence.
+- Secrets live in the OS keyring and are read from nowhere else — no
+  environment variables, and no shelling out to `gh` — so a credential
+  cannot be injected into a running daemon's process environment, and the
+  token it pushes with cannot change without maajun being told.
 - The daemon's agent never touches your running application — it works
   in its own clone under the daemon workdir.
 - `bash` is never available to the daemon's agent, in any mode.

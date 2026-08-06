@@ -31,10 +31,13 @@ provider = "deepseek"
 # temperature = 0.3
 # max_tokens = 4096
 
-[github]
-repo = "owner/name"           # repository maajun reports to; "" for local mode
+# One entry per repository — add them with `maajun add-repo owner/name`.
+# Omit the section entirely for local mode.
+[[github.repos]]
+repo = "owner/name"           # repository maajun reports to
 base_branch = "main"          # branch PRs target
 mode = "suggest"              # "suggest" or "fix" — see Modes below
+# log_files = ["/var/log/api/error.log"]   # watched for this repo only
 # test_command = "pytest -q"  # verifies a fix-mode edit; result goes in the PR
 
 [monitor]
@@ -89,9 +92,7 @@ maajun add-repo team/api -m fix -l /var/log/api/error.log
 maajun add-repo team/web -l /var/log/web/error.log
 ```
 
-The first `add-repo` migrates a single-repo config into a
-`[[github.repos]]` list; each entry maps its own log files to its own
-repo:
+Each entry maps its own log files to its own repo:
 
 ```toml
 [[github.repos]]
@@ -108,10 +109,42 @@ log_files = ["/var/log/web/error.log"]
 ```
 
 Each monitor's errors open PRs on the repo it's attached to. Any global
-`monitor.log_files` (and a GitHub Actions monitor whose repo isn't in the
-list) attach to the **first** configured repo. Legacy single-repo
-configs keep working unchanged — you only opt into the list by adding a
-second repo.
+`monitor.log_files` attach to the **first** configured repo, as does a
+GitHub Actions monitor whose repo isn't in the list — that fallback is
+logged as a warning, since a typo in the slug would otherwise misfile
+every CI failure without a trace.
+
+`[[github.repos]]` is the only supported form, including for a single
+repository. A config using the older scalars (`repo`, `base_branch`,
+`mode` directly under `[github]`) is rejected at startup with the
+`add-repo` command that fixes it — rather than loading as "no repo
+configured" and quietly writing reports to disk.
+
+Two repos may list the **same** log file, and each gets its own issue or
+PR for what it finds there. Incidents are recorded per repo, so a
+traceback that both services share is not swallowed as a duplicate of the
+first one seen — see [deduplication](#deduplication).
+
+To change one repo's settings later, pass `--repo` to `config`; without
+it, a `github.*` key applies to every configured repo:
+
+```bash
+maajun config github.mode fix                          # all repos
+maajun config github.test_command "pytest -q" -r team/api   # one repo
+```
+
+### Which repo an error belongs to
+
+Errors are attributed to a repo when they are recorded, not guessed from
+the log path later. The repo appears in:
+
+- `maajun incidents` — a **Repo** column once more than one repo has
+  incidents, and `--repo owner/name` to filter
+- the `repo` column of `incidents.db`
+- the issue/PR body and the report file, as a `Repo:` line beside
+  `Source:` — the source names the log file or workflow that *saw* the
+  error, which with a shared log file is not the same thing
+- `watch`'s notices (`New error in team/api: …`) and the daemon log
 
 ## Error sources
 
@@ -175,8 +208,8 @@ burst_window_seconds = 300   # 5 errors within 5 minutes
 ### GitHub Actions
 
 Set `github_actions_repos` to poll each repo for failed workflow runs. It
-uses the same GitHub token as everything else — read from the keyring or
-`$GITHUB_TOKEN`, never written into the config file — and that token needs
+uses the same GitHub token as everything else — read from the keyring,
+never written into the config file — and that token needs
 read access to the repos' actions. A failure becomes an incident fingerprinted by the commit SHA,
 so multiple workflows failing on the same commit produce a single
 incident (one commit, one root cause), with the run details and a link
@@ -201,9 +234,9 @@ Store it:
 maajun setup               # asks for the repo, then the token
 ```
 
-`setup` suggests the repository from your `origin` remote, picks up a
-token that is already in `$GITHUB_TOKEN` or a `gh auth login` session,
-and otherwise prompts for one (hidden input). It then checks that the
+`setup` suggests the repository from your `origin` remote, reuses a token
+already in the keyring, and otherwise prompts for one (hidden input). It
+then checks that the
 token authenticates *and* that it can push to that repo — so
 misconfigured tokens fail here rather than at 3 a.m.
 
@@ -212,12 +245,12 @@ errors, writing each incident report under `daemon.workdir/reports`
 instead of opening a pull request. Set `daemon.repo_path` to choose which
 local checkout it analyzes (the default is the current directory).
 
-On a headless server without a keyring, use the environment instead —
-env vars always take precedence:
+maajun reads credentials only from the OS keyring, so a headless server
+needs a keyring backend installed before `setup` can store anything:
 
 ```bash
-export GITHUB_TOKEN=github_pat_...
-export DEEPSEEK_API_KEY=sk-...
+pip install keyrings.alt        # or install gnome-keyring
+maajun setup                    # then store the key as usual
 ```
 
 ## 3. Run
@@ -350,9 +383,19 @@ Every error gets a stable fingerprint before any AI call:
 - **CI failures** — the commit SHA.
 
 Known fingerprints only increment a counter in the incident database —
-one error, one PR, ever. The incident history lives in
-`<workdir>/incidents.db` (SQLite); delete a row (or the file) to make
-maajun treat an error as new again.
+one error, one PR, ever.
+
+The fingerprint is scoped to the repo the error was attributed to, so the
+key is `(fingerprint, repo)`. Two services that share a library and hit
+the identical traceback each get their own issue; without the repo in the
+key, whichever repo was polled first claimed the error and the rest were
+dropped as already known. Local-mode incidents record an empty repo.
+
+The incident history lives in `<workdir>/incidents.db` (SQLite); delete a
+row (or the file) to make maajun treat an error as new again. A database
+written by an older version of maajun is rejected at open, naming the
+columns it lacks — delete it to start a fresh one, and each still-current
+error is reported once more.
 
 ## Cost tracking
 
@@ -413,10 +456,6 @@ After=network-online.target
 Type=simple
 User=deploy
 ExecStart=/home/deploy/.local/bin/maajun watch
-Environment=GITHUB_TOKEN=github_pat_...
-Environment=DEEPSEEK_API_KEY=sk-...
-# Or keep secrets out of the unit file:
-# EnvironmentFile=/etc/maajun/secrets.env
 Restart=on-failure
 RestartSec=30
 
@@ -443,7 +482,7 @@ calls.
 Run `maajun status` first — it checks credentials, repo push access, and
 log files in one shot and points at whatever is missing.
 
-- **"No GitHub token"** — run `maajun setup` or set `GITHUB_TOKEN`.
+- **"No GitHub token"** — run `maajun setup` and provide one.
 - **"Token cannot push"** — the fine-grained PAT is missing Contents
   write access or doesn't cover the repo.
 - **Nothing analyzed after a while** — look for a "spend cap reached"
