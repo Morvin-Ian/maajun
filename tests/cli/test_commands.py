@@ -11,6 +11,18 @@ from maajun.cli import app
 runner = CliRunner()
 
 
+def flat(text: str) -> str:
+    """CLI output with runs of whitespace collapsed to single spaces.
+
+    Rich wraps at the console width, so a message that interpolates a path can
+    break between any two words once that path is long enough — "Delete it"
+    arrives as "Delete\nit". CI's tmp_path is longer than a local one, so
+    asserting on the raw text passes here and fails there. Flatten first and
+    the assertion stops depending on where the wrap lands.
+    """
+    return " ".join(text.split())
+
+
 @pytest.fixture
 def fake_keyring(monkeypatch):
     """In-memory keyring for CLI tests."""
@@ -294,9 +306,9 @@ def test_an_old_format_config_is_a_clean_error_not_a_traceback(tmp_path):
     result = runner.invoke(app, ["status", "--config", str(config_path)])
     assert result.exit_code == 1
     assert "Traceback" not in result.output
-    assert "[github]" in result.output
-    assert "old single-repo format" in result.output
-    assert "maajun add-repo owner/name" in result.output
+    assert "[github]" in flat(result.output)
+    assert "old single-repo format" in flat(result.output)
+    assert "maajun add-repo owner/name" in flat(result.output)
 
 
 def test_malformed_toml_is_a_clean_error_not_a_traceback(tmp_path):
@@ -306,7 +318,7 @@ def test_malformed_toml_is_a_clean_error_not_a_traceback(tmp_path):
     result = runner.invoke(app, ["incidents", "--config", str(config_path)])
     assert result.exit_code == 1
     assert "Traceback" not in result.output
-    assert "Could not read the config" in result.output
+    assert "Could not read the config" in flat(result.output)
 
 
 def test_incidents_explains_an_outdated_database(tmp_path):
@@ -331,8 +343,8 @@ def test_incidents_explains_an_outdated_database(tmp_path):
     result = runner.invoke(app, ["incidents", "--config", str(config_path)])
     assert result.exit_code == 1
     assert "Traceback" not in result.output
-    assert "older version" in result.output
-    assert "Delete it" in result.output
+    assert "older version of maajun" in flat(result.output)
+    assert "Delete it to start a fresh one" in flat(result.output)
 
 
 def test_re_adding_a_repo_only_changes_what_you_pass(tmp_path):
