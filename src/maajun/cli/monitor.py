@@ -10,9 +10,9 @@ from rich.live import Live
 from rich.panel import Panel
 
 from maajun.auth import AuthManager
-from maajun.cli._shared import app, console, pick_repo
+from maajun.cli._shared import app, console, load_config, pick_repo
 from maajun.cli.status_checks import build_status, gather_github
-from maajun.config import Config, RepoConfig
+from maajun.config import RepoConfig
 from maajun.daemon import build_daemon, build_daemon_for_report
 from maajun.progress import WorkingStatus, working
 from maajun.utils import is_valid_repo, truncate
@@ -54,13 +54,12 @@ def watch(
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
 
-    config = Config.load(config_path)
+    config = load_config(config_path)
 
     if mode:
         if mode not in ("suggest", "fix"):
             console.print(f"[red]✗ Invalid mode: {mode}. Use 'suggest' or 'fix'.[/red]")
             raise typer.Exit(1)
-        config.github.mode = mode
         for repo_config in config.github.repos:
             repo_config.mode = mode
 
@@ -91,7 +90,7 @@ def watch(
         )
 
         def repo_of(monitor) -> str:
-            repo_config = daemon.monitor_to_repo.get(monitor.name)
+            repo_config = daemon.monitor_to_repo.get(id(monitor))
             return repo_config.repo if repo_config else "unknown"
 
         monitors_text = "\n".join(
@@ -105,7 +104,7 @@ def watch(
             border_style="blue",
         ))
     else:
-        repo_config = repos[0] if repos else config.github
+        repo_config = repos[0]
         console.print(Panel(
             f"[bold]Maajun watch[/bold]{mode_source}\n\n"
             f"Repo:     [cyan]{repo_config.repo}[/cyan] "
@@ -152,13 +151,12 @@ def report(
             format="%(asctime)s %(levelname)s %(name)s: %(message)s",
         )
 
-    config = Config.load(config_path)
+    config = load_config(config_path)
 
     if mode:
         if mode not in ("suggest", "fix"):
             console.print(f"[red]✗ Invalid mode: {mode}. Use 'suggest' or 'fix'.[/red]")
             raise typer.Exit(1)
-        config.github.mode = mode
         for repo_config in config.github.repos:
             repo_config.mode = mode
 
@@ -269,7 +267,7 @@ def add_repo(
         console.print(f"[red]✗ Invalid mode: {mode}. Use 'suggest' or 'fix'.[/red]")
         raise typer.Exit(1)
 
-    config = Config.load(config_path)
+    config = load_config(config_path)
     logs = [path.strip() for path in log_files.split(",") if path.strip()]
     config.add_repo(RepoConfig(
         repo=repo, base_branch=base_branch, mode=mode, log_files=logs,
@@ -302,7 +300,7 @@ def status(
     ),
 ):
     """Check that credentials, repos, and log files are ready for `watch`."""
-    config = Config.load(config_path)
+    config = load_config(config_path)
     auth = AuthManager()
 
     provider = config.ai.provider
