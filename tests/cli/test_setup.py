@@ -13,16 +13,10 @@ from maajun.config import Config
 runner = CliRunner()
 
 
-@pytest.fixture(autouse=True)
-def no_gh_cli(monkeypatch):
-    """Keep the host's real gh login out of the tests."""
-    monkeypatch.setattr("maajun.auth.shutil.which", lambda name: None)
-    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
-
-
 @pytest.fixture
-def api_key(monkeypatch):
-    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test")
+def api_key(fake_keyring):
+    """A key already in the keyring — the only place maajun reads one from."""
+    AuthManager().set_api_key("deepseek", "sk-test")
 
 
 @pytest.fixture
@@ -93,8 +87,7 @@ def test_setup_needs_only_an_api_key(fake_keyring, api_key, tmp_path):
     assert config_path.exists()
 
 
-def test_setup_fails_without_an_api_key(fake_keyring, tmp_path, monkeypatch):
-    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+def test_setup_fails_without_an_api_key(fake_keyring, tmp_path):
     config_path = tmp_path / "config.toml"
     result = runner.invoke(
         app, ["setup", "--non-interactive", "--config", str(config_path)]

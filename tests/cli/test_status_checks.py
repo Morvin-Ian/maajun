@@ -187,5 +187,18 @@ def test_token_check_says_stored_because_the_keyring_is_the_only_source():
     assert check.detail == ""
 
 
+def test_missing_token_still_says_how_to_supply_one():
+    sections, ok = build_status(
+        _config(), provider="deepseek", has_key=True, has_token=False,
+        repos=[RepoConfig(repo="owner/name")], network=None,
+    )
+    check = _find(sections, "GitHub token stored")
+    assert not check.ok and not ok
+    assert "maajun setup" in check.detail
+    # Neither the environment nor gh is a source any more.
+    assert "GITHUB_TOKEN" not in check.detail
+    assert "gh auth" not in check.detail
+
+
 def _config() -> Config:
     return Config(monitor=MonitorConfig(log_files=["/x.log"]))
