@@ -1,5 +1,3 @@
-"""The /chat/completions protocol, shared by every supported provider."""
-
 import asyncio
 import logging
 import random

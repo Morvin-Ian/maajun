@@ -15,8 +15,8 @@ from maajun.utils import utcnow_iso
 
 log = logging.getLogger(__name__)
 
-_HEX_RE = re.compile(r"0x[0-9a-fA-F]+")
-_NUM_RE = re.compile(r"\d+")
+HEX_RE = re.compile(r"0x[0-9a-fA-F]+")
+NUM_RE = re.compile(r"\d+")
 
 # Cap on remembered item ids. The APIs return only the most recent items
 # per poll, so a bounded window is enough to dedup — and it stops _seen from
@@ -24,8 +24,8 @@ _NUM_RE = re.compile(r"\d+")
 MAX_SEEN_IDS = 5000
 
 def fingerprint(text: str) -> str:
-    normalized = _HEX_RE.sub("", text)
-    normalized = _NUM_RE.sub("", normalized)
+    normalized = HEX_RE.sub("", text)
+    normalized = NUM_RE.sub("", normalized)
     normalized = " ".join(normalized.split())
     return hashlib.sha256(normalized.encode()).hexdigest()[:16]
 
@@ -37,11 +37,6 @@ class ErrorEvent:
     details: str  # full traceback / log excerpt
     fingerprint: str = ""
     timestamp: str = field(default_factory=utcnow_iso)
-    # The repo this error is attributed to, as "owner/name". Monitors leave it
-    # empty: a log file does not know which repository it belongs to. The
-    # daemon stamps it from the monitor's configured repo before the event is
-    # recorded, so everything downstream — dedup, the incident row, the
-    # notice, the report — can name the repo instead of guessing from `source`.
     repo: str = ""
 
     def __post_init__(self) -> None:
