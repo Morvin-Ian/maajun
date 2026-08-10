@@ -45,6 +45,7 @@ def _validate_key(auth: AuthManager, provider: str) -> None:
 
 @app.command()
 def provider_list():
+    """Show which AI providers are supported and which have a key stored."""
     auth = AuthManager()
     implemented = implemented_providers()
 

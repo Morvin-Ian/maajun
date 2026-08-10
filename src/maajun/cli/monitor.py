@@ -47,7 +47,7 @@ def watch(
         None, "--mode", "-m", help="Override mode: 'suggest' or 'fix'"
     ),
 ):
-
+    """Run the monitoring daemon: watch error sources and document what turns up."""
     use_spinner = not verbose and not dry_run and sys.stdin.isatty()
     logging.basicConfig(
         level=logging.DEBUG if verbose else (logging.WARNING if use_spinner else logging.INFO),
