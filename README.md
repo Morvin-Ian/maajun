@@ -188,6 +188,10 @@ for the slash commands and the full permission model.
 Switch with `maajun config github.mode fix`, or per run with
 `-m/--mode` on `watch` and `report`.
 
+Fix mode may still conclude that no code change is warranted. When it does,
+you get an issue rather than a pull request whose only diff is the incident
+report — the issue says why.
+
 ## AI providers
 
 DeepSeek and OpenAI are both fully supported and interchangeable — pick either
