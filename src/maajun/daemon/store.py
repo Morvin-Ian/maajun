@@ -238,9 +238,15 @@ class IncidentStore:
     def record(self, event: ErrorEvent) -> bool:
         """Record a sighting. Returns True if this error should be handled.
 
-        True for a genuinely new error, and again for one whose last attempt
-        failed and still has retries left — otherwise a single transient
-        GitHub 502 would blacklist that error permanently.
+        True for a genuinely new error; for one still at 'new', meaning it was
+        recorded but never published; and for one whose last attempt failed
+        and still has retries left — otherwise a single transient GitHub 502
+        would blacklist that error permanently.
+
+        'new' is a real state, not just a transient one. An incident deferred
+        by the spend cap stays there until the cap lifts, and one interrupted
+        by a daemon that was killed mid-analysis is picked up on the next
+        poll instead of being stranded.
 
         Scoped to `event.repo`: the same traceback in two repos is two
         incidents, because it needs two issues in two places. Deduping on the
@@ -270,6 +276,15 @@ class IncidentStore:
             (now, event.fingerprint, event.repo),
         )
         self._conn.commit()
+        if existing["status"] == "new":
+            # Recorded but never published: deferred by the spend cap, or
+            # interrupted before it could be marked processed or failed.
+            log.debug(
+                "picking up unhandled incident fp=%s repo=%s",
+                event.fingerprint, event.repo or NO_REPO,
+            )
+            return True
+
         retryable = (
             existing["status"] == "failed" and existing["attempts"] < MAX_ATTEMPTS
         )

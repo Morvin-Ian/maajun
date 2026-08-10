@@ -327,9 +327,16 @@ class Daemon:
                 log.debug("known error fp=%s repo=%s", event.fingerprint, label)
                 continue
             if not dry_run and (self._over_budget() or self._cycle_full()):
-                # Forget it so a later poll treats the error as new rather
-                # than silently dropping it forever.
-                self.store.forget(event.fingerprint, event.repo)
+                # Left recorded at status 'new', which a later poll picks up.
+                # This used to call forget(), deleting the row outright: while
+                # the cap held, every poll re-inserted and re-deleted it, so
+                # the sighting count never accumulated and first_seen ended up
+                # being whenever the cap lifted rather than when the error
+                # actually started.
+                log.debug(
+                    "deferring fp=%s repo=%s until there is budget",
+                    event.fingerprint, label,
+                )
                 continue
             log.info(
                 "new error fp=%s repo=%s: %s",
