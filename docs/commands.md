@@ -174,6 +174,90 @@ the failure). The PR branch is `maajun/report-<fingerprint>`. Requires the
 same setup as `watch` (a configured repo, a GitHub token, and a provider
 key); run `maajun status` first if unsure.
 
+## Chat
+
+### `maajun chat`
+
+An interactive session that knows every command above, can run them for
+you, and remembers what maajun has already done.
+
+```bash
+maajun chat
+maajun chat --thinking            # use the provider's reasoning model
+maajun chat --session 12          # carry an earlier session's context in
+```
+
+| Flag | Meaning |
+|------|---------|
+| `--provider NAME` | Override the configured AI provider for this session |
+| `--thinking` | Use the provider's reasoning model |
+| `-s, --session ID` | Replay an earlier session's recent messages as context |
+| `--verbose` | Debug logging |
+| `-c, --config PATH` | Config file location |
+
+**It knows the commands.** The command list is read from the CLI itself at
+start-up, so it is never out of date — a command added to maajun is one
+chat can describe and run the same day. Ask *"how do I watch a second
+repo?"* and it answers from the real `--help`.
+
+**It can carry them out.** Read-only commands (`status`, `incidents`,
+`config <key>`, `provider-list`) run immediately. Anything that changes
+configuration or opens a pull request shows you the exact command line and
+waits for a `y`:
+
+```
+> put acme/api into fix mode and give it pytest as the test command
+
+▸ Run: maajun config github.mode fix -r acme/api
+  Run it? (y/N): y
+```
+
+`watch`, `reset`, and `sign-out` are never run from chat — the first would
+hang the session, and the other two are too destructive to infer from a
+sentence. Chat gives you the command to type instead. `setup` needs
+`--non-interactive` (it cannot store a new API key that way).
+
+It can also read your code (`read_file`, `grep`, `glob`, `list_dir`,
+`git_status`) and edit files, which asks permission per file. There is no
+shell tool in any mode.
+
+**It remembers.** Every incident maajun has handled — the error, the
+analysis, the issue or PR it opened, what it cost — is searchable, as are
+your past chat sessions:
+
+```
+> what did that checkout KeyError turn out to be?
+> which PRs have you opened against acme/api?
+> what have I spent this month?
+```
+
+Incidents analyzed before you upgraded are still listed, but only ones
+handled from this version on carry their report text — older rows predate
+the column and show the issue or PR link alone.
+
+#### Slash commands
+
+| Command | Meaning |
+|---------|---------|
+| `/help` | List these |
+| `/commands` | Every maajun command with a one-line summary |
+| `/sessions` | Recent chat sessions and their ids |
+| `/history` | This session so far |
+| `/cost` | What this session and all chats have cost |
+| `/clear` | Forget this session's context; the record is kept and stays searchable |
+| `/exit` | Leave |
+
+#### Cost
+
+Chat spend is recorded per session and shown by `/cost`, but it is **not**
+capped: `daemon.max_usd_per_day` pauses the daemon only. Cutting an
+interactive answer off mid-sentence is a worse trade than going slightly
+over, so the ceiling is yours to watch.
+
+Sessions and messages live in the same database as the incidents
+(`<daemon.workdir>/incidents.db`), which is what lets a single question
+span both.
+
 ## Credentials
 
 ### `maajun provider-list`

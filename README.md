@@ -17,7 +17,7 @@ Nothing merges without your review, in either mode.
 
 **Contents** — [Requirements](#requirements) · [Installation](#installation) ·
 [Quick start](#quick-start) · [How it works](#how-it-works) ·
-[Modes](#modes) · [AI providers](#ai-providers) ·
+[Chat](#chat) · [Modes](#modes) · [AI providers](#ai-providers) ·
 [Configuration](#configuration) · [Commands](#commands) ·
 [Cost control](#cost-control) · [Security model](#security-model) ·
 [Documentation](#documentation)
@@ -142,6 +142,42 @@ verdict at the top of the body.
 A failing suite (`❌ Tests fail (exit 1)`) still opens the PR — a fix that
 breaks the tests is exactly what a reviewer needs to see.
 
+## Chat
+
+`maajun chat` is a conversational front end to everything above. It knows
+every command — the list is read from the CLI itself, so it is never out of
+date — and it remembers every incident maajun has handled.
+
+```bash
+maajun chat
+```
+
+Ask it how to do something and it answers from the real `--help`. Ask it to
+*do* the thing and it runs the command, showing you the exact line first if
+it changes anything:
+
+```
+> watch acme/web as well, in fix mode, verified with pytest
+
+▸ Run: maajun add-repo acme/web -m fix
+  Run it? (y/N): y
+```
+
+Read-only commands run straight away. `watch`, `reset`, and `sign-out` are
+never run from chat — it hands you the command instead. And because every
+incident, pull request, and issue is already in the database, so is the
+history:
+
+```
+> what did that checkout KeyError turn out to be?
+> which PRs have you opened against acme/api this month?
+```
+
+Past chat sessions are searchable too, and chat spend is recorded (`/cost`)
+though never capped — `daemon.max_usd_per_day` governs the daemon alone.
+See the [command reference](https://github.com/Morvin-Ian/maajun/blob/main/docs/commands.md#maajun-chat)
+for the slash commands and the full permission model.
+
 ## Modes
 
 | Mode | Files | Output |
@@ -239,6 +275,7 @@ install one (`keyrings.alt`, `gnome-keyring`) before running `setup`.
 | `maajun status` | Preflight check of credentials, repo access, and monitors |
 | `maajun watch` | Run the monitoring daemon (`--once`, `--dry-run`, `-m`) |
 | `maajun report "…"` | Investigate an issue you describe, on demand |
+| `maajun chat` | Ask maajun anything, have it run commands, recall past work |
 | `maajun incidents` | List handled incidents with repo, status, cost, and links |
 | `maajun config [KEY] [VALUE]` | View or change settings (`--repo` for one repo) |
 | `maajun add-repo OWNER/NAME` | Watch an additional repository |
@@ -289,6 +326,11 @@ $3.00 so the cap never overshoots.
   running application.
 - **Verification you control.** `test_command` comes from your config, not from
   the model, so a fix cannot redirect its own verification.
+- **Chat proposes, you approve.** `maajun chat` runs read-only commands freely,
+  but anything that writes config or opens a pull request shows the exact
+  command line and waits for a yes. `reset` and `sign-out` it will not run at
+  all. `run_maajun_command` reaches maajun's own subcommands and nothing else —
+  it is not a shell.
 - **Token hygiene.** The GitHub token is passed to git via `GIT_ASKPASS`; it
   never lands in a remote URL, `.git/config`, or the process list.
 

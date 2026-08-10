@@ -392,10 +392,20 @@ key, whichever repo was polled first claimed the error and the rest were
 dropped as already known. Local-mode incidents record an empty repo.
 
 The incident history lives in `<workdir>/incidents.db` (SQLite); delete a
-row (or the file) to make maajun treat an error as new again. A database
-written by an older version of maajun is rejected at open, naming the
-columns it lacks — delete it to start a fresh one, and each still-current
-error is reported once more.
+row (or the file) to make maajun treat an error as new again. It also holds
+your `maajun chat` sessions, which is what lets chat answer questions about
+past incidents and past conversations together.
+
+A database written by an older version of maajun is **migrated at open**,
+keeping the history — the schema version is tracked in `PRAGMA
+user_version`, and each migration commits separately so an interrupted
+upgrade resumes rather than half-applies. One written by a *newer* maajun
+is refused rather than rewritten; upgrade, or point `daemon.workdir`
+somewhere else.
+
+Incidents handled from this version on also store their analysis text, so
+`maajun chat` can recall a root cause without going back to GitHub. Rows
+that predate the column keep their issue or PR link and show no report.
 
 ## Cost tracking
 
