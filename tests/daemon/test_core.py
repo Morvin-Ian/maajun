@@ -11,7 +11,12 @@ from pathlib import Path
 import pytest
 
 from maajun.config import Config, DaemonConfig, GitHubConfig, MonitorConfig, RepoConfig
-from maajun.daemon.core import SHUTDOWN_EVENT, Daemon, make_permission_policy
+from maajun.daemon.core import (
+    SHUTDOWN_EVENT,
+    Daemon,
+    LocalWorkspace,
+    make_permission_policy,
+)
 from maajun.daemon.store import ARTIFACT_ISSUE, ARTIFACT_PR, IncidentStore
 from maajun.monitors import LogFileMonitor
 from maajun.providers.base import CompletionResponse
@@ -1278,3 +1283,101 @@ async def test_first_seen_is_when_the_error_started_not_when_the_cap_lifted(setu
     fp = (await daemon.poll_once())[0]
 
     assert store.get(fp, "owner/name")["first_seen"] == started
+
+
+# ---------------------------------------------------------------------------
+# Local mode
+# ---------------------------------------------------------------------------
+
+
+def _local_daemon(tmp_path, repo_path):
+    logfile = tmp_path / "app.log"
+    logfile.write_text("")
+    config = Config(
+        monitor=MonitorConfig(log_files=[str(logfile)], poll_interval=1),
+        daemon=DaemonConfig(workdir=str(tmp_path / "work")),
+    )
+    store = IncidentStore(tmp_path / "work" / "incidents.db")
+    monitor = LogFileMonitor(logfile)
+    repo_config = RepoConfig(mode="suggest")
+    agent = FakeAgent()
+    daemon = Daemon(
+        config,
+        monitors=[monitor],
+        store=store,
+        workspaces={"": LocalWorkspace(repo_path)},
+        monitor_to_repo={id(monitor): repo_config},
+        github=None,
+        agent_factory_for_repo=lambda rc, ws: lambda: agent,
+        repo_configs=[repo_config],
+        local_mode=True,
+    )
+    return daemon, logfile, agent, store
+
+
+async def test_local_mode_offers_commit_history_for_deploy_blame(tmp_path):
+    """LocalWorkspace had no recent_commits, so the section was always skipped.
+
+    The daemon probes for the method with getattr; without it, every local
+    report's "Likely cause commit" was "Unclear" even in a git checkout.
+    """
+    checkout = tmp_path / "app"
+    checkout.mkdir()
+    subprocess.run(["git", "init", "-b", "main", str(checkout)],
+                   check=True, capture_output=True)
+    (checkout / "main.py").write_text("x = 1\n")
+    git("add", "-A", cwd=checkout)
+    git("commit", "-m", "the suspicious commit", cwd=checkout)
+
+    daemon, logfile, agent, store = _local_daemon(tmp_path, checkout)
+    with open(logfile, "a") as f:
+        f.write(TRACEBACK)
+    await daemon.poll_once()
+
+    assert "the suspicious commit" in agent.prompts[0]
+
+
+async def test_local_mode_does_not_name_a_branch_it_cannot_vouch_for(tmp_path):
+    """Nothing pinned the checkout to base_branch, so 'main' would be a guess."""
+    checkout = tmp_path / "app"
+    checkout.mkdir()
+    subprocess.run(["git", "init", "-b", "wip", str(checkout)],
+                   check=True, capture_output=True)
+    (checkout / "main.py").write_text("x = 1\n")
+    git("add", "-A", cwd=checkout)
+    git("commit", "-m", "only commit", cwd=checkout)
+
+    daemon, logfile, agent, store = _local_daemon(tmp_path, checkout)
+    with open(logfile, "a") as f:
+        f.write(TRACEBACK)
+    await daemon.poll_once()
+
+    assert "the checked-out branch" in agent.prompts[0]
+
+
+async def test_a_local_directory_that_is_not_a_repo_omits_the_section(tmp_path):
+    """No history to offer beats the model inventing a commit."""
+    plain = tmp_path / "plain"
+    plain.mkdir()
+
+    daemon, logfile, agent, store = _local_daemon(tmp_path, plain)
+    with open(logfile, "a") as f:
+        f.write(TRACEBACK)
+    await daemon.poll_once()
+
+    assert "Recent commits" not in agent.prompts[0]
+
+
+async def test_local_mode_still_writes_its_report(tmp_path):
+    """The blame lookup must not disturb the artifact."""
+    checkout = tmp_path / "app"
+    checkout.mkdir()
+
+    daemon, logfile, agent, store = _local_daemon(tmp_path, checkout)
+    with open(logfile, "a") as f:
+        f.write(TRACEBACK)
+    fp = (await daemon.poll_once())[0]
+
+    row = store.get(fp, "")
+    assert row["artifact_kind"] == "report"
+    assert Path(row["pr_url"]).exists()
