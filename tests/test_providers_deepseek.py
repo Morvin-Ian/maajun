@@ -301,3 +301,63 @@ async def test_aclose_is_safe_without_client():
     provider = DeepSeekProvider({"api_key": "x"})
     await provider.aclose()  # never initialized -> no error
     assert provider.client is None
+
+
+# ---------------------------------------------------------------------------
+# validate_credentials
+# ---------------------------------------------------------------------------
+
+
+def _capturing_provider(config):
+    """A provider whose completions.create records its kwargs and succeeds."""
+    provider = DeepSeekProvider(config)
+    seen = {}
+
+    async def create(**kwargs):
+        seen.update(kwargs)
+        return make_response()
+
+    provider.client = SimpleNamespace(
+        chat=SimpleNamespace(completions=SimpleNamespace(create=create))
+    )
+    return provider, seen
+
+
+async def test_validate_checks_the_configured_model_not_the_default():
+    """Regression: setup said the key worked, then every real call 404'd.
+
+    With ai.model set to something the account cannot reach, validating the
+    provider default passed while the model the daemon actually sends failed.
+    """
+    provider, seen = _capturing_provider({"api_key": "k", "model": "custom-model"})
+
+    assert await provider.validate_credentials() is True
+    assert seen["model"] == "custom-model"
+
+
+async def test_validate_checks_the_thinking_model_when_that_is_selected():
+    provider, seen = _capturing_provider({"api_key": "k", "thinking_mode": True})
+
+    await provider.validate_credentials()
+    assert seen["model"] == THINKING_MODEL
+
+
+async def test_validate_falls_back_to_the_default_model():
+    provider, seen = _capturing_provider({"api_key": "k"})
+
+    await provider.validate_credentials()
+    assert seen["model"] == DEFAULT_MODEL
+
+
+async def test_validate_returns_false_when_the_api_rejects_the_key():
+    provider = DeepSeekProvider({"api_key": "k"})
+
+    async def create(**kwargs):
+        raise APIStatusError(
+            "unauthorized", response=_fake_httpx_response(401), body=None
+        )
+
+    provider.client = SimpleNamespace(
+        chat=SimpleNamespace(completions=SimpleNamespace(create=create))
+    )
+    assert await provider.validate_credentials() is False
