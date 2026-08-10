@@ -105,11 +105,8 @@ class ChatSession:
 
     # -- the loop ---------------------------------------------------------
 
-    def run(self) -> None:
-        self.greet()
-        self.loop()
-
     def loop(self) -> None:
+        """Read, answer, repeat. The caller greets and resumes first."""
         while True:
             try:
                 message = self.read().strip()
