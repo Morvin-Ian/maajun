@@ -10,8 +10,10 @@ from maajun.agent.tools import (
     GLOB,
     GREP,
     LIST_DIR,
+    MAX_TOOL_RESULT_CHARS,
     READ_FILE,
     WRITE_FILE,
+    cap_result,
     default_registry,
 )
 
@@ -318,3 +320,28 @@ def test_dangerous_tools_require_permission():
     for name in ("read_file", "glob", "grep", "list_dir", "git_status"):
         assert not reg.requires_permission(name)
     assert not reg.requires_permission("unknown_tool")
+
+
+# ---------------------------------------------------------------------------
+# tool result size cap
+# ---------------------------------------------------------------------------
+
+
+def test_cap_result_leaves_small_results_alone():
+    assert cap_result("short") == "short"
+
+
+def test_cap_result_truncates_and_reports_the_shortfall():
+    capped = cap_result("x" * (MAX_TOOL_RESULT_CHARS + 500))
+    assert len(capped) < MAX_TOOL_RESULT_CHARS + 500
+    assert capped.startswith("x" * 100)
+    assert "truncated: 500 more characters" in capped
+
+
+async def test_registry_caps_an_oversized_tool_result(tmp_path):
+    big = tmp_path / "big.txt"
+    big.write_text("y" * (MAX_TOOL_RESULT_CHARS * 2))
+    reg = default_registry()
+    result = await reg.execute("read_file", {"path": str(big)})
+    assert "truncated" in result
+    assert len(result) < MAX_TOOL_RESULT_CHARS + 500

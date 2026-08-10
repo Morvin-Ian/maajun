@@ -29,6 +29,29 @@ class Tool(NamedTuple):
     requires_permission: bool = False
 
 
+# Ceiling on a single tool result. read_file defaults to 2000 lines and grep
+# to 50 matches, either of which can run to hundreds of kilobytes — and every
+# result stays in the request for the rest of the tool loop. Truncating here
+# rather than in each executor means a tool added later cannot forget to.
+MAX_TOOL_RESULT_CHARS = 30_000
+
+
+def cap_result(result: str) -> str:
+    """Truncate an oversized tool result, saying how much was dropped.
+
+    The model needs to know it saw a partial answer — a silent cut invites it
+    to conclude that the rest of the file simply does not exist.
+    """
+    if len(result) <= MAX_TOOL_RESULT_CHARS:
+        return result
+    dropped = len(result) - MAX_TOOL_RESULT_CHARS
+    return (
+        result[:MAX_TOOL_RESULT_CHARS]
+        + f"\n… [truncated: {dropped:,} more characters. Narrow the search, "
+        "or re-read with offset/limit.]"
+    )
+
+
 def json_schema(props: dict, required: list[str] | None = None) -> dict:
     schema: dict[str, Any] = {"type": "object", "properties": props}
     if required:
@@ -57,7 +80,7 @@ class ToolRegistry:
         if not tool:
             return f"Error: unknown tool '{name}'"
         try:
-            return await tool.executor(**arguments)
+            return cap_result(await tool.executor(**arguments))
         except TypeError as e:
             return f"Error calling tool '{name}': {e}"
         except Exception as e:

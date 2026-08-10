@@ -1,4 +1,12 @@
-from maajun.agent.tools.base import Tool, ToolExecutor, ToolRegistry, json_schema, resolve_path
+from maajun.agent.tools.base import (
+    MAX_TOOL_RESULT_CHARS,
+    Tool,
+    ToolExecutor,
+    ToolRegistry,
+    cap_result,
+    json_schema,
+    resolve_path,
+)
 from maajun.agent.tools.files import EDIT_FILE, READ_FILE, WRITE_FILE
 from maajun.agent.tools.search import GLOB, GREP, LIST_DIR
 from maajun.agent.tools.vcs_status import GIT_STATUS
@@ -25,11 +33,13 @@ __all__ = [
     "GLOB",
     "GREP",
     "LIST_DIR",
+    "MAX_TOOL_RESULT_CHARS",
     "READ_FILE",
     "WRITE_FILE",
     "Tool",
     "ToolExecutor",
     "ToolRegistry",
+    "cap_result",
     "default_registry",
     "json_schema",
     "resolve_path",
