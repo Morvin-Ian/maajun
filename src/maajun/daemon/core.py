@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import signal
+import subprocess
 from collections.abc import Callable
 from pathlib import Path
 
@@ -62,14 +63,36 @@ def make_permission_policy(mode: str, workspace: Path) -> PermissionCallback | N
 class LocalWorkspace:
     """Stands in for GitWorkspace when no GitHub repo is configured.
 
-    Only `path` is used: in local mode the pipeline analyzes a checkout that
-    is already on disk and writes its report beside the incident database, so
-    there is nothing to clone, branch, commit, or push.
+    In local mode the pipeline analyzes a checkout that is already on disk and
+    writes its report beside the incident database, so there is nothing to
+    clone, branch, commit, or push — but the directory is usually still a git
+    checkout, and its history is worth just as much for blaming a deploy.
     """
 
     def __init__(self, path: Path):
         self.path = path
         self.repo = LOCAL_REPO_LABEL
+
+    async def recent_commits(self, limit: int = 10) -> list[str]:
+        """The newest commits, as "sha subject", or [] if this is not a repo.
+
+        Local mode used to omit the "Likely cause commit" section entirely and
+        always report "Unclear", purely because this method did not exist —
+        the daemon probes for it with getattr and skipped the section.
+        """
+        return await asyncio.to_thread(self._read_commits, limit)
+
+    def _read_commits(self, limit: int) -> list[str]:
+        try:
+            proc = subprocess.run(
+                ["git", "log", f"-{limit}", "--no-merges", "--format=%h %s"],
+                capture_output=True, text=True, timeout=10, cwd=str(self.path),
+            )
+        except (subprocess.SubprocessError, OSError):
+            return []
+        if proc.returncode != 0:
+            return []  # not a git checkout, or no commits yet
+        return [line for line in proc.stdout.splitlines() if line.strip()]
 
 
 class Daemon:
@@ -173,9 +196,15 @@ class Daemon:
             return ""
         if not commits:
             return ""
+        # In local mode nothing pinned the checkout to base_branch, so naming
+        # it would assert a branch the working copy may not be on.
+        branch = (
+            "the checked-out branch"
+            if self.local_mode
+            else (repo_config.base_branch or "the checked-out branch")
+        )
         return RECENT_COMMITS_SECTION.format(
-            branch=repo_config.base_branch or "the checked-out branch",
-            commits="\n".join(commits),
+            branch=branch, commits="\n".join(commits)
         )
 
     def _cycle_full(self) -> bool:

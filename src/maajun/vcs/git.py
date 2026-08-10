@@ -115,9 +115,6 @@ class GitWorkspace:
     async def push(self, branch: str) -> None:
         await self._git("push", "--force-with-lease", "origin", f"{branch}:{branch}")
 
-    async def diff_stat(self) -> str:
-        return await self._git("diff", "--stat", "HEAD~1")
-
     async def recent_commits(self, limit: int = 10) -> list[str]:
         """The newest commits on the checked-out branch, as "sha subject".
 

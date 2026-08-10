@@ -410,3 +410,110 @@ def test_a_new_repo_still_gets_the_documented_defaults(tmp_path):
 
     entry = Config.load(config_path).github.repos[0]
     assert (entry.base_branch, entry.mode, entry.log_files) == ("main", "suggest", [])
+
+
+def test_mode_override_warns_when_there_is_no_repo_to_apply_it_to(tmp_path):
+    """Regression: -m fix was silently ignored in local mode.
+
+    The override loops over [[github.repos]], which local mode has none of,
+    so the flag looked accepted and changed nothing.
+    """
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(
+        '[ai]\nprovider = "deepseek"\n'
+        f'[monitor]\nlog_files = ["{tmp_path / "app.log"}"]\n'
+        f'[daemon]\nworkdir = "{tmp_path / "data"}"\n'
+    )
+    (tmp_path / "app.log").write_text("")
+
+    result = runner.invoke(
+        app, ["watch", "-c", str(config_path), "--once", "-m", "fix"]
+    )
+    assert "--mode fix has no effect" in flat(result.output)
+    assert "maajun add-repo" in flat(result.output)
+
+
+def test_mode_override_is_quiet_when_a_repo_is_configured(tmp_path):
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(
+        '[ai]\nprovider = "deepseek"\n'
+        '[[github.repos]]\nrepo = "acme/api"\n'
+        f'[monitor]\nlog_files = ["{tmp_path / "app.log"}"]\n'
+        f'[daemon]\nworkdir = "{tmp_path / "data"}"\n'
+    )
+    (tmp_path / "app.log").write_text("")
+
+    result = runner.invoke(
+        app, ["watch", "-c", str(config_path), "--once", "-m", "fix"]
+    )
+    assert "has no effect" not in flat(result.output)
+
+
+# ---------------------------------------------------------------------------
+# reset refuses an unsafe workdir
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def isolated_dirs(tmp_path, monkeypatch):
+    """Point every directory reset() touches inside tmp_path.
+
+    Config.load() resolves default_config_path from maajun.config, while
+    settings.py holds its own imported binding — both need patching, or the
+    workdir is never read and the guard never runs.
+    """
+    config_dir = tmp_path / "cfg"
+    config_dir.mkdir()
+    config_path = config_dir / "config.toml"
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+
+    monkeypatch.setattr("maajun.config.default_config_path", lambda: config_path)
+    monkeypatch.setattr(
+        "maajun.cli.settings.default_config_path", lambda: config_path
+    )
+    monkeypatch.setattr("maajun.cli.settings.default_data_dir", lambda: data_dir)
+    return config_path, data_dir
+
+
+def test_reset_refuses_to_delete_a_git_checkout(fake_keyring, tmp_path, isolated_dirs):
+    """daemon.workdir is hand-edited TOML, and reset rmtree's it."""
+    config_path, _ = isolated_dirs
+    checkout = tmp_path / "myapp"
+    (checkout / ".git").mkdir(parents=True)
+    (checkout / "important.py").write_text("keep me")
+    config_path.write_text(f'[daemon]\nworkdir = "{checkout}"\n')
+
+    result = runner.invoke(app, ["reset", "--force"])
+    assert result.exit_code == 0
+    assert "Not deleting daemon.workdir" in flat(result.output)
+    assert "git checkout" in flat(result.output)
+    assert (checkout / "important.py").exists()
+
+
+def test_reset_still_removes_an_ordinary_workdir(fake_keyring, tmp_path, isolated_dirs):
+    config_path, _ = isolated_dirs
+    workdir = tmp_path / "maajun-data"
+    workdir.mkdir()
+    (workdir / "incidents.db").write_text("")
+    config_path.write_text(f'[daemon]\nworkdir = "{workdir}"\n')
+
+    result = runner.invoke(app, ["reset", "--force"])
+    assert result.exit_code == 0
+    assert not workdir.exists()
+
+
+def test_unsafe_workdirs_are_refused():
+    from pathlib import Path as P
+
+    from maajun.cli.settings import unsafe_to_delete
+
+    assert unsafe_to_delete(P(P.home().anchor))
+    assert unsafe_to_delete(P.home())
+    assert unsafe_to_delete(P.home().parent)
+
+
+def test_a_plain_data_directory_is_allowed(tmp_path):
+    from maajun.cli.settings import unsafe_to_delete
+
+    assert unsafe_to_delete(tmp_path / "maajun-data") == ""
