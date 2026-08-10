@@ -15,7 +15,12 @@ from maajun.daemon.prompts import (
     MANUAL_REPORT_PROMPT,
     RECENT_COMMITS_SECTION,
 )
-from maajun.daemon.store import IncidentStore
+from maajun.daemon.store import (
+    ARTIFACT_ISSUE,
+    ARTIFACT_PR,
+    ARTIFACT_REPORT,
+    IncidentStore,
+)
 from maajun.monitors import ErrorEvent, Monitor
 from maajun.providers.pricing import extract_usage
 from maajun.utils import utc_day_start_iso
@@ -495,6 +500,7 @@ class Daemon:
                 body=reports.pr_body(repo_config, event, report, verification),
             )
             recorded_branch = branch
+            artifact_kind = ARTIFACT_PR
         else:
             # Suggest mode changes no code, so a PR would be an empty diff that
             # still demands review and triggers CI. An issue is the artifact.
@@ -505,6 +511,7 @@ class Daemon:
                 body=reports.issue_body(event, report),
             )
             recorded_branch = ""
+            artifact_kind = ARTIFACT_ISSUE
 
         self.store.mark_processed(
             event.fingerprint,
@@ -514,6 +521,8 @@ class Daemon:
             cost_usd=cost,
             prompt_tokens=prompt_tokens,
             completion_tokens=completion_tokens,
+            report_text=report,
+            artifact_kind=artifact_kind,
         )
         log.info(
             "opened %s %s for fp=%s in repo=%s (cost: $%.4f, tokens: %d/%d)",
@@ -546,6 +555,8 @@ class Daemon:
             cost_usd=cost,
             prompt_tokens=prompt_tokens,
             completion_tokens=completion_tokens,
+            report_text=report,
+            artifact_kind=ARTIFACT_REPORT,
         )
         log.info(
             "wrote local report %s for fp=%s (cost: $%.4f, tokens: %d/%d)",
