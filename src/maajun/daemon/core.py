@@ -124,6 +124,10 @@ class Daemon:
         self._budget_warned_for = ""
         # Incidents analyzed so far in the current poll cycle.
         self._handled_this_cycle = 0
+        # What the most recent handled incident published. Incidents are
+        # processed one at a time, so a single slot is unambiguous, and it
+        # spares every caller from re-deriving the artifact from the mode.
+        self.last_artifact_kind: str | None = None
 
     def _notice(self, message: str, level: str = "info") -> None:
         if self.on_notice:
@@ -190,13 +194,21 @@ class Daemon:
         )
         return True
 
-    def _artifact_label(self, repo_config: RepoConfig) -> str:
-        """What this repo's incidents produce, for user-facing lines."""
-        if self.local_mode:
-            return "Report written"
-        if repo_config.mode == "fix":
-            return "PR opened"
-        return "Issue opened"
+    ARTIFACT_LABELS = {
+        ARTIFACT_PR: "PR opened",
+        ARTIFACT_ISSUE: "Issue opened",
+        ARTIFACT_REPORT: "Report written",
+    }
+
+    @staticmethod
+    def artifact_label(kind: str | None) -> str:
+        """A user-facing name for what an incident produced.
+
+        Taken from what was actually published, not from repo_config.mode: a
+        fix-mode incident that changed no code files an issue, and saying "PR
+        opened" would send the reader looking for one that does not exist.
+        """
+        return Daemon.ARTIFACT_LABELS.get(kind or "", "Handled")
 
     def repo_for(self, monitor: Monitor) -> RepoConfig:
         """The repo a monitor's errors belong to."""
@@ -336,7 +348,8 @@ class Daemon:
                 handled.append(event.fingerprint)
                 if destination:
                     self._notice(
-                        f"{self._artifact_label(repo_config)} for {label}: "
+                        f"{self.artifact_label(self.last_artifact_kind)} "
+                        f"for {label}: "
                         f"{destination}",
                         "success",
                     )
@@ -484,6 +497,25 @@ class Daemon:
                 event, report, (prompt_tokens, completion_tokens, cost), progress
             )
 
+        # Asked before the report file is written: that file is itself a
+        # change, so checking afterwards would always say the agent edited
+        # something. Fix mode is free to conclude that no code change is
+        # warranted, and a "fix" PR whose entire diff is an incident report
+        # wastes a review and a CI run.
+        unfixed = ""
+        if opens_pull_request and not await workspace.has_changes():
+            log.info(
+                "fix mode changed no files for fp=%s in repo=%s; filing an "
+                "issue instead of an empty pull request",
+                event.fingerprint, repo_config.repo,
+            )
+            opens_pull_request = False
+            unfixed = (
+                "> ℹ️ This repo is in `fix` mode, but the analysis did not "
+                "change any code — so this is an issue rather than a pull "
+                "request."
+            )
+
         if opens_pull_request:
             verification = await self._verify(repo_config, workspace, progress)
             progress("Opening PR")
@@ -508,11 +540,12 @@ class Daemon:
             url = await self.github.create_issue(
                 repo_config.repo,
                 title=title,
-                body=reports.issue_body(event, report),
+                body=reports.issue_body(event, report, note=unfixed),
             )
             recorded_branch = ""
             artifact_kind = ARTIFACT_ISSUE
 
+        self.last_artifact_kind = artifact_kind
         self.store.mark_processed(
             event.fingerprint,
             event.repo,
@@ -545,6 +578,7 @@ class Daemon:
         recorded cost, but nothing leaves the machine.
         """
         progress("Writing report")
+        self.last_artifact_kind = ARTIFACT_REPORT
         prompt_tokens, completion_tokens, cost = usage
         report_path = reports.write_report_file(self.report_dir, event, report)
         self.store.mark_processed(
