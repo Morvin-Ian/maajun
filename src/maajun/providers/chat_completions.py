@@ -166,14 +166,20 @@ class ChatCompletionsProvider(AIProvider):
             yield "tool_calls", tool_calls.result()
 
     async def validate_credentials(self) -> bool:
-        """Validate the credentials with a minimal request."""
+        """Validate the credentials with a minimal request.
+
+        Sends self.model, not default_model: with ai.model set to something
+        the account cannot reach, validating the default reported a working
+        key and then every real call failed on an inaccessible model. The
+        check should exercise what the daemon will actually send.
+        """
         try:
             if not self.client:
                 await self.initialize()
 
             response = await self._retryable(
                 self.client.chat.completions.create,
-                model=self.default_model,
+                model=self.model,
                 messages=[{"role": "user", "content": "Hello"}],
                 max_tokens=5,
             )
