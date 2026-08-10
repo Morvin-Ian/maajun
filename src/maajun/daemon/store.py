@@ -42,7 +42,7 @@ INCIDENT_COLUMNS: tuple[str, ...] = (
 # Bumped whenever a migration is appended to MIGRATIONS. Stored in the file's
 # PRAGMA user_version, which starts at 0 on databases written before any of
 # this existed.
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 # What an incident produced. Recorded explicitly because it used to be
 # inferred from `branch != ""`, which cannot tell a suggest-mode issue from a
@@ -137,54 +137,103 @@ def _migrate_to_2(conn: sqlite3.Connection) -> None:
     )
 
 
+CHAT_SCHEMA = (
+    """
+    CREATE TABLE IF NOT EXISTS chat_sessions (
+        id         INTEGER PRIMARY KEY AUTOINCREMENT,
+        started_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        title      TEXT NOT NULL DEFAULT '',
+        cost_usd   REAL NOT NULL DEFAULT 0,
+        prompt_tokens     INTEGER NOT NULL DEFAULT 0,
+        completion_tokens INTEGER NOT NULL DEFAULT 0
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS chat_messages (
+        id         INTEGER PRIMARY KEY AUTOINCREMENT,
+        session_id INTEGER NOT NULL REFERENCES chat_sessions(id) ON DELETE CASCADE,
+        role       TEXT NOT NULL,
+        content    TEXT NOT NULL,
+        created_at TEXT NOT NULL
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS chat_messages_by_session"
+    " ON chat_messages (session_id, id)",
+)
+
+
+def _migrate_to_3(conn: sqlite3.Connection) -> None:
+    """Add chat memory: what was discussed, and what it cost.
+
+    In the same file as the incidents so a recall query can join the two —
+    "what did we decide about that KeyError?" spans both tables.
+    """
+    for statement in CHAT_SCHEMA:
+        conn.execute(statement)
+
+
 # Index i applies to a database at user_version i, taking it to i + 1.
-MIGRATIONS = (_migrate_to_1, _migrate_to_2)
+MIGRATIONS = (_migrate_to_1, _migrate_to_2, _migrate_to_3)
 
 # Incident lifecycle: new -> processed, or new -> failed -> new (retried) ->
 # ... -> failed permanently once MAX_ATTEMPTS is reached.
 MAX_ATTEMPTS = 3
 
 
+def connect(path: str | Path) -> sqlite3.Connection:
+    """Open maajun's database, applying any pending migrations.
+
+    One file holds both the incident record and chat memory, so both go
+    through this: a single migration ladder, and recall can join a
+    conversation against the incidents it discussed.
+    """
+    path = Path(path).expanduser()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(path)
+    conn.row_factory = sqlite3.Row
+    # WAL lets a reader (e.g. the cost-audit query, or a chat session running
+    # alongside the daemon) work without blocking writes, and survives an
+    # ungraceful kill more cleanly.
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA synchronous=NORMAL")
+    _migrate(conn, path)
+    return conn
+
+
+def _migrate(conn: sqlite3.Connection, path: Path) -> None:
+    """Bring the database up to SCHEMA_VERSION, or explain why it can't be.
+
+    Each migration runs in its own transaction and bumps user_version, so an
+    interrupted upgrade resumes from the last step that committed rather than
+    half-applying.
+    """
+    version = conn.execute("PRAGMA user_version").fetchone()[0]
+    if version > SCHEMA_VERSION:
+        conn.close()
+        raise StoreError(
+            f"{path} was written by a newer version of maajun "
+            f"(schema {version}, this build understands {SCHEMA_VERSION}). "
+            "Upgrade maajun, or point daemon.workdir at a different directory."
+        )
+    for target, migration in enumerate(MIGRATIONS[version:], start=version + 1):
+        try:
+            with conn:
+                migration(conn)
+                # Not parameterizable, and `target` is a loop index over a
+                # module constant — never user input.
+                conn.execute(f"PRAGMA user_version = {target}")
+        except sqlite3.Error as e:
+            conn.close()
+            raise StoreError(
+                f"Could not upgrade {path} to schema {target}: {e}"
+            ) from e
+
+
 class IncidentStore:
     def __init__(self, path: str | Path):
         self.path = Path(path).expanduser()
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        self._conn = sqlite3.connect(self.path)
-        self._conn.row_factory = sqlite3.Row
-        # WAL lets a reader (e.g. the cost-audit query) run without blocking
-        # the daemon's writes, and survives an ungraceful kill more cleanly.
-        self._conn.execute("PRAGMA journal_mode=WAL")
-        self._conn.execute("PRAGMA synchronous=NORMAL")
-        self._migrate()
-
-    def _migrate(self) -> None:
-        """Bring the database up to SCHEMA_VERSION, or explain why it can't be.
-
-        Each migration runs in its own transaction and bumps user_version, so
-        an interrupted upgrade resumes from the last step that committed
-        rather than half-applying.
-        """
-        version = self._conn.execute("PRAGMA user_version").fetchone()[0]
-        if version > SCHEMA_VERSION:
-            self._conn.close()
-            raise StoreError(
-                f"{self.path} was written by a newer version of maajun "
-                f"(schema {version}, this build understands {SCHEMA_VERSION}). "
-                "Upgrade maajun, or point daemon.workdir at a different "
-                "directory."
-            )
-        for target, migration in enumerate(MIGRATIONS[version:], start=version + 1):
-            try:
-                with self._conn:
-                    migration(self._conn)
-                    # Not parameterizable, and `target` is a loop index over a
-                    # module constant — never user input.
-                    self._conn.execute(f"PRAGMA user_version = {target}")
-            except sqlite3.Error as e:
-                self._conn.close()
-                raise StoreError(
-                    f"Could not upgrade {self.path} to schema {target}: {e}"
-                ) from e
+        self._conn = connect(self.path)
 
     def record(self, event: ErrorEvent) -> bool:
         """Record a sighting. Returns True if this error should be handled.
