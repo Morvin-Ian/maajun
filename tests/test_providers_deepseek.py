@@ -269,29 +269,32 @@ async def test_no_retry_on_auth_error(monkeypatch):
     assert call_count == 1  # no retries
 
 
-def test_prepared_tools_are_cached():
+def test_prepared_tools_are_rebuilt_every_call():
+    """No memoization: an id()-keyed cache can serve a freed list's entry."""
     from maajun.providers.base import ToolDefinition
 
     provider = DeepSeekProvider({"api_key": "x"})
-    calls = {"n": 0}
-    real = provider.prepare_tools
-
-    def spy(tools):
-        calls["n"] += 1
-        return real(tools)
-
-    provider.prepare_tools = spy
     tools = [ToolDefinition("t", "d", {"type": "object", "properties": {}})]
 
     first = provider._prepared_tools(tools)
-    again = provider._prepared_tools(tools)  # same list object -> cache hit
-    assert first is again
-    assert calls["n"] == 1
-
-    provider._prepared_tools(list(tools))  # different object -> rebuild
-    assert calls["n"] == 2
+    again = provider._prepared_tools(tools)
+    assert first == again
+    assert first is not again
 
     assert provider._prepared_tools(None) is None
+
+
+def test_prepared_tools_reflect_the_list_they_were_given():
+    """The regression the id() cache allowed: same address, different tools."""
+    from maajun.providers.base import ToolDefinition
+
+    provider = DeepSeekProvider({"api_key": "x"})
+    schema = {"type": "object", "properties": {}}
+
+    read = provider._prepared_tools([ToolDefinition("read_file", "d", schema)])
+    grep = provider._prepared_tools([ToolDefinition("grep", "d", schema)])
+    assert read[0]["function"]["name"] == "read_file"
+    assert grep[0]["function"]["name"] == "grep"
 
 
 async def test_aclose_is_safe_without_client():
