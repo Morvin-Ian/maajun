@@ -202,8 +202,11 @@ def test_exhausted_lists_permanently_failed_incidents(tmp_path):
 # ---------------------------------------------------------------------------
 
 
-def _in_repo(repo, details="ValueError: boom"):
-    return ErrorEvent(source="test", message="boom", details=details, repo=repo)
+def _in_repo(repo, details="ValueError: boom", fingerprint=""):
+    return ErrorEvent(
+        source="test", message="boom", details=details, repo=repo,
+        fingerprint=fingerprint,
+    )
 
 
 def test_the_same_error_in_two_repos_is_two_incidents(store):
@@ -278,17 +281,10 @@ def test_local_mode_incidents_record_an_empty_repo(store):
     assert store.get(event.fingerprint) is not None
 
 
-def test_database_from_an_older_version_is_rejected(tmp_path):
-    """No conversion: an outdated schema fails at open, naming the fix.
-
-    CREATE TABLE IF NOT EXISTS leaves the old table alone, so without this the
-    first query naming a new column would blow up mid-incident instead.
-    """
+def _legacy_single_repo_db(path):
+    """A database from before multi-repo support: no repo, no attempts."""
     import sqlite3
 
-    from maajun.daemon.store import StoreError
-
-    path = tmp_path / "old.db"
     conn = sqlite3.connect(path)
     conn.execute(
         "CREATE TABLE incidents (fingerprint TEXT PRIMARY KEY, source TEXT NOT NULL,"
@@ -297,22 +293,65 @@ def test_database_from_an_older_version_is_rejected(tmp_path):
         " branch TEXT, pr_url TEXT, cost_usd REAL DEFAULT 0,"
         " prompt_tokens INTEGER DEFAULT 0, completion_tokens INTEGER DEFAULT 0)"
     )
+    conn.execute(
+        "INSERT INTO incidents (fingerprint, source, message, first_seen,"
+        " last_seen, count, status, pr_url, cost_usd)"
+        " VALUES ('abc123', 'logfile:/x.log', 'KeyError', 't0', 't1', 4,"
+        " 'processed', 'https://github.com/a/b/pull/7', 0.25)"
+    )
     conn.commit()
     conn.close()
 
-    with pytest.raises(StoreError) as exc:
-        IncidentStore(path)
-    message = str(exc.value)
-    assert "older version" in message
-    assert "attempts" in message and "repo" in message  # names what is missing
-    assert "Delete it" in message
+
+def test_an_older_database_is_migrated_not_rejected(tmp_path):
+    """History survives the upgrade — it used to have to be deleted."""
+    path = tmp_path / "old.db"
+    _legacy_single_repo_db(path)
+
+    store = IncidentStore(path)
+    rows = store.all()
+    assert len(rows) == 1
+    assert rows[0]["fingerprint"] == "abc123"
+    assert rows[0]["count"] == 4
+    assert rows[0]["cost_usd"] == 0.25
+    assert rows[0]["pr_url"] == "https://github.com/a/b/pull/7"
+    # Columns the old schema never had take their declared defaults.
+    assert rows[0]["repo"] == ""
+    assert rows[0]["attempts"] == 0
+    store.close()
 
 
-def test_a_database_missing_only_one_column_is_still_rejected(tmp_path):
-    """Half-converted is not usable either — no partial upgrades."""
+def test_a_migrated_database_is_fully_usable(tmp_path):
+    """The rebuilt table carries the new primary key, not just the columns."""
+    path = tmp_path / "old.db"
+    _legacy_single_repo_db(path)
+
+    store = IncidentStore(path)
+    # Same fingerprint, different repo: only possible with PK (fingerprint, repo).
+    assert store.record(_in_repo("acme/api", fingerprint="abc123")) is True
+    assert store.get("abc123", "acme/api") is not None
+    assert store.get("abc123", "") is not None
+    store.mark_failed("abc123", "acme/api")
+    assert store.get("abc123", "acme/api")["attempts"] == 1
+    store.close()
+
+
+def test_migration_is_not_reapplied_on_reopen(tmp_path):
+    path = tmp_path / "old.db"
+    _legacy_single_repo_db(path)
+
+    first = IncidentStore(path)
+    first.record(_in_repo("acme/api"))
+    first.close()
+
+    second = IncidentStore(path)
+    assert len(second.all()) == 2  # the migrated row plus the new one
+    second.close()
+
+
+def test_a_database_missing_only_one_column_is_upgraded_in_place(tmp_path):
+    """A half-converted schema gains the column rather than failing to open."""
     import sqlite3
-
-    from maajun.daemon.store import StoreError
 
     path = tmp_path / "half.db"
     conn = sqlite3.connect(path)
@@ -328,8 +367,28 @@ def test_a_database_missing_only_one_column_is_still_rejected(tmp_path):
     conn.commit()
     conn.close()
 
-    with pytest.raises(StoreError, match="attempts"):
+    store = IncidentStore(path)
+    store.record(_in_repo("acme/api"))
+    assert store.all()[0]["attempts"] == 0
+    store.close()
+
+
+def test_a_database_from_a_newer_maajun_is_refused(tmp_path):
+    """Downgrading must not silently rewrite a schema it does not understand."""
+    import sqlite3
+
+    from maajun.daemon.store import SCHEMA_VERSION, StoreError
+
+    path = tmp_path / "future.db"
+    IncidentStore(path).close()
+    conn = sqlite3.connect(path)
+    conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION + 5}")
+    conn.commit()
+    conn.close()
+
+    with pytest.raises(StoreError) as exc:
         IncidentStore(path)
+    assert "newer version of maajun" in str(exc.value)
 
 
 def test_a_fresh_database_reopens_cleanly(tmp_path):
