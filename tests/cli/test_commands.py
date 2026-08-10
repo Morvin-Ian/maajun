@@ -321,7 +321,8 @@ def test_malformed_toml_is_a_clean_error_not_a_traceback(tmp_path):
     assert "Could not read the config" in flat(result.output)
 
 
-def test_incidents_explains_an_outdated_database(tmp_path):
+def test_incidents_migrates_an_outdated_database_and_still_lists_it(tmp_path):
+    """An old incidents.db used to abort the command; now it is upgraded."""
     import sqlite3
 
     data = tmp_path / "data"
@@ -334,6 +335,34 @@ def test_incidents_explains_an_outdated_database(tmp_path):
         " branch TEXT, pr_url TEXT, cost_usd REAL DEFAULT 0,"
         " prompt_tokens INTEGER DEFAULT 0, completion_tokens INTEGER DEFAULT 0)"
     )
+    conn.execute(
+        "INSERT INTO incidents (fingerprint, source, message, first_seen,"
+        " last_seen, status, pr_url) VALUES ('deadbeef', 'logfile:/x.log',"
+        " 'KeyError: discount', 't0', 't1', 'processed',"
+        " 'https://github.com/a/b/pull/7')"
+    )
+    conn.commit()
+    conn.close()
+
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(f'[daemon]\nworkdir = "{data}"\n')
+
+    result = runner.invoke(app, ["incidents", "--config", str(config_path)])
+    assert result.exit_code == 0
+    assert "Traceback" not in result.output
+    assert "deadbeef" in flat(result.output)
+
+
+def test_incidents_refuses_a_database_from_a_newer_maajun(tmp_path):
+    import sqlite3
+
+    from maajun.daemon.store import SCHEMA_VERSION, IncidentStore
+
+    data = tmp_path / "data"
+    data.mkdir()
+    IncidentStore(data / "incidents.db").close()
+    conn = sqlite3.connect(data / "incidents.db")
+    conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION + 5}")
     conn.commit()
     conn.close()
 
@@ -343,8 +372,7 @@ def test_incidents_explains_an_outdated_database(tmp_path):
     result = runner.invoke(app, ["incidents", "--config", str(config_path)])
     assert result.exit_code == 1
     assert "Traceback" not in result.output
-    assert "older version of maajun" in flat(result.output)
-    assert "Delete it to start a fresh one" in flat(result.output)
+    assert "newer version of maajun" in flat(result.output)
 
 
 def test_re_adding_a_repo_only_changes_what_you_pass(tmp_path):

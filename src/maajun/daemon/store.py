@@ -29,11 +29,18 @@ CREATE TABLE IF NOT EXISTS incidents (
 )
 """
 
-_COLUMNS = frozenset({
+# Declared in the order the table declares them, so a rebuild can copy across
+# whichever subset an older database happens to have.
+INCIDENT_COLUMNS: tuple[str, ...] = (
     "fingerprint", "repo", "source", "message", "first_seen", "last_seen",
     "count", "status", "branch", "pr_url", "cost_usd", "prompt_tokens",
     "completion_tokens", "attempts",
-})
+)
+
+# Bumped whenever a migration is appended to MIGRATIONS. Stored in the file's
+# PRAGMA user_version, which starts at 0 on databases written before any of
+# this existed.
+SCHEMA_VERSION = 1
 
 # local mode.
 NO_REPO = ""
@@ -41,6 +48,48 @@ NO_REPO = ""
 
 class StoreError(RuntimeError):
     """An incident database that cannot be used as it stands."""
+
+
+def _columns_of(conn: sqlite3.Connection, table: str) -> list[str]:
+    return [row["name"] for row in conn.execute(f"PRAGMA table_info({table})")]
+
+
+def _migrate_to_1(conn: sqlite3.Connection) -> None:
+    """Create the incidents table, rebuilding an outdated one in place.
+
+    Databases written before maajun tracked a schema version sit at 0 and may
+    be missing columns entirely — or, from before multi-repo support, have the
+    wrong primary key. Both are repaired by copying the rows across whatever
+    columns the old table does have; `repo` picks up its '' default, which is
+    what a single-repo install meant anyway.
+
+    The alternative was what this replaces: refusing to open and telling the
+    user to delete their incident history.
+    """
+    existing = _columns_of(conn, "incidents")
+    if not existing:
+        conn.execute(SCHEMA)
+        return
+
+    primary_key = [
+        row["name"] for row in conn.execute("PRAGMA table_info(incidents)") if row["pk"]
+    ]
+    if set(existing) == set(INCIDENT_COLUMNS) and primary_key == ["fingerprint", "repo"]:
+        return
+
+    log.info("migrating the incidents table to the current schema")
+    shared = [name for name in INCIDENT_COLUMNS if name in existing]
+    columns = ", ".join(shared)
+    conn.execute("ALTER TABLE incidents RENAME TO incidents_outdated")
+    conn.execute(SCHEMA)
+    conn.execute(
+        f"INSERT INTO incidents ({columns}) SELECT {columns} FROM incidents_outdated"
+    )
+    conn.execute("DROP TABLE incidents_outdated")
+
+
+# Index i applies to a database at user_version i, taking it to i + 1.
+MIGRATIONS = (_migrate_to_1,)
 
 # Incident lifecycle: new -> processed, or new -> failed -> new (retried) ->
 # ... -> failed permanently once MAX_ATTEMPTS is reached.
@@ -57,33 +106,36 @@ class IncidentStore:
         # the daemon's writes, and survives an ungraceful kill more cleanly.
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute("PRAGMA synchronous=NORMAL")
-        self._conn.execute(SCHEMA)
-        self._check_schema()
-        self._conn.commit()
+        self._migrate()
 
-    def _check_schema(self) -> None:
-        """Reject a database written by an older version.
+    def _migrate(self) -> None:
+        """Bring the database up to SCHEMA_VERSION, or explain why it can't be.
 
-        CREATE TABLE IF NOT EXISTS leaves an existing table alone, so an
-        outdated one survives to the first query that names a column it does
-        not have — a SQL error mid-incident. Fail at open instead, and say
-        what to do about it.
-
-        The database is a record of which errors have already been handled, so
-        deleting it is safe: each still-current error is reported once more.
+        Each migration runs in its own transaction and bumps user_version, so
+        an interrupted upgrade resumes from the last step that committed
+        rather than half-applying.
         """
-        missing = _COLUMNS - {
-            row["name"]
-            for row in self._conn.execute("PRAGMA table_info(incidents)").fetchall()
-        }
-        if not missing:
-            return
-        self._conn.close()
-        raise StoreError(
-            f"{self.path} was written by an older version of maajun and is "
-            f"missing: {', '.join(sorted(missing))}. Delete it to start a fresh "
-            "one — already-handled errors will be reported once more."
-        )
+        version = self._conn.execute("PRAGMA user_version").fetchone()[0]
+        if version > SCHEMA_VERSION:
+            self._conn.close()
+            raise StoreError(
+                f"{self.path} was written by a newer version of maajun "
+                f"(schema {version}, this build understands {SCHEMA_VERSION}). "
+                "Upgrade maajun, or point daemon.workdir at a different "
+                "directory."
+            )
+        for target, migration in enumerate(MIGRATIONS[version:], start=version + 1):
+            try:
+                with self._conn:
+                    migration(self._conn)
+                    # Not parameterizable, and `target` is a loop index over a
+                    # module constant — never user input.
+                    self._conn.execute(f"PRAGMA user_version = {target}")
+            except sqlite3.Error as e:
+                self._conn.close()
+                raise StoreError(
+                    f"Could not upgrade {self.path} to schema {target}: {e}"
+                ) from e
 
     def record(self, event: ErrorEvent) -> bool:
         """Record a sighting. Returns True if this error should be handled.
