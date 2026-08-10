@@ -23,6 +23,20 @@ MAX_TOOL_ROUNDS = 50
 # window. Full history is kept locally for /history.
 MAX_HISTORY_MESSAGES = 40
 
+# Ceiling on the characters in one request. MAX_HISTORY_MESSAGES bounds the
+# stored conversation, but a single turn's tool loop appends an assistant
+# message and a tool result per call for up to MAX_TOOL_ROUNDS rounds — none
+# of which is history yet. Left unbounded, a grep-heavy analysis walks past
+# the context window and fails the incident outright.
+#
+# ~4 chars per token puts this near 40k tokens, comfortably inside the
+# smallest context maajun targets while leaving room for max_tokens of output.
+MAX_REQUEST_CHARS = 160_000
+
+# Never trim below the system prompt plus this many trailing messages, so a
+# single enormous tool result cannot erase the question it was answering.
+MIN_REQUEST_MESSAGES = 4
+
 TOOL_RESULT_PREVIEW = 200
 
 # Called with (tool_name, arguments) before a permission-gated tool runs;
@@ -57,6 +71,36 @@ running unattended, so never end by waiting for a reply.
 
 Be concise, accurate, and helpful.  Use markdown when it improves readability.
 If you're unsure about something, say so rather than guessing."""
+
+
+def _message_size(message: dict[str, Any]) -> int:
+    """Rough character cost of one message, including its tool calls."""
+    size = len(message.get("content") or "")
+    for call in message.get("tool_calls") or ():
+        function = call.get("function", {})
+        size += len(function.get("name", "")) + len(function.get("arguments") or "")
+    return size
+
+
+def trim_request_messages(messages: list[dict[str, Any]]) -> None:
+    """Drop the oldest rounds in place until the request fits the budget.
+
+    messages[0] is the system prompt and is never dropped. Everything else is
+    removed oldest-first, except that a "tool" message is never left at the
+    front: it belongs to the assistant message that requested it, and the API
+    rejects a tool result with no matching tool call ahead of it.
+    """
+    total = sum(_message_size(message) for message in messages)
+    while total > MAX_REQUEST_CHARS and len(messages) > MIN_REQUEST_MESSAGES:
+        total -= _message_size(messages.pop(1))
+        while len(messages) > MIN_REQUEST_MESSAGES and messages[1].get("role") == "tool":
+            total -= _message_size(messages.pop(1))
+    if total > MAX_REQUEST_CHARS:
+        log.warning(
+            "request is %d chars after trimming to %d messages — the provider "
+            "may reject it as too long",
+            total, len(messages),
+        )
 
 
 def _accumulate_usage(total: dict[str, int], usage: dict[str, int] | None) -> None:
@@ -118,6 +162,7 @@ class Agent:
 
         try:
             for _ in range(MAX_TOOL_ROUNDS):
+                trim_request_messages(messages)
                 response = await self._complete(messages, tools)
                 _accumulate_usage(total_usage, response.usage)
 
@@ -173,6 +218,7 @@ class Agent:
                 round_content: list[str] = []
                 tool_calls: list[dict] = []
 
+                trim_request_messages(messages)
                 async for kind, data in self.provider.stream_completion(
                     messages=messages,
                     tools=tools,
