@@ -124,11 +124,15 @@ class Agent:
         *,
         tools: ToolRegistry | None = None,
         approve: PermissionCallback | None = None,
+        system_prompt: str | None = None,
     ):
         self.config = config
         self.history: list[dict[str, str]] = []
         self.registry = tools or default_registry()
         self.approve = approve
+        # The daemon's incident analysis and an interactive chat want to be
+        # told different things; the tool loop underneath is identical.
+        self.system_prompt = system_prompt or SYSTEM_PROMPT
         self.provider = ProviderFactory.create_provider(
             ProviderType(config.ai.provider),
             {
@@ -322,7 +326,7 @@ class Agent:
 
     def _request_messages(self) -> list[dict[str, str]]:
         return [
-            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "system", "content": self.system_prompt},
             *self.history[-MAX_HISTORY_MESSAGES:],
         ]
 
