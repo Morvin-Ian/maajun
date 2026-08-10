@@ -380,6 +380,7 @@ def setup(
         help="Ask again for credentials that are already stored",
     ),
 ):
+    """Configure maajun: the provider key, GitHub, and the error sources."""
     path = config_path or default_config_path()
     ask = _Asker(interactive=not non_interactive)
     auth = AuthManager()
