@@ -230,12 +230,9 @@ def report(
         else:
             with working(console, "Preparing workspace") as status:
                 result = asyncio.run(run_report(status.set))
-            if daemon.local_mode:
-                label = "Report written"
-            elif target.mode == "fix":
-                label = "PR opened"
-            else:
-                label = "Issue opened"
+            # What was published, not what the mode implies: a fix-mode run
+            # that changed no code files an issue instead.
+            label = daemon.artifact_label(daemon.last_artifact_kind)
             console.print(f"\n[green]✓ {label}:[/green] {result}")
     except KeyboardInterrupt:
         console.print("\n[dim]Cancelled.[/dim]")
