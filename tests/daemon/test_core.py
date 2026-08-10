@@ -12,7 +12,7 @@ import pytest
 
 from maajun.config import Config, DaemonConfig, GitHubConfig, MonitorConfig, RepoConfig
 from maajun.daemon.core import SHUTDOWN_EVENT, Daemon, make_permission_policy
-from maajun.daemon.store import IncidentStore
+from maajun.daemon.store import ARTIFACT_ISSUE, ARTIFACT_PR, IncidentStore
 from maajun.monitors import LogFileMonitor
 from maajun.providers.base import CompletionResponse
 from maajun.vcs import GitWorkspace
@@ -1070,3 +1070,61 @@ async def test_one_unwired_monitor_does_not_stop_the_others(multi_setup):
 
     assert sorted(issue["repo"] for issue in github.issues) == ["acme/api", "acme/web"]
     assert any("is not usable" in message for message in notices)
+
+
+# ---------------------------------------------------------------------------
+# Recording the analysis itself
+# ---------------------------------------------------------------------------
+
+
+async def test_suggest_mode_records_the_report_and_marks_it_an_issue(setup):
+    """The analysis used to exist only in the GitHub issue; chat recalls it."""
+    daemon, logfile, agent, github, store, remote = setup
+
+    with open(logfile, "a") as f:
+        f.write(TRACEBACK)
+    fp = (await daemon.poll_once())[0]
+
+    row = store.get(fp, "owner/name")
+    assert row["artifact_kind"] == ARTIFACT_ISSUE
+    assert "Root cause" in row["report_text"]
+
+
+async def test_fix_mode_records_the_report_and_marks_it_a_pr(tmp_path, remote):
+    daemon, logfile, store = _fix_mode_daemon(tmp_path, remote)
+
+    with open(logfile, "a") as f:
+        f.write(TRACEBACK)
+    fp = (await daemon.poll_once())[0]
+
+    row = store.get(fp, "owner/name")
+    assert row["artifact_kind"] == ARTIFACT_PR
+    assert "Root cause" in row["report_text"]
+
+
+def _fix_mode_daemon(tmp_path, remote):
+    logfile = tmp_path / "app.log"
+    logfile.write_text("")
+    repo_config = RepoConfig(repo="owner/name", base_branch="main", mode="fix")
+    config = Config(
+        github=GitHubConfig(repos=[repo_config]),
+        monitor=MonitorConfig(log_files=[str(logfile)], poll_interval=1),
+        daemon=DaemonConfig(workdir=str(tmp_path / "work")),
+    )
+    workspace = GitWorkspace(
+        tmp_path / "work" / "ws", "owner/name", remote_url=str(remote)
+    )
+    store = IncidentStore(tmp_path / "work" / "incidents.db")
+    monitor = LogFileMonitor(logfile)
+    daemon = Daemon(
+        config,
+        monitors=[monitor],
+        store=store,
+        workspaces={"owner/name": workspace},
+        monitor_to_repo={id(monitor): repo_config},
+        github=FakeGitHub(),
+        agent_factory_for_repo=lambda rc, ws: lambda: FakeAgent(
+            edit_path=ws.path / "main.py"
+        ),
+    )
+    return daemon, logfile, store

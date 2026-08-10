@@ -2,7 +2,12 @@
 
 import pytest
 
-from maajun.daemon.store import IncidentStore
+from maajun.daemon.store import (
+    ARTIFACT_ISSUE,
+    ARTIFACT_PR,
+    ARTIFACT_REPORT,
+    IncidentStore,
+)
 from maajun.monitors import ErrorEvent
 
 
@@ -401,3 +406,71 @@ def test_a_fresh_database_reopens_cleanly(tmp_path):
     assert [row["repo"] for row in second.all()] == ["acme/api"]
     assert second.record(_in_repo("acme/api")) is False
     second.close()
+
+
+# ---------------------------------------------------------------------------
+# report text and artifact kind
+# ---------------------------------------------------------------------------
+
+
+def test_mark_processed_keeps_the_report_and_what_it_produced(store):
+    store.record(_in_repo("acme/api", fingerprint="fp1"))
+    store.mark_processed(
+        "fp1", "acme/api",
+        branch="maajun/incident-fp1",
+        pr_url="https://github.com/acme/api/pull/3",
+        report_text="# KeyError\n\n## Root cause\ncart/totals.py:88",
+        artifact_kind=ARTIFACT_PR,
+    )
+    row = store.get("fp1", "acme/api")
+    assert "cart/totals.py:88" in row["report_text"]
+    assert row["artifact_kind"] == ARTIFACT_PR
+
+
+def test_report_text_defaults_to_empty_rather_than_null(store):
+    """Recall joins on this column; NULL would need handling at every reader."""
+    store.record(_in_repo("acme/api", fingerprint="fp1"))
+    row = store.get("fp1", "acme/api")
+    assert row["report_text"] == ""
+    assert row["artifact_kind"] == ""
+
+
+def test_migration_backfills_artifact_kind_from_the_old_columns(tmp_path):
+    """Pre-existing rows get a kind inferred from branch and URL shape."""
+    import sqlite3
+
+    path = tmp_path / "old.db"
+    _legacy_single_repo_db(path)
+    conn = sqlite3.connect(path)
+    conn.execute(
+        "INSERT INTO incidents (fingerprint, source, message, first_seen,"
+        " last_seen, status, branch, pr_url) VALUES ('fixed', 's', 'm', 't', 't',"
+        " 'processed', 'maajun/incident-fixed', 'https://github.com/a/b/pull/9')"
+    )
+    conn.execute(
+        "INSERT INTO incidents (fingerprint, source, message, first_seen,"
+        " last_seen, status, pr_url) VALUES ('local', 's', 'm', 't', 't',"
+        " 'processed', '/home/me/.local/share/maajun/reports/local.md')"
+    )
+    conn.commit()
+    conn.close()
+
+    store = IncidentStore(path)
+    kinds = {row["fingerprint"]: row["artifact_kind"] for row in store.all()}
+    # A branch means fix mode pushed one.
+    assert kinds["fixed"] == ARTIFACT_PR
+    # An http URL with no branch is suggest mode's issue.
+    assert kinds["abc123"] == ARTIFACT_ISSUE
+    # A filesystem path is a local-mode report.
+    assert kinds["local"] == ARTIFACT_REPORT
+    store.close()
+
+
+def test_backfill_leaves_unprocessed_rows_without_a_kind(tmp_path):
+    """A 'new' incident has produced nothing yet — don't invent an artifact."""
+    path = tmp_path / "old.db"
+    _legacy_single_repo_db(path)
+    store = IncidentStore(path)
+    store.record(_in_repo("acme/api", fingerprint="pending"))
+    assert store.get("pending", "acme/api")["artifact_kind"] == ""
+    store.close()

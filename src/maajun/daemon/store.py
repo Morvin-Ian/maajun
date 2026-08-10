@@ -25,6 +25,8 @@ CREATE TABLE IF NOT EXISTS incidents (
     prompt_tokens INTEGER DEFAULT 0,
     completion_tokens INTEGER DEFAULT 0,
     attempts    INTEGER NOT NULL DEFAULT 0,
+    report_text TEXT NOT NULL DEFAULT '',
+    artifact_kind TEXT NOT NULL DEFAULT '',
     PRIMARY KEY (fingerprint, repo)
 )
 """
@@ -34,13 +36,20 @@ CREATE TABLE IF NOT EXISTS incidents (
 INCIDENT_COLUMNS: tuple[str, ...] = (
     "fingerprint", "repo", "source", "message", "first_seen", "last_seen",
     "count", "status", "branch", "pr_url", "cost_usd", "prompt_tokens",
-    "completion_tokens", "attempts",
+    "completion_tokens", "attempts", "report_text", "artifact_kind",
 )
 
 # Bumped whenever a migration is appended to MIGRATIONS. Stored in the file's
 # PRAGMA user_version, which starts at 0 on databases written before any of
 # this existed.
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
+
+# What an incident produced. Recorded explicitly because it used to be
+# inferred from `branch != ""`, which cannot tell a suggest-mode issue from a
+# local-mode report, and breaks the moment either grows a branch.
+ARTIFACT_PR = "pr"
+ARTIFACT_ISSUE = "issue"
+ARTIFACT_REPORT = "report"
 
 # local mode.
 NO_REPO = ""
@@ -88,8 +97,48 @@ def _migrate_to_1(conn: sqlite3.Connection) -> None:
     conn.execute("DROP TABLE incidents_outdated")
 
 
+def _add_column_if_missing(
+    conn: sqlite3.Connection, table: str, name: str, ddl: str
+) -> None:
+    """ALTER in a column, tolerating a table that already has it.
+
+    Needed because SCHEMA always describes the newest shape: a fresh database
+    is created with every column present, so a later migration must be a
+    no-op there while still upgrading an existing file.
+    """
+    if name in _columns_of(conn, table):
+        return
+    conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {ddl}")
+
+
+def _migrate_to_2(conn: sqlite3.Connection) -> None:
+    """Keep the analysis text and say what the incident produced.
+
+    Only local mode ever wrote the report anywhere maajun could read it back;
+    in suggest mode the analysis existed solely in the GitHub issue. Storing
+    it makes an incident answerable offline — which is what `maajun chat`
+    recalls when asked about a past error.
+    """
+    _add_column_if_missing(conn, "incidents", "report_text", "TEXT NOT NULL DEFAULT ''")
+    _add_column_if_missing(
+        conn, "incidents", "artifact_kind", "TEXT NOT NULL DEFAULT ''"
+    )
+    # Backfill what the old rows can tell us: a branch means fix mode opened a
+    # PR, an http(s) URL without one means an issue, anything else is a report
+    # path written locally.
+    conn.execute(
+        "UPDATE incidents SET artifact_kind = CASE"
+        "  WHEN COALESCE(branch, '') != '' THEN ?"
+        "  WHEN COALESCE(pr_url, '') LIKE 'http%' THEN ?"
+        "  WHEN COALESCE(pr_url, '') != '' THEN ?"
+        "  ELSE '' END"
+        " WHERE artifact_kind = ''",
+        (ARTIFACT_PR, ARTIFACT_ISSUE, ARTIFACT_REPORT),
+    )
+
+
 # Index i applies to a database at user_version i, taking it to i + 1.
-MIGRATIONS = (_migrate_to_1,)
+MIGRATIONS = (_migrate_to_1, _migrate_to_2)
 
 # Incident lifecycle: new -> processed, or new -> failed -> new (retried) ->
 # ... -> failed permanently once MAX_ATTEMPTS is reached.
@@ -193,12 +242,18 @@ class IncidentStore:
         cost_usd: float = 0,
         prompt_tokens: int = 0,
         completion_tokens: int = 0,
+        report_text: str = "",
+        artifact_kind: str = "",
     ) -> None:
         self._conn.execute(
             "UPDATE incidents SET status = 'processed', branch = ?, pr_url = ?,"
-            " cost_usd = ?, prompt_tokens = ?, completion_tokens = ?"
+            " cost_usd = ?, prompt_tokens = ?, completion_tokens = ?,"
+            " report_text = ?, artifact_kind = ?"
             " WHERE fingerprint = ? AND repo = ?",
-            (branch, pr_url, cost_usd, prompt_tokens, completion_tokens, fp, repo),
+            (
+                branch, pr_url, cost_usd, prompt_tokens, completion_tokens,
+                report_text, artifact_kind, fp, repo,
+            ),
         )
         self._conn.commit()
 
