@@ -26,9 +26,12 @@ def test_first_sighting_is_new(store):
     assert store.record(make_event()) is True
 
 
-def test_repeat_sighting_is_not_new(store):
+def test_repeat_sighting_of_a_handled_error_is_not_new(store):
+    """Handled, not merely recorded, is what stops an error being re-reported."""
     event = make_event()
     store.record(event)
+    store.mark_processed(event.fingerprint, branch="", pr_url="u")
+
     assert store.record(make_event()) is False
     assert store.get(event.fingerprint)["count"] == 2
 
@@ -62,6 +65,7 @@ def test_persists_across_reopen(tmp_path):
     event = make_event()
     s1 = IncidentStore(tmp_path / "incidents.db")
     s1.record(event)
+    s1.mark_processed(event.fingerprint, branch="", pr_url="u")
     s1.close()
 
     s2 = IncidentStore(tmp_path / "incidents.db")
@@ -227,7 +231,10 @@ def test_the_same_error_in_two_repos_is_two_incidents(store):
 
 
 def test_a_repeat_in_one_repo_is_still_a_repeat(store):
-    assert store.record(_in_repo("acme/api")) is True
+    event = _in_repo("acme/api")
+    assert store.record(event) is True
+    store.mark_processed(event.fingerprint, "acme/api", branch="", pr_url="u")
+
     assert store.record(_in_repo("acme/api")) is False
 
 
@@ -399,7 +406,9 @@ def test_a_database_from_a_newer_maajun_is_refused(tmp_path):
 def test_a_fresh_database_reopens_cleanly(tmp_path):
     path = tmp_path / "i.db"
     first = IncidentStore(path)
-    first.record(_in_repo("acme/api"))
+    event = _in_repo("acme/api")
+    first.record(event)
+    first.mark_processed(event.fingerprint, "acme/api", branch="", pr_url="u")
     first.close()
 
     second = IncidentStore(path)
@@ -474,3 +483,40 @@ def test_backfill_leaves_unprocessed_rows_without_a_kind(tmp_path):
     store.record(_in_repo("acme/api", fingerprint="pending"))
     assert store.get("pending", "acme/api")["artifact_kind"] == ""
     store.close()
+
+
+# ---------------------------------------------------------------------------
+# Incidents recorded but never handled
+# ---------------------------------------------------------------------------
+
+
+def test_an_unhandled_incident_is_picked_up_again(store):
+    """'new' means recorded, not published — deferred or interrupted."""
+    assert store.record(_event()) is True
+    assert store.record(_event()) is True  # still unhandled
+
+
+def test_an_unhandled_incident_keeps_accumulating_sightings(store):
+    """Regression: the deferral path deleted the row, so count reset each poll."""
+    for _ in range(4):
+        store.record(_event())
+
+    assert store.get("fp1")["count"] == 4
+
+
+def test_first_seen_survives_repeated_deferral(store):
+    """It used to become whenever the cap lifted, not when the error started."""
+    store.record(_event())
+    started = store.get("fp1")["first_seen"]
+    for _ in range(3):
+        store.record(_event())
+
+    assert store.get("fp1")["first_seen"] == started
+
+
+def test_an_incident_processed_after_deferral_settles(store):
+    store.record(_event())
+    store.record(_event())
+    store.mark_processed("fp1", branch="", pr_url="u")
+
+    assert store.record(_event()) is False

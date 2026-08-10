@@ -1238,3 +1238,43 @@ def test_artifact_label_covers_every_kind():
     assert Daemon.artifact_label(ARTIFACT_REPORT) == "Report written"
     assert Daemon.artifact_label(None) == "Handled"
     assert Daemon.artifact_label("") == "Handled"
+
+
+async def test_a_capped_error_keeps_its_history(setup):
+    """Deferral used to delete the row, resetting the count every poll.
+
+    While the cap held, each poll re-inserted and re-deleted the incident, so
+    'seen 40 times over two hours' was reported as 'seen once'.
+    """
+    daemon, logfile, agent, github, store, remote = setup
+    daemon.config.daemon.max_usd_per_day = 0.01
+    _seed_spend(store, "earlier", 0.02)
+
+    for _ in range(3):
+        with open(logfile, "a") as f:
+            f.write(TRACEBACK)
+        await daemon.poll_once()
+
+    deferred = [row for row in store.all() if row["fingerprint"] != "earlier"]
+    assert len(deferred) == 1
+    assert deferred[0]["count"] == 3
+    assert deferred[0]["status"] == "new"
+    assert agent.prompts == []  # still no AI call
+
+
+async def test_first_seen_is_when_the_error_started_not_when_the_cap_lifted(setup):
+    daemon, logfile, agent, github, store, remote = setup
+    daemon.config.daemon.max_usd_per_day = 0.01
+    _seed_spend(store, "earlier", 0.02)
+
+    with open(logfile, "a") as f:
+        f.write(TRACEBACK)
+    await daemon.poll_once()
+    started = [r for r in store.all() if r["fingerprint"] != "earlier"][0]["first_seen"]
+
+    daemon.config.daemon.max_usd_per_day = 100.0
+    with open(logfile, "a") as f:
+        f.write(TRACEBACK)
+    fp = (await daemon.poll_once())[0]
+
+    assert store.get(fp, "owner/name")["first_seen"] == started
