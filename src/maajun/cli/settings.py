@@ -165,5 +165,5 @@ def reset(
 
     console.print(
         "\n[bold]Maajun has been reset.[/bold]\n\n"
-        "Run [bold]maajun init[/bold] to start fresh.\n"
+        "Run [bold]maajun setup[/bold] to start fresh.\n"
     )
