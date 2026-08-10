@@ -5,16 +5,30 @@ import logging
 log = logging.getLogger(__name__)
 
 
+# USD per 1M tokens, list price, verified against the vendors' own pricing
+# pages in August 2026. DeepSeek also bills cache *hits* at roughly a fiftieth
+# of the input rate; that is not modelled here, because parse_response does not
+# carry the prompt_cache_hit_tokens split through. Everything is therefore
+# costed at the cache-miss rate, which over-reports rather than under-reports —
+# the safe direction for a spend cap.
 PRICING: dict[str, dict[str, float]] = {
-    # DeepSeek, as of July 2026
-    "deepseek-v4-flash": {"input": 0.27, "output": 1.10},
-    "deepseek-v4-pro": {"input": 1.10, "output": 4.40},
+    # https://api-docs.deepseek.com/quick_start/pricing
+    "deepseek-v4-flash": {"input": 0.14, "output": 0.28},
+    "deepseek-v4-pro": {"input": 0.435, "output": 0.87},
+    # https://developers.openai.com/api/docs/pricing
     "gpt-4o-mini": {"input": 0.15, "output": 0.60},
     "gpt-4o": {"input": 2.50, "output": 10.00},
 }
 
 
-DEFAULT_PRICING: dict[str, float] = {"input": 1.00, "output": 3.00}
+# What an unpriced model is costed at. Derived from the table rather than
+# fixed, so it stays the most expensive thing maajun knows about: a flat
+# $1.00/$3.00 was described as conservative but sat *below* gpt-4o, so an
+# unrecognised premium model was under-costed and the daily cap overshot.
+DEFAULT_PRICING: dict[str, float] = {
+    "input": max(rates["input"] for rates in PRICING.values()),
+    "output": max(rates["output"] for rates in PRICING.values()),
+}
 
 FALLBACK_MODEL = "deepseek-v4-flash"
 

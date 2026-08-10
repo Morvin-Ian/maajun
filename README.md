@@ -304,8 +304,8 @@ tokens:
 
 | Model | Input | Output |
 |---|---|---|
-| `deepseek-v4-flash` | $0.27 | $1.10 |
-| `deepseek-v4-pro` | $1.10 | $4.40 |
+| `deepseek-v4-flash` | $0.14 | $0.28 |
+| `deepseek-v4-pro` | $0.435 | $0.87 |
 | `gpt-4o-mini` | $0.15 | $0.60 |
 | `gpt-4o` | $2.50 | $10.00 |
 
@@ -313,9 +313,13 @@ On either provider's default model a single analysis costs cents, not dollars â€
 but measure your own workload with `--dry-run` rather than trusting an
 estimate. Rates change; verify them against
 [DeepSeek](https://api-docs.deepseek.com/quick_start/pricing) or
-[OpenAI](https://openai.com/api/pricing/) before relying on the cap, and note
-that a model with no entry is priced at a deliberately conservative $1.00 /
-$3.00 so the cap never overshoots.
+[OpenAI](https://developers.openai.com/api/docs/pricing) before relying on the
+cap. A model with no entry is costed at the most expensive rate in the table
+above, so the cap errs towards stopping early rather than overshooting.
+
+DeepSeek bills cached input at a fraction of these rates. Maajun costs every
+input token at the cache-miss rate, so a repetitive workload will report
+somewhat more than it actually spends.
 
 ## Security model
 

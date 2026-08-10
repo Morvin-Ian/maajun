@@ -7,22 +7,22 @@ def test_compute_cost_deepseek_v4_flash():
     cost = compute_cost(
         prompt_tokens=1_000_000, completion_tokens=1_000_000, model="deepseek-v4-flash"
     )
-    # $0.27 input + $1.10 output = $1.37
-    assert abs(cost - 1.37) < 0.001
+    # $0.14 input + $0.28 output = $0.42
+    assert abs(cost - 0.42) < 0.001
 
 
 def test_compute_cost_deepseek_v4_pro():
     cost = compute_cost(
         prompt_tokens=1_000_000, completion_tokens=1_000_000, model="deepseek-v4-pro"
     )
-    # $1.10 input + $4.40 output = $5.50
-    assert abs(cost - 5.50) < 0.001
+    # $0.435 input + $0.87 output = $1.305
+    assert abs(cost - 1.305) < 0.001
 
 
 def test_compute_cost_small_amount():
     cost = compute_cost(prompt_tokens=1000, completion_tokens=500, model="deepseek-v4-flash")
-    # (1000/1M)*0.27 + (500/1M)*1.10 = 0.00027 + 0.00055 = 0.00082
-    assert abs(cost - 0.00082) < 0.00001
+    # (1000/1M)*0.14 + (500/1M)*0.28 = 0.00014 + 0.00014 = 0.00028
+    assert abs(cost - 0.00028) < 0.00001
 
 
 def test_compute_cost_zero_tokens():
@@ -122,3 +122,34 @@ def test_every_supported_provider_has_priced_defaults():
         provider_class = ProviderFactory._providers[provider_type]
         for model in (provider_class.default_model, provider_class.thinking_model):
             assert pricing_for(model) is not DEFAULT_PRICING, model
+
+
+def test_the_default_rate_is_above_every_known_model():
+    """An unpriced model must over-report, so the spend cap never overshoots."""
+    from maajun.providers.pricing import DEFAULT_PRICING, PRICING
+
+    for rates in PRICING.values():
+        assert rates["input"] <= DEFAULT_PRICING["input"]
+        assert rates["output"] <= DEFAULT_PRICING["output"]
+
+
+def test_the_thinking_model_costs_more_than_the_default_one():
+    """If these ever invert, thinking_mode has stopped being the premium path."""
+    from maajun.providers.deepseek import DeepSeekProvider
+    from maajun.providers.openai import OpenAIProvider
+
+    for provider in (DeepSeekProvider, OpenAIProvider):
+        cheap = compute_cost(1_000_000, 1_000_000, provider.default_model)
+        premium = compute_cost(1_000_000, 1_000_000, provider.thinking_model)
+        assert premium > cheap
+
+
+def test_every_shipped_model_has_a_price():
+    """A provider default with no entry would silently fall back to guesswork."""
+    from maajun.providers.deepseek import DeepSeekProvider
+    from maajun.providers.openai import OpenAIProvider
+    from maajun.providers.pricing import PRICING
+
+    for provider in (DeepSeekProvider, OpenAIProvider):
+        assert provider.default_model in PRICING
+        assert provider.thinking_model in PRICING
