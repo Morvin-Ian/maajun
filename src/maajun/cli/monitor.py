@@ -47,7 +47,7 @@ def watch(
         None, "--mode", "-m", help="Override mode: 'suggest' or 'fix'"
     ),
 ):
-
+    """Run the monitoring daemon: watch error sources and document what turns up."""
     use_spinner = not verbose and not dry_run and sys.stdin.isatty()
     logging.basicConfig(
         level=logging.DEBUG if verbose else (logging.WARNING if use_spinner else logging.INFO),
@@ -60,6 +60,15 @@ def watch(
         if mode not in ("suggest", "fix"):
             console.print(f"[red]✗ Invalid mode: {mode}. Use 'suggest' or 'fix'.[/red]")
             raise typer.Exit(1)
+        # Say so rather than appearing to accept it: local mode has no
+        # [[github.repos]] entries, so this loop had nothing to write to and
+        # -m fix was silently ignored.
+        if not config.github.repos:
+            console.print(
+                f"[yellow]⚠ --mode {mode} has no effect without a configured "
+                "repository — local mode only writes reports to disk. "
+                "Add one with 'maajun add-repo <owner/name>'.[/yellow]"
+            )
         for repo_config in config.github.repos:
             repo_config.mode = mode
 
@@ -157,6 +166,15 @@ def report(
         if mode not in ("suggest", "fix"):
             console.print(f"[red]✗ Invalid mode: {mode}. Use 'suggest' or 'fix'.[/red]")
             raise typer.Exit(1)
+        # Say so rather than appearing to accept it: local mode has no
+        # [[github.repos]] entries, so this loop had nothing to write to and
+        # -m fix was silently ignored.
+        if not config.github.repos:
+            console.print(
+                f"[yellow]⚠ --mode {mode} has no effect without a configured "
+                "repository — local mode only writes reports to disk. "
+                "Add one with 'maajun add-repo <owner/name>'.[/yellow]"
+            )
         for repo_config in config.github.repos:
             repo_config.mode = mode
 
@@ -230,12 +248,9 @@ def report(
         else:
             with working(console, "Preparing workspace") as status:
                 result = asyncio.run(run_report(status.set))
-            if daemon.local_mode:
-                label = "Report written"
-            elif target.mode == "fix":
-                label = "PR opened"
-            else:
-                label = "Issue opened"
+            # What was published, not what the mode implies: a fix-mode run
+            # that changed no code files an issue instead.
+            label = daemon.artifact_label(daemon.last_artifact_kind)
             console.print(f"\n[green]✓ {label}:[/green] {result}")
     except KeyboardInterrupt:
         console.print("\n[dim]Cancelled.[/dim]")

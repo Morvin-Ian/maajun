@@ -134,6 +134,20 @@ def test_limit_caps_the_rows(workdir):
     assert sum(f"fp{n}" in result.output for n in range(5)) == 2
 
 
+def test_limit_caps_the_failed_list_too(workdir):
+    """--failed used to return every exhausted incident, ignoring --limit."""
+    config_path, data = workdir
+    store = _store(data)
+    for n in range(5):
+        _add(store, f"fp{n}", message=f"error {n}", failures=MAX_ATTEMPTS)
+    store.close()
+
+    result = runner.invoke(
+        app, ["incidents", "-c", str(config_path), "--failed", "-n", "2"]
+    )
+    assert sum(f"fp{n}" in result.output for n in range(5)) == 2
+
+
 # ---------------------------------------------------------------------------
 # Telling repos apart
 # ---------------------------------------------------------------------------

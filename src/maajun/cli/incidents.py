@@ -62,9 +62,12 @@ def incidents(
             if known:
                 console.print(f"[dim]Repos with incidents: {', '.join(known)}[/dim]")
             return
-        rows = store.exhausted() if failed else store.all(repo)[:limit]
+        rows = store.exhausted() if failed else store.all(repo)
         if failed and repo is not None:
             rows = [row for row in rows if row["repo"] == repo]
+        # Applied after the --repo filter, and to --failed too: a long list of
+        # exhausted incidents used to ignore --limit entirely.
+        rows = rows[:limit]
         render_incidents(store, rows, config, failed=failed)
     finally:
         store.close()

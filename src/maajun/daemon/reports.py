@@ -27,10 +27,16 @@ def provenance(event: ErrorEvent) -> str:
     )
 
 
-def issue_body(event: ErrorEvent, report: str) -> str:
-    """Suggest mode's artifact: the analysis plus the raw error."""
+def issue_body(event: ErrorEvent, report: str, note: str = "") -> str:
+    """Suggest mode's artifact: the analysis plus the raw error.
+
+    `note` carries a leading remark — used when fix mode falls back to an
+    issue because the analysis changed no code, so the reader is not left
+    wondering why a fix-mode repo produced an issue.
+    """
     return (
-        f"{report}\n\n---\n\n"
+        (f"{note}\n\n" if note else "")
+        + f"{report}\n\n---\n\n"
         f"## Error details\n\n```\n{event.details[:MAX_DETAILS_IN_BODY]}\n```\n\n"
         f"{provenance(event)}"
     )

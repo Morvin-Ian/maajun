@@ -17,7 +17,7 @@ Nothing merges without your review, in either mode.
 
 **Contents** — [Requirements](#requirements) · [Installation](#installation) ·
 [Quick start](#quick-start) · [How it works](#how-it-works) ·
-[Modes](#modes) · [AI providers](#ai-providers) ·
+[Chat](#chat) · [Modes](#modes) · [AI providers](#ai-providers) ·
 [Configuration](#configuration) · [Commands](#commands) ·
 [Cost control](#cost-control) · [Security model](#security-model) ·
 [Documentation](#documentation)
@@ -142,6 +142,42 @@ verdict at the top of the body.
 A failing suite (`❌ Tests fail (exit 1)`) still opens the PR — a fix that
 breaks the tests is exactly what a reviewer needs to see.
 
+## Chat
+
+`maajun chat` is a conversational front end to everything above. It knows
+every command — the list is read from the CLI itself, so it is never out of
+date — and it remembers every incident maajun has handled.
+
+```bash
+maajun chat
+```
+
+Ask it how to do something and it answers from the real `--help`. Ask it to
+*do* the thing and it runs the command, showing you the exact line first if
+it changes anything:
+
+```
+> watch acme/web as well, in fix mode, verified with pytest
+
+▸ Run: maajun add-repo acme/web -m fix
+  Run it? (y/N): y
+```
+
+Read-only commands run straight away. `watch`, `reset`, and `sign-out` are
+never run from chat — it hands you the command instead. And because every
+incident, pull request, and issue is already in the database, so is the
+history:
+
+```
+> what did that checkout KeyError turn out to be?
+> which PRs have you opened against acme/api this month?
+```
+
+Past chat sessions are searchable too, and chat spend is recorded (`/cost`)
+though never capped — `daemon.max_usd_per_day` governs the daemon alone.
+See the [command reference](https://github.com/Morvin-Ian/maajun/blob/main/docs/commands.md#maajun-chat)
+for the slash commands and the full permission model.
+
 ## Modes
 
 | Mode | Files | Output |
@@ -151,6 +187,10 @@ breaks the tests is exactly what a reviewer needs to see.
 
 Switch with `maajun config github.mode fix`, or per run with
 `-m/--mode` on `watch` and `report`.
+
+Fix mode may still conclude that no code change is warranted. When it does,
+you get an issue rather than a pull request whose only diff is the incident
+report — the issue says why.
 
 ## AI providers
 
@@ -239,6 +279,7 @@ install one (`keyrings.alt`, `gnome-keyring`) before running `setup`.
 | `maajun status` | Preflight check of credentials, repo access, and monitors |
 | `maajun watch` | Run the monitoring daemon (`--once`, `--dry-run`, `-m`) |
 | `maajun report "…"` | Investigate an issue you describe, on demand |
+| `maajun chat` | Ask maajun anything, have it run commands, recall past work |
 | `maajun incidents` | List handled incidents with repo, status, cost, and links |
 | `maajun config [KEY] [VALUE]` | View or change settings (`--repo` for one repo) |
 | `maajun add-repo OWNER/NAME` | Watch an additional repository |
@@ -267,8 +308,8 @@ tokens:
 
 | Model | Input | Output |
 |---|---|---|
-| `deepseek-v4-flash` | $0.27 | $1.10 |
-| `deepseek-v4-pro` | $1.10 | $4.40 |
+| `deepseek-v4-flash` | $0.14 | $0.28 |
+| `deepseek-v4-pro` | $0.435 | $0.87 |
 | `gpt-4o-mini` | $0.15 | $0.60 |
 | `gpt-4o` | $2.50 | $10.00 |
 
@@ -276,9 +317,13 @@ On either provider's default model a single analysis costs cents, not dollars �
 but measure your own workload with `--dry-run` rather than trusting an
 estimate. Rates change; verify them against
 [DeepSeek](https://api-docs.deepseek.com/quick_start/pricing) or
-[OpenAI](https://openai.com/api/pricing/) before relying on the cap, and note
-that a model with no entry is priced at a deliberately conservative $1.00 /
-$3.00 so the cap never overshoots.
+[OpenAI](https://developers.openai.com/api/docs/pricing) before relying on the
+cap. A model with no entry is costed at the most expensive rate in the table
+above, so the cap errs towards stopping early rather than overshooting.
+
+DeepSeek bills cached input at a fraction of these rates. Maajun costs every
+input token at the cache-miss rate, so a repetitive workload will report
+somewhat more than it actually spends.
 
 ## Security model
 
@@ -289,6 +334,11 @@ $3.00 so the cap never overshoots.
   running application.
 - **Verification you control.** `test_command` comes from your config, not from
   the model, so a fix cannot redirect its own verification.
+- **Chat proposes, you approve.** `maajun chat` runs read-only commands freely,
+  but anything that writes config or opens a pull request shows the exact
+  command line and waits for a yes. `reset` and `sign-out` it will not run at
+  all. `run_maajun_command` reaches maajun's own subcommands and nothing else —
+  it is not a shell.
 - **Token hygiene.** The GitHub token is passed to git via `GIT_ASKPASS`; it
   never lands in a remote URL, `.git/config`, or the process list.
 

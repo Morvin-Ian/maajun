@@ -46,15 +46,16 @@ class ChatCompletionsProvider(AIProvider):
         else:
             self.model = self.default_model
         self.client: AsyncOpenAI | None = None
-        self._tool_cache: tuple[int, list[dict[str, Any]]] | None = None
 
     def _prepared_tools(self, tools: list[ToolDefinition] | None) -> list[dict[str, Any]] | None:
+        # Deliberately uncached. This was memoized on id(tools), which never
+        # hit — ToolRegistry.definitions() returns a fresh list every call —
+        # and was unsound besides: CPython reuses the address of a freed list,
+        # so a new definitions list could collide with a dead one's id and be
+        # served that entry's stale tools.
         if not tools:
             return None
-        key = id(tools)
-        if self._tool_cache is None or self._tool_cache[0] != key:
-            self._tool_cache = (key, self.prepare_tools(tools))
-        return self._tool_cache[1]
+        return self.prepare_tools(tools)
 
     async def initialize(self) -> None:
         if not self.api_key:
@@ -165,14 +166,20 @@ class ChatCompletionsProvider(AIProvider):
             yield "tool_calls", tool_calls.result()
 
     async def validate_credentials(self) -> bool:
-        """Validate the credentials with a minimal request."""
+        """Validate the credentials with a minimal request.
+
+        Sends self.model, not default_model: with ai.model set to something
+        the account cannot reach, validating the default reported a working
+        key and then every real call failed on an inaccessible model. The
+        check should exercise what the daemon will actually send.
+        """
         try:
             if not self.client:
                 await self.initialize()
 
             response = await self._retryable(
                 self.client.chat.completions.create,
-                model=self.default_model,
+                model=self.model,
                 messages=[{"role": "user", "content": "Hello"}],
                 max_tokens=5,
             )

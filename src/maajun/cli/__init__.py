@@ -1,4 +1,5 @@
 from maajun.cli import (  # noqa: F401,E402  register commands
+    chat,
     credentials,
     incidents,
     monitor,
