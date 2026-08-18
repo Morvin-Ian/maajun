@@ -45,6 +45,7 @@ def _validate_key(auth: AuthManager, provider: str) -> None:
 
 @app.command()
 def provider_list():
+    """Show which AI providers are supported and which have a key stored."""
     auth = AuthManager()
     implemented = implemented_providers()
 
@@ -68,6 +69,11 @@ def provider_list():
 
 @app.command(name="sign-out")
 def sign_out():
+    """Clear every stored credential — provider API keys and the GitHub token."""
     auth = AuthManager()
     auth.clear_all()
-    console.print("[green]✓ All API keys cleared.[/green]")
+    # clear_all() drops the GitHub token too; saying "API keys" left people
+    # thinking their token had survived.
+    console.print(
+        "[green]✓ Cleared all provider API keys and the GitHub token.[/green]"
+    )

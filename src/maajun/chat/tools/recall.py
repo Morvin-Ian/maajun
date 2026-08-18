@@ -1,0 +1,110 @@
+"""Conversation recall: search_conversations, recall_session.
+
+The live session is already in the agent's context; these reach back into
+earlier ones, so "what did we decide last week?" has an answer.
+"""
+
+from __future__ import annotations
+
+import json
+
+from maajun.agent.tools.base import Tool, json_schema
+from maajun.chat.memory import ChatMemory
+from maajun.providers.base import ToolDefinition
+from maajun.utils import truncate
+
+# Messages are replayed for context, not verbatim transcription.
+MESSAGE_PREVIEW = 600
+
+
+def recall_tools(memory: ChatMemory, current_session: int) -> list[Tool]:
+    """Build the recall tools bound to the session currently running."""
+
+    async def search_conversations(query: str, limit: int = 10) -> str:
+        hits = memory.search(
+            query, limit=max(1, limit), exclude_session=current_session
+        )
+        if not hits:
+            return f"No earlier conversation mentions {query!r}."
+        return json.dumps({"matches": hits}, indent=2)
+
+    async def recall_session(session_id: int = 0, limit: int = 30) -> str:
+        if not session_id:
+            sessions = memory.recent_sessions(limit=max(1, limit))
+            listed = [
+                {
+                    "session_id": row["id"],
+                    "title": row["title"] or "(untitled)",
+                    "updated_at": row["updated_at"],
+                    "messages": row["message_count"],
+                    "cost_usd": round(row["cost_usd"] or 0, 6),
+                }
+                for row in sessions
+                if row["id"] != current_session
+            ]
+            if not listed:
+                return "No earlier chat sessions."
+            return json.dumps({"sessions": listed}, indent=2)
+
+        if memory.session(session_id) is None:
+            return f"No chat session {session_id}."
+        messages = memory.messages(session_id, limit=max(1, limit))
+        return json.dumps({
+            "session_id": session_id,
+            "messages": [
+                {
+                    "role": message["role"],
+                    "content": truncate(message["content"], MESSAGE_PREVIEW, "…"),
+                }
+                for message in messages
+            ],
+        }, indent=2)
+
+    return [
+        Tool(
+            ToolDefinition(
+                name="search_conversations",
+                description=(
+                    "Search earlier chat sessions for something discussed "
+                    "before. Use when the user refers to a past conversation "
+                    "('what did we decide about…', 'like last time')."
+                ),
+                parameters=json_schema(
+                    {
+                        "query": {
+                            "type": "string",
+                            "description": "Text to look for in past messages",
+                        },
+                        "limit": {
+                            "type": "integer",
+                            "description": "Max matches to return (default 10)",
+                        },
+                    },
+                    required=["query"],
+                ),
+            ),
+            search_conversations,
+        ),
+        Tool(
+            ToolDefinition(
+                name="recall_session",
+                description=(
+                    "Read back an earlier chat session. With no session_id, "
+                    "lists recent sessions and their ids."
+                ),
+                parameters=json_schema({
+                    "session_id": {
+                        "type": "integer",
+                        "description": (
+                            "Session to read; omit to list recent sessions"
+                        ),
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Max messages or sessions (default 30)",
+                    },
+                }),
+            ),
+            recall_session,
+        ),
+    ]

@@ -210,10 +210,13 @@ burst_window_seconds = 300   # 5 errors within 5 minutes
 Set `github_actions_repos` to poll each repo for failed workflow runs. It
 uses the same GitHub token as everything else — read from the keyring,
 never written into the config file — and that token needs
-read access to the repos' actions. A failure becomes an incident fingerprinted by the commit SHA,
-so multiple workflows failing on the same commit produce a single
-incident (one commit, one root cause), with the run details and a link
-to the failed run.
+read access to the repos' actions. A failure becomes an incident
+fingerprinted by the workflow *and* the commit, with the run details and a
+link to the failed run. Two workflows failing on one commit are therefore
+two incidents — "the linter failed" and "the tests failed" are different
+problems with different fixes, and keying on the commit alone meant only
+the first one polled was ever reported. Re-running the same workflow on the
+same commit is still one incident.
 
 `maajun setup --github-actions` wires this up using the GitHub token you
 already stored, rather than asking for a second one.
@@ -392,10 +395,20 @@ key, whichever repo was polled first claimed the error and the rest were
 dropped as already known. Local-mode incidents record an empty repo.
 
 The incident history lives in `<workdir>/incidents.db` (SQLite); delete a
-row (or the file) to make maajun treat an error as new again. A database
-written by an older version of maajun is rejected at open, naming the
-columns it lacks — delete it to start a fresh one, and each still-current
-error is reported once more.
+row (or the file) to make maajun treat an error as new again. It also holds
+your `maajun chat` sessions, which is what lets chat answer questions about
+past incidents and past conversations together.
+
+A database written by an older version of maajun is **migrated at open**,
+keeping the history — the schema version is tracked in `PRAGMA
+user_version`, and each migration commits separately so an interrupted
+upgrade resumes rather than half-applies. One written by a *newer* maajun
+is refused rather than rewritten; upgrade, or point `daemon.workdir`
+somewhere else.
+
+Incidents handled from this version on also store their analysis text, so
+`maajun chat` can recall a root cause without going back to GitHub. Rows
+that predate the column keep their issue or PR link and show no report.
 
 ## Cost tracking
 
@@ -425,8 +438,10 @@ maajun config daemon.max_usd_per_day 0    # 0 = no cap
 
 Before each incident the daemon sums today's `cost_usd` (UTC day) and, if
 the cap is reached, stops analyzing, warns once, and keeps polling. Errors
-skipped this way are *not* marked as seen — they are picked up on the next
-poll after the cap resets or is raised, so nothing is silently lost.
+skipped this way are left at `status=new` — recorded, but not published —
+and picked up on the next poll after the cap resets or is raised, so nothing
+is silently lost. They keep counting sightings while they wait, so the
+eventual report says how long the error had really been happening.
 `--dry-run` ignores the cap, since that is an explicit interactive request.
 
 `max_incidents_per_cycle` (default 10) bounds a single poll the way the cap
@@ -498,9 +513,14 @@ log files in one shot and points at whatever is missing.
   PRs without credentials. Run `maajun setup`, or clear `github.repo` to
   fall back to local reports.
 - **No PR for an error you expected** — check the fingerprint isn't
-  already in `incidents.db` (`status=processed` means a PR exists;
-  `failed` means the last attempt errored — check logs, fix the cause,
-  delete the row to retry).
+  already in `incidents.db`. `status=processed` means an artifact exists
+  (`artifact_kind` says whether it was a `pr`, an `issue`, or a local
+  `report`); `failed` means the last attempt errored — check logs, fix the
+  cause, delete the row to retry. `new` means recorded but not yet
+  published: either the spend cap deferred it, or the daemon stopped
+  mid-analysis. Either way it is picked up the next time the error is seen.
+- **An issue where you expected a PR** — in `fix` mode, an analysis that
+  changes no code files an issue instead. The issue says so at the top.
 - **Nothing detected** — confirm the log path is right and your log
   format matches `error_pattern` (warnings are *not* matched by default),
   or that errors are recognized stack traces. For JSON logs, set

@@ -11,8 +11,13 @@ from pathlib import Path
 import pytest
 
 from maajun.config import Config, DaemonConfig, GitHubConfig, MonitorConfig, RepoConfig
-from maajun.daemon.core import SHUTDOWN_EVENT, Daemon, make_permission_policy
-from maajun.daemon.store import IncidentStore
+from maajun.daemon.core import (
+    SHUTDOWN_EVENT,
+    Daemon,
+    LocalWorkspace,
+    make_permission_policy,
+)
+from maajun.daemon.store import ARTIFACT_ISSUE, ARTIFACT_PR, IncidentStore
 from maajun.monitors import LogFileMonitor
 from maajun.providers.base import CompletionResponse
 from maajun.vcs import GitWorkspace
@@ -167,7 +172,7 @@ async def test_suggest_mode_pushes_no_branch(setup):
 async def test_fix_mode_opens_a_pull_request_with_the_report_committed(setup):
     """Fix mode has a real diff, so it still gets a branch and a PR."""
     daemon, logfile, agent, github, store, remote = setup
-    daemon.repo_for(daemon.monitors[0]).mode = "fix"
+    _fix_mode(daemon, agent)
 
     with open(logfile, "a") as f:
         f.write(TRACEBACK)
@@ -625,15 +630,22 @@ async def test_dry_run_ignores_the_cap(setup):
 # ---------------------------------------------------------------------------
 
 
-def _fix_mode(daemon, *, test_command: str = "") -> None:
+def _fix_mode(daemon, agent=None, *, test_command: str = "") -> None:
+    """Switch to fix mode and let the agent actually change something.
+
+    Both halves matter now: fix mode with no code change deliberately falls
+    back to an issue, so a test about pull requests needs an agent that edits.
+    """
     repo_config = daemon.repo_for(daemon.monitors[0])
     repo_config.mode = "fix"
     repo_config.test_command = test_command
+    if agent is not None:
+        agent.edit_path = daemon.workspaces[repo_config.repo].path / "main.py"
 
 
 async def test_passing_tests_are_reported_in_the_pr(setup):
     daemon, logfile, agent, github, store, remote = setup
-    _fix_mode(daemon, test_command="exit 0")
+    _fix_mode(daemon, agent, test_command="exit 0")
 
     with open(logfile, "a") as f:
         f.write(TRACEBACK)
@@ -647,7 +659,7 @@ async def test_passing_tests_are_reported_in_the_pr(setup):
 async def test_failing_tests_are_reported_not_suppressed(setup):
     """A fix that breaks the suite is exactly what a reviewer must be told."""
     daemon, logfile, agent, github, store, remote = setup
-    _fix_mode(daemon, test_command="echo 'boom: 1 failed'; exit 1")
+    _fix_mode(daemon, agent, test_command="echo 'boom: 1 failed'; exit 1")
 
     with open(logfile, "a") as f:
         f.write(TRACEBACK)
@@ -662,7 +674,7 @@ async def test_failing_tests_are_reported_not_suppressed(setup):
 
 async def test_unrunnable_test_command_does_not_abort_the_incident(setup):
     daemon, logfile, agent, github, store, remote = setup
-    _fix_mode(daemon, test_command="this-command-does-not-exist-xyz")
+    _fix_mode(daemon, agent, test_command="this-command-does-not-exist-xyz")
 
     with open(logfile, "a") as f:
         f.write(TRACEBACK)
@@ -674,7 +686,7 @@ async def test_unrunnable_test_command_does_not_abort_the_incident(setup):
 
 async def test_no_test_command_marks_the_pr_unverified(setup):
     daemon, logfile, agent, github, store, remote = setup
-    _fix_mode(daemon)  # no test_command
+    _fix_mode(daemon, agent)  # no test_command
 
     with open(logfile, "a") as f:
         f.write(TRACEBACK)
@@ -686,7 +698,7 @@ async def test_no_test_command_marks_the_pr_unverified(setup):
 async def test_tests_run_in_the_workspace_not_the_cwd(setup):
     """The command must see the agent's edits, which live in the clone."""
     daemon, logfile, agent, github, store, remote = setup
-    _fix_mode(daemon, test_command="pwd")
+    _fix_mode(daemon, agent, test_command="pwd")
 
     with open(logfile, "a") as f:
         f.write(TRACEBACK)
@@ -946,7 +958,9 @@ def multi_setup(tmp_path, remote):
             id(monitors[0]): api, id(monitors[1]): api, id(monitors[2]): web,
         },
         github=github,
-        agent_factory_for_repo=lambda rc, ws: lambda: FakeAgent(),
+        agent_factory_for_repo=lambda rc, ws: lambda: FakeAgent(
+            edit_path=(ws.path / "main.py") if rc.mode == "fix" else None
+        ),
         repo_configs=[api, web],
     )
     return daemon, shared_log, api_log, github, store
@@ -1070,3 +1084,300 @@ async def test_one_unwired_monitor_does_not_stop_the_others(multi_setup):
 
     assert sorted(issue["repo"] for issue in github.issues) == ["acme/api", "acme/web"]
     assert any("is not usable" in message for message in notices)
+
+
+# ---------------------------------------------------------------------------
+# Recording the analysis itself
+# ---------------------------------------------------------------------------
+
+
+async def test_suggest_mode_records_the_report_and_marks_it_an_issue(setup):
+    """The analysis used to exist only in the GitHub issue; chat recalls it."""
+    daemon, logfile, agent, github, store, remote = setup
+
+    with open(logfile, "a") as f:
+        f.write(TRACEBACK)
+    fp = (await daemon.poll_once())[0]
+
+    row = store.get(fp, "owner/name")
+    assert row["artifact_kind"] == ARTIFACT_ISSUE
+    assert "Root cause" in row["report_text"]
+
+
+async def test_fix_mode_records_the_report_and_marks_it_a_pr(tmp_path, remote):
+    daemon, logfile, store = _fix_mode_daemon(tmp_path, remote)
+
+    with open(logfile, "a") as f:
+        f.write(TRACEBACK)
+    fp = (await daemon.poll_once())[0]
+
+    row = store.get(fp, "owner/name")
+    assert row["artifact_kind"] == ARTIFACT_PR
+    assert "Root cause" in row["report_text"]
+
+
+def _fix_mode_daemon(tmp_path, remote):
+    logfile = tmp_path / "app.log"
+    logfile.write_text("")
+    repo_config = RepoConfig(repo="owner/name", base_branch="main", mode="fix")
+    config = Config(
+        github=GitHubConfig(repos=[repo_config]),
+        monitor=MonitorConfig(log_files=[str(logfile)], poll_interval=1),
+        daemon=DaemonConfig(workdir=str(tmp_path / "work")),
+    )
+    workspace = GitWorkspace(
+        tmp_path / "work" / "ws", "owner/name", remote_url=str(remote)
+    )
+    store = IncidentStore(tmp_path / "work" / "incidents.db")
+    monitor = LogFileMonitor(logfile)
+    daemon = Daemon(
+        config,
+        monitors=[monitor],
+        store=store,
+        workspaces={"owner/name": workspace},
+        monitor_to_repo={id(monitor): repo_config},
+        github=FakeGitHub(),
+        agent_factory_for_repo=lambda rc, ws: lambda: FakeAgent(
+            edit_path=ws.path / "main.py"
+        ),
+    )
+    return daemon, logfile, store
+
+
+# ---------------------------------------------------------------------------
+# Fix mode that changes nothing
+# ---------------------------------------------------------------------------
+
+
+async def test_fix_mode_that_changes_no_code_files_an_issue(setup):
+    """A 'fix' PR whose only diff is the incident report wastes a review.
+
+    Fix mode is free to conclude that no code change is warranted; when it
+    does, the artifact is an issue, exactly as in suggest mode.
+    """
+    daemon, logfile, agent, github, store, remote = setup
+    daemon.repo_for(daemon.monitors[0]).mode = "fix"  # agent edits nothing
+
+    with open(logfile, "a") as f:
+        f.write(TRACEBACK)
+    fp = (await daemon.poll_once())[0]
+
+    assert github.calls == []
+    assert len(github.issues) == 1
+    row = store.get(fp, "owner/name")
+    assert row["artifact_kind"] == ARTIFACT_ISSUE
+    assert row["branch"] == ""
+
+
+async def test_that_issue_explains_why_it_is_not_a_pull_request(setup):
+    daemon, logfile, agent, github, store, remote = setup
+    daemon.repo_for(daemon.monitors[0]).mode = "fix"
+
+    with open(logfile, "a") as f:
+        f.write(TRACEBACK)
+    await daemon.poll_once()
+
+    body = github.issues[0]["body"]
+    assert "did not change any code" in body
+    assert "Root cause" in body  # the analysis is still there
+
+
+async def test_fix_mode_that_changes_nothing_pushes_no_branch(setup):
+    daemon, logfile, agent, github, store, remote = setup
+    daemon.repo_for(daemon.monitors[0]).mode = "fix"
+
+    with open(logfile, "a") as f:
+        f.write(TRACEBACK)
+    await daemon.poll_once()
+
+    branches = subprocess.run(
+        ["git", "branch", "-a"], cwd=str(remote),
+        capture_output=True, text=True, check=True,
+    ).stdout
+    assert "maajun/incident-" not in branches
+
+
+async def test_a_suggest_mode_issue_carries_no_fix_mode_note(setup):
+    daemon, logfile, agent, github, store, remote = setup
+
+    with open(logfile, "a") as f:
+        f.write(TRACEBACK)
+    await daemon.poll_once()
+
+    assert "did not change any code" not in github.issues[0]["body"]
+
+
+async def test_the_notice_names_what_was_actually_published(setup):
+    """Saying 'PR opened' would send the reader after one that does not exist."""
+    daemon, logfile, agent, github, store, remote = setup
+    daemon.repo_for(daemon.monitors[0]).mode = "fix"
+    notices = []
+    daemon.on_notice = lambda message, level: notices.append(message)
+
+    with open(logfile, "a") as f:
+        f.write(TRACEBACK)
+    await daemon.poll_once()
+
+    published = [n for n in notices if "opened" in n or "written" in n]
+    assert published and "Issue opened" in published[0]
+
+
+async def test_the_notice_says_pr_when_one_was_opened(setup):
+    daemon, logfile, agent, github, store, remote = setup
+    _fix_mode(daemon, agent)
+    notices = []
+    daemon.on_notice = lambda message, level: notices.append(message)
+
+    with open(logfile, "a") as f:
+        f.write(TRACEBACK)
+    await daemon.poll_once()
+
+    assert any("PR opened" in n for n in notices)
+
+
+def test_artifact_label_covers_every_kind():
+    from maajun.daemon.store import ARTIFACT_REPORT
+
+    assert Daemon.artifact_label(ARTIFACT_PR) == "PR opened"
+    assert Daemon.artifact_label(ARTIFACT_ISSUE) == "Issue opened"
+    assert Daemon.artifact_label(ARTIFACT_REPORT) == "Report written"
+    assert Daemon.artifact_label(None) == "Handled"
+    assert Daemon.artifact_label("") == "Handled"
+
+
+async def test_a_capped_error_keeps_its_history(setup):
+    """Deferral used to delete the row, resetting the count every poll.
+
+    While the cap held, each poll re-inserted and re-deleted the incident, so
+    'seen 40 times over two hours' was reported as 'seen once'.
+    """
+    daemon, logfile, agent, github, store, remote = setup
+    daemon.config.daemon.max_usd_per_day = 0.01
+    _seed_spend(store, "earlier", 0.02)
+
+    for _ in range(3):
+        with open(logfile, "a") as f:
+            f.write(TRACEBACK)
+        await daemon.poll_once()
+
+    deferred = [row for row in store.all() if row["fingerprint"] != "earlier"]
+    assert len(deferred) == 1
+    assert deferred[0]["count"] == 3
+    assert deferred[0]["status"] == "new"
+    assert agent.prompts == []  # still no AI call
+
+
+async def test_first_seen_is_when_the_error_started_not_when_the_cap_lifted(setup):
+    daemon, logfile, agent, github, store, remote = setup
+    daemon.config.daemon.max_usd_per_day = 0.01
+    _seed_spend(store, "earlier", 0.02)
+
+    with open(logfile, "a") as f:
+        f.write(TRACEBACK)
+    await daemon.poll_once()
+    started = [r for r in store.all() if r["fingerprint"] != "earlier"][0]["first_seen"]
+
+    daemon.config.daemon.max_usd_per_day = 100.0
+    with open(logfile, "a") as f:
+        f.write(TRACEBACK)
+    fp = (await daemon.poll_once())[0]
+
+    assert store.get(fp, "owner/name")["first_seen"] == started
+
+
+# ---------------------------------------------------------------------------
+# Local mode
+# ---------------------------------------------------------------------------
+
+
+def _local_daemon(tmp_path, repo_path):
+    logfile = tmp_path / "app.log"
+    logfile.write_text("")
+    config = Config(
+        monitor=MonitorConfig(log_files=[str(logfile)], poll_interval=1),
+        daemon=DaemonConfig(workdir=str(tmp_path / "work")),
+    )
+    store = IncidentStore(tmp_path / "work" / "incidents.db")
+    monitor = LogFileMonitor(logfile)
+    repo_config = RepoConfig(mode="suggest")
+    agent = FakeAgent()
+    daemon = Daemon(
+        config,
+        monitors=[monitor],
+        store=store,
+        workspaces={"": LocalWorkspace(repo_path)},
+        monitor_to_repo={id(monitor): repo_config},
+        github=None,
+        agent_factory_for_repo=lambda rc, ws: lambda: agent,
+        repo_configs=[repo_config],
+        local_mode=True,
+    )
+    return daemon, logfile, agent, store
+
+
+async def test_local_mode_offers_commit_history_for_deploy_blame(tmp_path):
+    """LocalWorkspace had no recent_commits, so the section was always skipped.
+
+    The daemon probes for the method with getattr; without it, every local
+    report's "Likely cause commit" was "Unclear" even in a git checkout.
+    """
+    checkout = tmp_path / "app"
+    checkout.mkdir()
+    subprocess.run(["git", "init", "-b", "main", str(checkout)],
+                   check=True, capture_output=True)
+    (checkout / "main.py").write_text("x = 1\n")
+    git("add", "-A", cwd=checkout)
+    git("commit", "-m", "the suspicious commit", cwd=checkout)
+
+    daemon, logfile, agent, store = _local_daemon(tmp_path, checkout)
+    with open(logfile, "a") as f:
+        f.write(TRACEBACK)
+    await daemon.poll_once()
+
+    assert "the suspicious commit" in agent.prompts[0]
+
+
+async def test_local_mode_does_not_name_a_branch_it_cannot_vouch_for(tmp_path):
+    """Nothing pinned the checkout to base_branch, so 'main' would be a guess."""
+    checkout = tmp_path / "app"
+    checkout.mkdir()
+    subprocess.run(["git", "init", "-b", "wip", str(checkout)],
+                   check=True, capture_output=True)
+    (checkout / "main.py").write_text("x = 1\n")
+    git("add", "-A", cwd=checkout)
+    git("commit", "-m", "only commit", cwd=checkout)
+
+    daemon, logfile, agent, store = _local_daemon(tmp_path, checkout)
+    with open(logfile, "a") as f:
+        f.write(TRACEBACK)
+    await daemon.poll_once()
+
+    assert "the checked-out branch" in agent.prompts[0]
+
+
+async def test_a_local_directory_that_is_not_a_repo_omits_the_section(tmp_path):
+    """No history to offer beats the model inventing a commit."""
+    plain = tmp_path / "plain"
+    plain.mkdir()
+
+    daemon, logfile, agent, store = _local_daemon(tmp_path, plain)
+    with open(logfile, "a") as f:
+        f.write(TRACEBACK)
+    await daemon.poll_once()
+
+    assert "Recent commits" not in agent.prompts[0]
+
+
+async def test_local_mode_still_writes_its_report(tmp_path):
+    """The blame lookup must not disturb the artifact."""
+    checkout = tmp_path / "app"
+    checkout.mkdir()
+
+    daemon, logfile, agent, store = _local_daemon(tmp_path, checkout)
+    with open(logfile, "a") as f:
+        f.write(TRACEBACK)
+    fp = (await daemon.poll_once())[0]
+
+    row = store.get(fp, "")
+    assert row["artifact_kind"] == "report"
+    assert Path(row["pr_url"]).exists()

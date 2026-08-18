@@ -16,6 +16,14 @@ so counting only the last one would under-report a tool-heavy analysis
 several times over — and the [spend cap](monitoring.md#capping-spend)
 decides from these numbers.
 
+Two ceilings keep a long tool loop inside the context window. Each tool
+result is capped (and says how much was cut, so the model does not read a
+truncated file as a complete one), and the request itself is trimmed
+oldest-first once it grows too large. Trimming never drops the system
+prompt, and never leaves a tool result at the front of the request — the
+API rejects one with no matching tool call ahead of it. Without these, a
+grep-heavy analysis walked past the context limit and failed the incident.
+
 ### Providers
 
 Every supported provider speaks the `/chat/completions` protocol, so
@@ -47,7 +55,7 @@ Tools are split into two classes:
 | Class | Tools | Behavior |
 |-------|-------|----------|
 | Safe (read-only) | `read_file`, `glob`, `grep`, `list_dir`, `git_status` | Always allowed |
-| Gated | `edit_file`, `write_file` | Need approval per call |
+| Gated | `edit_file`, `write_file`, `run_maajun_command` | Need approval per call |
 
 Approval is an injectable async callback. Each context supplies its own
 policy:
@@ -56,6 +64,9 @@ policy:
   denied: the agent is strictly read-only.
 - **`maajun watch`, fix mode** — file edits are approved only for paths
   inside the daemon's isolated workspace clone.
+- **`maajun chat`** — read-only CLI commands are approved automatically;
+  anything that writes prints the exact command line and waits for the
+  user; `watch`, `reset`, and `sign-out` are refused outright.
 
 A denied call is not an error: the model receives a message telling it
 the user refused and not to retry, so it adapts (e.g. writes the fix as
@@ -102,9 +113,10 @@ maajun/
   providers/    chat_completions.py (the protocol) + one file per vendor,
                 plus pricing.py
   daemon/       core (loop), reports (rendering), store, prompts, wiring
+  chat/         the REPL, its memory, and the tools that drive the CLI
   vcs/          git workspace, GitHub client, API conventions
   cli/          one command per module, all registering on a shared Typer app
-  auth.py       credentials: env var -> keyring -> gh CLI
+  auth.py       credentials, read only from the OS keyring
   config.py     the config models and TOML round-trip
 ```
 
@@ -190,6 +202,69 @@ is currently processing, then exits cleanly instead of dying mid-push.
 This is what makes `systemctl stop`/`restart` safe — an incident is
 either fully published or untouched, never half-done.
 
+## Chat (`maajun chat`)
+
+Chat is the same agent loop with a different tool set, a different system
+prompt, and a permission policy that asks instead of deciding. It adds
+three groups of tools:
+
+| Group | Tools | Reads |
+|-------|-------|-------|
+| CLI | `list_maajun_commands`, `maajun_command_help`, `run_maajun_command` | the live Typer tree |
+| Incidents | `search_incidents`, `get_incident`, `incident_stats` | the incidents table |
+| Recall | `search_conversations`, `recall_session` | the chat tables |
+
+**The command surface is generated, never listed.** `command_index()` walks
+the Typer group and reads each subcommand's short help; the system prompt
+embeds the result. A command added to the CLI is one chat can describe and
+run immediately, with nothing to update — `settings.py` previously carried
+a hand-written list of commands for its welcome panel and it had already
+drifted.
+
+**Commands run in-process**, through the same Click tree, with stdout and
+stderr captured and stdin swapped for an empty stream. A subprocess would
+need `maajun` on `PATH`, which it is not under `uv run` or an unactivated
+venv, and would not see the state the session already loaded. The empty
+stdin matters: `prompt_line` falls back to `console.input()` once
+`isatty()` is false, which raises `EOFError` rather than hanging a session
+with nobody at the keyboard. Note that with `standalone_mode=False` Click
+*returns* a `typer.Exit` code rather than raising it, so the return value
+is what determines success.
+
+Whether `config` reads or writes is decided by running the CLI's own parser
+with `resilient_parsing=True` and checking whether `value` came back set —
+`config github.mode -c f.toml` has two non-flag tokens and still only
+reads.
+
+### Memory
+
+Chat sessions and messages live in `incidents.db` alongside the incidents,
+so one question can span both — "what did we decide about that KeyError"
+is a conversation lookup and an incident lookup. Both `IncidentStore` and
+`ChatMemory` open the file through `store.connect()`, which runs the
+migration ladder.
+
+Recall tools are bound to the running session id and exclude it: the live
+conversation is already in the agent's context, and returning it as a
+search hit would just pay for it twice.
+
+Chat spend is accumulated per session and reported by `/cost`, but the
+daily cap is not applied — it exists to bound an unattended daemon, and
+ending an interactive answer mid-sentence is the worse failure.
+
+### Schema migrations
+
+The database records its version in `PRAGMA user_version`, and
+`store.connect()` applies any pending migrations at open, each in its own
+transaction so an interrupted upgrade resumes rather than half-applies. A
+file written by a *newer* maajun is refused instead of being rewritten.
+
+This replaced a hard failure that told the user to delete the database —
+acceptable while the schema was settled, not once chat needed to add to
+it. Migration 1 rebuilds an outdated incidents table by copying rows across
+whatever columns it has, which covers both a missing column and the
+pre-multi-repo primary key.
+
 ## Security posture
 
 - The GitHub token is passed to git via `GIT_ASKPASS`, so it never
@@ -201,3 +276,6 @@ either fully published or untouched, never half-done.
 - The daemon's agent never touches your running application — it works
   in its own clone under the daemon workdir.
 - `bash` is never available to the daemon's agent, in any mode.
+- `run_maajun_command` reaches maajun's own subcommands and nothing else.
+  It is not a shell: the command name is checked against the Typer tree,
+  and the arguments are split with `shlex` rather than handed to one.

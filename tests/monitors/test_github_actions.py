@@ -46,7 +46,8 @@ async def test_poll_returns_events(monitor, monkeypatch):
     assert event.source == "gh-actions:owner/name"
     assert "CI" in event.message
     assert "#42" in event.message
-    assert "abc12345def67890" in event.fingerprint
+    # Hashed, like every other fingerprint — not the raw 40-char sha.
+    assert len(event.fingerprint) == 16
     assert "main" in event.details
     assert "failure" in event.details
 
@@ -142,7 +143,8 @@ def test_run_to_event_minimal(monitor):
     }
     event = monitor._to_event(minimal)
     assert "CI" in event.message
-    assert event.fingerprint == "1"
+    # No head_sha to key on; the run id keeps it distinct.
+    assert len(event.fingerprint) == 16
 
 
 @pytest.mark.asyncio
@@ -173,3 +175,56 @@ async def test_seen_ids_are_bounded(monkeypatch):
     # Oldest ids evicted, newest kept.
     assert "0" not in monitor._seen
     assert "4" in monitor._seen
+
+
+# ---------------------------------------------------------------------------
+# Fingerprinting
+# ---------------------------------------------------------------------------
+
+
+def _run(**overrides):
+    run = {
+        "id": 1, "name": "CI", "workflow_id": 100, "run_number": 1,
+        "head_branch": "main", "event": "push", "conclusion": "failure",
+        "html_url": "", "head_sha": "abc12345def67890",
+    }
+    run.update(overrides)
+    return run
+
+
+def test_two_workflows_failing_on_one_commit_are_two_incidents(monitor):
+    """Regression: keyed on head_sha alone, four of five failures vanished.
+
+    A commit that breaks the linter and the tests produced a single incident;
+    every other workflow's failure was dropped as a duplicate.
+    """
+    lint = monitor._to_event(_run(workflow_id=100, name="Lint"))
+    tests = monitor._to_event(_run(workflow_id=200, name="Tests"))
+
+    assert lint.fingerprint != tests.fingerprint
+
+
+def test_the_same_workflow_and_commit_is_one_incident(monitor):
+    """A re-run of the same failure must not be reported again."""
+    first = monitor._to_event(_run(id=1, run_number=1))
+    rerun = monitor._to_event(_run(id=2, run_number=2))
+
+    assert first.fingerprint == rerun.fingerprint
+
+
+def test_the_same_workflow_on_two_commits_are_two_incidents(monitor):
+    a = monitor._to_event(_run(head_sha="aaa111"))
+    b = monitor._to_event(_run(head_sha="bbb222"))
+
+    assert a.fingerprint != b.fingerprint
+
+
+def test_workflow_name_distinguishes_runs_without_a_workflow_id(monitor):
+    lint = monitor._to_event(_run(workflow_id=None, name="Lint"))
+    tests = monitor._to_event(_run(workflow_id=None, name="Tests"))
+
+    assert lint.fingerprint != tests.fingerprint
+
+
+def test_the_fingerprint_matches_the_width_used_everywhere_else(monitor):
+    assert len(monitor._to_event(_run()).fingerprint) == 16

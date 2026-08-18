@@ -121,6 +121,25 @@ def config(
         raise typer.Exit(1) from e
 
 
+def unsafe_to_delete(path: Path) -> str:
+    """Why `path` must not be rmtree'd, or "" if deleting it is reasonable.
+
+    daemon.workdir is a hand-edited string in a TOML file, and reset removes
+    it recursively. A typo, a leftover value, or a workdir pointed at a real
+    checkout should not cost someone their home directory or their source.
+    """
+    home = Path.home().resolve()
+    if path == Path(path.anchor):
+        return "it is a filesystem root."
+    if path == home:
+        return "it is your home directory."
+    if path in home.parents or path in Path.cwd().resolve().parents:
+        return "it contains your home directory or working directory."
+    if (path / ".git").exists():
+        return "it is a git checkout, not a maajun workdir."
+    return ""
+
+
 @app.command()
 def reset(
     force: bool = typer.Option(False, "--force", "-f", help="Skip confirmation"),
@@ -133,9 +152,19 @@ def reset(
     # removed even when they live outside the default data dir.
     dirs = [config_dir, data_dir]
     try:
-        workdir = Path(Config.load().daemon.workdir).expanduser()
+        workdir = Path(Config.load().daemon.workdir).expanduser().resolve()
         if workdir not in dirs:
-            dirs.append(workdir)
+            refusal = unsafe_to_delete(workdir)
+            if refusal:
+                # rmtree on a mistyped or over-broad workdir is unrecoverable,
+                # and the value comes from a hand-edited TOML file.
+                console.print(
+                    f"[yellow]⚠ Not deleting daemon.workdir ({workdir}): "
+                    f"{refusal} Remove it yourself if that is what you "
+                    "want.[/yellow]"
+                )
+            else:
+                dirs.append(workdir)
     except Exception:
         pass  # unreadable config — fall back to the defaults above
 
@@ -165,5 +194,5 @@ def reset(
 
     console.print(
         "\n[bold]Maajun has been reset.[/bold]\n\n"
-        "Run [bold]maajun init[/bold] to start fresh.\n"
+        "Run [bold]maajun setup[/bold] to start fresh.\n"
     )

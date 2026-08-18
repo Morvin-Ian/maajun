@@ -18,6 +18,10 @@ log = logging.getLogger(__name__)
 HEX_RE = re.compile(r"0x[0-9a-fA-F]+")
 NUM_RE = re.compile(r"\d+")
 
+# Characters of the sha256 digest an incident is keyed by. Shared so a monitor
+# building its own key matches the width of every other fingerprint.
+FINGERPRINT_LENGTH = 16
+
 # Cap on remembered item ids. The APIs return only the most recent items
 # per poll, so a bounded window is enough to dedup — and it stops _seen from
 # growing without limit over a long-running daemon.
@@ -27,7 +31,7 @@ def fingerprint(text: str) -> str:
     normalized = HEX_RE.sub("", text)
     normalized = NUM_RE.sub("", normalized)
     normalized = " ".join(normalized.split())
-    return hashlib.sha256(normalized.encode()).hexdigest()[:16]
+    return hashlib.sha256(normalized.encode()).hexdigest()[:FINGERPRINT_LENGTH]
 
 
 @dataclass

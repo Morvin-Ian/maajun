@@ -1,6 +1,11 @@
 import pytest
 
-from maajun.agent.core import MAX_HISTORY_MESSAGES, Agent
+from maajun.agent.core import (
+    MAX_HISTORY_MESSAGES,
+    MAX_REQUEST_CHARS,
+    Agent,
+    trim_request_messages,
+)
 from maajun.config import AIProviderConfig, Config
 from maajun.providers.base import CompletionResponse, ProviderError
 from maajun.providers.factory import ProviderFactory
@@ -97,3 +102,70 @@ def test_base_url_reaches_the_provider(monkeypatch):
     Agent(config)
 
     assert captured["base_url"] == "https://gateway.internal/v1"
+
+
+# ---------------------------------------------------------------------------
+# request trimming
+# ---------------------------------------------------------------------------
+
+
+def _msg(role, content, tool_calls=None):
+    message = {"role": role, "content": content}
+    if tool_calls:
+        message["tool_calls"] = tool_calls
+    return message
+
+
+def test_trim_leaves_a_small_request_untouched():
+    messages = [_msg("system", "sys"), _msg("user", "hi"), _msg("assistant", "yo")]
+    before = list(messages)
+    trim_request_messages(messages)
+    assert messages == before
+
+
+def test_trim_drops_oldest_but_keeps_the_system_prompt():
+    filler = "z" * 50_000
+    messages = [_msg("system", "sys")] + [
+        _msg("user" if i % 2 == 0 else "assistant", filler) for i in range(10)
+    ]
+    trim_request_messages(messages)
+    assert messages[0]["role"] == "system"
+    assert messages[0]["content"] == "sys"
+    assert sum(len(m["content"]) for m in messages) <= MAX_REQUEST_CHARS
+    # The most recent turn survives; the oldest ones are the ones dropped.
+    assert messages[-1]["content"] == filler
+
+
+def test_trim_never_leaves_an_orphan_tool_result_at_the_front():
+    """A tool message with no preceding tool_call is rejected by the API."""
+    filler = "z" * 40_000
+    calls = [{"id": "c1", "function": {"name": "grep", "arguments": "{}"}}]
+    messages = [_msg("system", "sys")]
+    for _ in range(6):
+        messages.append(_msg("user", filler))
+        messages.append(_msg("assistant", "", calls))
+        messages.append(_msg("tool", filler))
+    trim_request_messages(messages)
+    assert messages[0]["role"] == "system"
+    assert messages[1]["role"] != "tool"
+
+
+def test_trim_keeps_a_floor_even_when_one_message_blows_the_budget():
+    huge = "z" * (MAX_REQUEST_CHARS * 3)
+    messages = [_msg("system", "sys"), _msg("user", "q"), _msg("assistant", huge)]
+    trim_request_messages(messages)
+    assert len(messages) == 3
+    assert messages[1]["content"] == "q"
+
+
+def test_trim_counts_tool_call_arguments_toward_the_budget():
+    calls = [{"id": "c1", "function": {"name": "grep", "arguments": "a" * 90_000}}]
+    messages = [
+        _msg("system", "sys"),
+        _msg("user", "q"),
+        _msg("assistant", "", calls),
+        _msg("assistant", "", calls),
+        _msg("assistant", "tail"),
+    ]
+    trim_request_messages(messages)
+    assert len(messages) < 5
