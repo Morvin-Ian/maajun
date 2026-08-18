@@ -6,7 +6,6 @@ from typing import Any
 from maajun.agent.core import PermissionCallback
 from maajun.chat.tools.commands import Gate, classify, parse_args
 
-
 Confirm = Callable[[str], bool]
 
 
