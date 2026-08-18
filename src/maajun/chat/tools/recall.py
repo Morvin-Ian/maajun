@@ -1,9 +1,3 @@
-"""Conversation recall: search_conversations, recall_session.
-
-The live session is already in the agent's context; these reach back into
-earlier ones, so "what did we decide last week?" has an answer.
-"""
-
 from __future__ import annotations
 
 import json

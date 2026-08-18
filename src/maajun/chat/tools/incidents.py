@@ -1,9 +1,3 @@
-"""Incident recall tools: search_incidents, get_incident, incident_stats.
-
-These are what make chat remember. Everything the daemon has ever handled —
-the error, the analysis, the pull request or issue it opened, what it cost —
-is already in the incident database; these read it back.
-"""
 
 from __future__ import annotations
 
