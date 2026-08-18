@@ -13,14 +13,13 @@ from maajun.chat.memory import ChatMemory
 from maajun.chat.permissions import chat_permissions
 from maajun.chat.prompt import build_system_prompt
 from maajun.chat.tools import chat_registry
+from maajun.cli._shared import prompt_line
 from maajun.config import Config
 from maajun.daemon.store import IncidentStore
 from maajun.progress import working
 from maajun.providers.base import ProviderError
 from maajun.providers.pricing import extract_usage
 from maajun.utils import truncate
-from maajun.cli._shared import prompt_line
-
 
 log = logging.getLogger(__name__)
 
