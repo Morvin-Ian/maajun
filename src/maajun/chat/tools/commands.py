@@ -1,12 +1,3 @@
-"""Awareness of, and access to, maajun's own CLI.
-
-The command list is read from the live Typer tree rather than written out
-here. `maajun` already learned this lesson once: settings.py used to carry a
-hand-maintained list of commands in its welcome panel, and it had silently
-drifted out of date. A command added tomorrow is one chat knows about
-tomorrow, with nothing to remember to update.
-"""
-
 from __future__ import annotations
 
 import contextlib

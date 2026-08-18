@@ -1,5 +1,3 @@
-"""The `maajun chat` read-eval-print loop."""
-
 from __future__ import annotations
 
 import asyncio
@@ -21,14 +19,14 @@ from maajun.progress import working
 from maajun.providers.base import ProviderError
 from maajun.providers.pricing import extract_usage
 from maajun.utils import truncate
+from maajun.cli._shared import prompt_line
+
 
 log = logging.getLogger(__name__)
 
 EXIT_WORDS = frozenset({"/exit", "/quit", "exit", "quit"})
 
-# How many past messages of a resumed session are replayed into the agent's
-# context. The rest stays searchable through recall_session rather than being
-# paid for on every request.
+# How many past messages of a resumed session are replayed into the agent's context.
 RESUME_MESSAGES = 20
 
 HELP = """\
@@ -48,8 +46,6 @@ or ask what it found last week.
 
 
 class ChatSession:
-    """One conversation: an agent, its memory, and the loop that drives them."""
-
     def __init__(
         self,
         config: Config,
@@ -73,22 +69,16 @@ class ChatSession:
             system_prompt=build_system_prompt(),
         )
 
-    # -- input/output -----------------------------------------------------
 
     def read(self) -> str:
         """One line from the user. Imported lazily so tests can drive it."""
         if self._ask is not None:
             return self._ask("> ")
-        from maajun.cli._shared import prompt_line
 
         return prompt_line("\n> ")
 
     def confirm(self, description: str) -> bool:
-        """Show what is about to run and wait for a yes.
-
-        Called from inside the agent's tool loop, so it prints above whatever
-        the turn has produced so far rather than through the spinner.
-        """
+        """Show what is about to run and wait for a yes/no """
         self.console.print(f"\n[yellow]▸ Run:[/yellow] [bold]{description}[/bold]")
         answer = self.read_confirmation()
         approved = answer.strip().lower() in ("y", "yes")
@@ -99,11 +89,8 @@ class ChatSession:
     def read_confirmation(self) -> str:
         if self._ask is not None:
             return self._ask("  Run it? (y/N): ")
-        from maajun.cli._shared import prompt_line
 
         return prompt_line("  Run it? (y/N): ")
-
-    # -- the loop ---------------------------------------------------------
 
     def loop(self) -> None:
         """Read, answer, repeat. The caller greets and resumes first."""
@@ -157,8 +144,6 @@ class ChatSession:
             completion_tokens=completion_tokens,
             cost_usd=cost,
         )
-
-    # -- slash commands ---------------------------------------------------
 
     def handle_slash(self, message: str) -> None:
         command = message.split()[0].lower()
@@ -227,8 +212,6 @@ class ChatSession:
             "[dim]Chat spend is recorded but not capped — "
             "daemon.max_usd_per_day applies to the daemon only.[/dim]"
         )
-
-    # -- lifecycle --------------------------------------------------------
 
     def greet(self) -> None:
         repos = [rc.repo for rc in self.config.github.get_all_repos()]
