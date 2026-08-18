@@ -1,9 +1,3 @@
-"""Persistent memory for chat sessions.
-
-Stored in the same database as the incidents, so a question about a past
-error and a question about a past conversation are answered from one file.
-"""
-
 from __future__ import annotations
 
 from pathlib import Path
@@ -37,13 +31,10 @@ def _snippet(content: str, query: str) -> str:
 
 
 class ChatMemory:
-    """Sessions and their messages, with full-text-ish search over both."""
 
     def __init__(self, path: str | Path):
         self.path = Path(path).expanduser()
         self._conn = connect(self.path)
-
-    # -- writing ----------------------------------------------------------
 
     def start_session(self, title: str = "") -> int:
         now = utcnow_iso()
@@ -56,12 +47,7 @@ class ChatMemory:
         return cursor.lastrowid
 
     def add_message(self, session_id: int, role: str, content: str) -> None:
-        """Append a message and touch the session's updated_at.
-
-        The first user message also becomes the session title when none was
-        given, so `/sessions` lists something recognisable rather than a row
-        of timestamps.
-        """
+        """Append a message and touch the session's updated_at """
         now = utcnow_iso()
         self._conn.execute(
             "INSERT INTO chat_messages (session_id, role, content, created_at)"
@@ -86,12 +72,7 @@ class ChatMemory:
         completion_tokens: int = 0,
         cost_usd: float = 0.0,
     ) -> None:
-        """Accumulate a turn's spend onto the session.
-
-        Recorded but never enforced: the daily cap pauses the daemon, and
-        cutting an interactive answer off mid-sentence is a worse trade than
-        going a little over.
-        """
+        """Accumulate a turn's spend onto the session """
         self._conn.execute(
             "UPDATE chat_sessions SET"
             " prompt_tokens = prompt_tokens + ?,"
@@ -101,8 +82,6 @@ class ChatMemory:
             (prompt_tokens, completion_tokens, cost_usd, session_id),
         )
         self._conn.commit()
-
-    # -- reading ----------------------------------------------------------
 
     def session(self, session_id: int) -> dict | None:
         row = self._conn.execute(
@@ -139,12 +118,7 @@ class ChatMemory:
     def search(
         self, query: str, limit: int = 20, exclude_session: int | None = None
     ) -> list[dict]:
-        """Messages containing `query`, newest first, with a context snippet.
-
-        LIKE rather than FTS5: the corpus is one developer's own chat history,
-        the pattern is escaped against wildcard injection, and an FTS virtual
-        table is a schema commitment that buys nothing at this size.
-        """
+        """Messages containing `query`, newest first, with a context snippet """
         query = query.strip()
         if not query:
             return []

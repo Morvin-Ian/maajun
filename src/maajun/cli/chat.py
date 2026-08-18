@@ -43,8 +43,6 @@ def chat(
     auth = AuthManager()
 
     if provider:
-        # Checked before assigning: the field validator raises a pydantic
-        # ValidationError, which would reach the terminal as a traceback.
         implemented = implemented_providers()
         if provider not in implemented:
             console.print(
@@ -69,8 +67,6 @@ def chat(
         )
         raise typer.Exit(1)
 
-    # The whole [ai] section, not just the key: chat should honour the model,
-    # base_url, and temperature the user configured for everything else.
     config.ai.api_key = api_key
 
     workdir = Path(config.daemon.workdir).expanduser()
