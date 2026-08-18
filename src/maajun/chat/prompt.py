@@ -1,9 +1,3 @@
-"""The chat agent's system prompt, with the command index baked in.
-
-The index is generated from the live CLI, so the model's idea of what maajun
-can do cannot drift from what it actually does.
-"""
-
 from __future__ import annotations
 
 from maajun.chat.tools.commands import Gate, command_index
