@@ -5,11 +5,12 @@ import contextlib
 import logging
 import re
 import sys
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 
 from rich.console import Console
 from rich.live import Live
+from rich.markup import escape
 from rich.panel import Panel
 
 from maajun.agent.core import Agent
@@ -170,10 +171,16 @@ class ChatSession:
             system_prompt=build_system_prompt(),
         )
 
-    def replace_agent(self) -> None:
-        """Rebuild the agent around new settings, carrying the context over."""
+    def replace_agent(self, *, keep_history: bool = True) -> None:
+        """Rebuild the agent around new settings or a new session.
+
+        /model and /provider are the same conversation on a different model,
+        so they carry the context over. /new, /resume and /forget all are
+        not — they used to carry it and then immediately clear it, which read
+        as though the old context might survive.
+        """
         previous = self.agent
-        history = previous.history
+        history = previous.history if keep_history else []
         try:
             self.runner.run(previous.aclose())
         except Exception:
@@ -308,10 +315,13 @@ class ChatSession:
         except ProviderError as e:
             # Already a user-facing message; the turn is not recorded as an
             # answer because there wasn't one.
-            self.console.print(f"[red]✗ {e}[/red]")
+            self.console.print(f"[red]✗ {escape(str(e))}[/red]")
         except Exception as e:
+            # escaped: an error quoting the model back can carry a closing
+            # tag ("[/INST]" and friends), which Rich rejects as markup —
+            # turning a reported failure into a crash of the chat loop.
             log.debug("chat turn failed", exc_info=True)
-            self.console.print(f"[red]✗ {type(e).__name__}: {e}[/red]")
+            self.console.print(f"[red]✗ {type(e).__name__}: {escape(str(e))}[/red]")
         else:
             if answer:
                 self.memory.add_message(self.session_id, "assistant", answer)
@@ -372,37 +382,43 @@ class ChatSession:
     def handle_slash(self, message: str) -> None:
         command, _, argument = message.partition(" ")
         command, argument = command.lower(), argument.strip()
-        if command == "/help":
-            self.console.print(HELP)
-        elif command == "/commands":
-            self.show_commands()
-        elif command == "/sessions":
-            self.show_sessions()
-        elif command == "/history":
-            self.show_history()
-        elif command == "/cost":
-            self.show_cost()
-        elif command == "/clear":
-            self.agent.clear_history()
-            self.console.print(
-                "[dim]Context cleared. The conversation is still on record "
-                "and searchable.[/dim]"
-            )
-        elif command == "/new":
-            self.start_new()
-        elif command == "/resume":
-            self.resume(argument)
-        elif command == "/model":
-            self.switch_model(argument)
-        elif command == "/provider":
-            self.switch_provider(argument)
-        elif command == "/forget":
-            self.forget(argument)
-        else:
+        handler = self.slash_handlers().get(command)
+        if handler is None:
             self.console.print(
                 f"[yellow]Unknown command {command}.[/yellow] "
                 "[dim]Try /help.[/dim]"
             )
+            return
+        handler(argument)
+
+    def slash_handlers(self) -> dict[str, Callable[[str], None]]:
+        """Command name -> handler, every one taking the argument string.
+
+        A dict rather than a chain of elifs: COMMANDS, HELP and this were
+        three parallel lists to keep in sync, and test_every_slash_command_is
+        _handled can now check two of them against each other.
+        """
+        return {
+            "/help": lambda _: self.console.print(HELP),
+            "/commands": lambda _: self.show_commands(),
+            "/sessions": lambda _: self.show_sessions(),
+            "/history": lambda _: self.show_history(),
+            "/cost": lambda _: self.show_cost(),
+            "/clear": lambda _: self.clear_context(),
+            "/new": lambda _: self.start_new(),
+            "/resume": self.resume,
+            "/model": self.switch_model,
+            "/provider": self.switch_provider,
+            "/forget": self.forget,
+            "/exit": lambda _: None,
+        }
+
+    def clear_context(self) -> None:
+        self.agent.clear_history()
+        self.console.print(
+            "[dim]Context cleared. The conversation is still on record "
+            "and searchable.[/dim]"
+        )
 
     def show_commands(self) -> None:
         from maajun.chat.tools.commands import Gate, command_index
@@ -456,8 +472,7 @@ class ChatSession:
 
     def start_new(self) -> None:
         self.session_id = self.memory.start_session()
-        self.replace_agent()
-        self.agent.clear_history()
+        self.replace_agent(keep_history=False)
         self.console.print(f"[dim]Started session {self.session_id}.[/dim]")
 
     def resume(self, argument: str) -> None:
@@ -472,8 +487,7 @@ class ChatSession:
             self.console.print(f"[yellow]No chat session {session_id}.[/yellow]")
             return
         self.session_id = session_id
-        self.replace_agent()
-        self.agent.clear_history()
+        self.replace_agent(keep_history=False)
         self.resume_from(session_id)
 
     def switch_model(self, name: str) -> None:
@@ -519,8 +533,7 @@ class ChatSession:
                 return
             count = self.memory.delete_all()
             self.session_id = self.memory.start_session()
-            self.replace_agent()
-            self.agent.clear_history()
+            self.replace_agent(keep_history=False)
             self.console.print(f"[dim]Deleted {count} conversations.[/dim]")
             return
         if not argument.isdigit():

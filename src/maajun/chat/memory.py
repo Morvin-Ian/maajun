@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import logging
 import re
 import sqlite3
 from pathlib import Path
 
 from maajun.daemon.store import connect, has_fts
 from maajun.utils import utcnow_iso
+
+log = logging.getLogger(__name__)
 
 WORD = re.compile(r"\w+", re.UNICODE)
 
@@ -182,6 +185,10 @@ class ChatMemory:
         try:
             rows = self.conn.execute(sql, params).fetchall()
         except sqlite3.OperationalError:
+            # An unanswerable query is "no results" to the user, but a missing
+            # table and a malformed FTS expression look identical from here —
+            # so say which one it was somewhere.
+            log.debug("chat search failed for %r", query, exc_info=True)
             rows = []
 
         return [

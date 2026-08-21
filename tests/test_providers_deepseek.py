@@ -99,6 +99,11 @@ def make_tool_call_delta(index, id=None, name=None, arguments=None):
     )
 
 
+async def as_awaitable(value):
+    """Wrap a value so it can stand in for an awaited open_stream()."""
+    return value
+
+
 def make_streaming_provider(chunks):
     provider = DeepSeekProvider({"api_key": "x"})
 
@@ -361,3 +366,145 @@ async def test_validate_returns_false_when_the_api_rejects_the_key():
         chat=SimpleNamespace(completions=SimpleNamespace(create=create))
     )
     assert await provider.validate_credentials() is False
+
+
+# ---------------------------------------------------------------------------
+# Retry and cleanup
+# ---------------------------------------------------------------------------
+
+
+async def test_the_last_attempt_does_not_sleep_before_giving_up(monkeypatch):
+    """Sleeping after the final try made the caller wait up to MAX_DELAY for
+    an error it was always going to get."""
+    slept = []
+
+    async def record(delay):
+        slept.append(delay)
+
+    monkeypatch.setattr("maajun.providers.chat_completions.asyncio.sleep", record)
+    provider = DeepSeekProvider({"api_key": "x"})
+    errors = [make_rate_limit_error() for _ in range(MAX_RETRIES + 1)]
+    provider.client = SimpleNamespace(
+        chat=SimpleNamespace(completions=SimpleNamespace(create=fail_then_succeed(
+            errors, make_response(),
+        )))
+    )
+
+    with pytest.raises(ProviderError):
+        await provider.chat_completion(messages=[{"role": "user", "content": "hi"}])
+
+    assert len(slept) == MAX_RETRIES - 1, "one sleep between attempts, none after"
+
+
+async def test_a_non_transient_error_does_not_sleep_at_all(monkeypatch):
+    slept = []
+
+    async def record(delay):
+        slept.append(delay)
+
+    monkeypatch.setattr("maajun.providers.chat_completions.asyncio.sleep", record)
+    provider = DeepSeekProvider({"api_key": "x"})
+    provider.client = SimpleNamespace(
+        chat=SimpleNamespace(completions=SimpleNamespace(create=fail_then_succeed(
+            [make_api_status_error(400)], make_response(),
+        )))
+    )
+
+    with pytest.raises(ProviderError):
+        await provider.chat_completion(messages=[{"role": "user", "content": "hi"}])
+
+    assert slept == []
+
+
+async def test_the_provider_error_keeps_the_original_as_its_cause(monkeypatch):
+    """The raise sits outside the except block, so without an explicit
+    `from` the provider's own traceback is dropped from the chain."""
+    async def no_sleep(delay):
+        pass
+
+    monkeypatch.setattr("maajun.providers.chat_completions.asyncio.sleep", no_sleep)
+    provider = DeepSeekProvider({"api_key": "x"})
+    provider.client = SimpleNamespace(
+        chat=SimpleNamespace(completions=SimpleNamespace(create=fail_then_succeed(
+            [make_rate_limit_error() for _ in range(MAX_RETRIES)], make_response(),
+        )))
+    )
+
+    with pytest.raises(ProviderError) as caught:
+        await provider.chat_completion(messages=[{"role": "user", "content": "hi"}])
+
+    assert isinstance(caught.value.__cause__, RateLimitError)
+
+
+async def test_close_quietly_handles_every_shape_of_closer():
+    from maajun.providers.chat_completions import close_quietly
+
+    closed = []
+
+    class Async:
+        async def close(self):
+            closed.append("async")
+
+    class Sync:
+        def close(self):
+            closed.append("sync")
+
+    class Broken:
+        def close(self):
+            raise RuntimeError("already gone")
+
+    for stream in (Async(), Sync(), Broken(), object()):
+        await close_quietly(stream)
+
+    assert closed == ["async", "sync"]
+
+
+async def test_a_finished_stream_is_closed():
+    """The response holds its connection out of the pool until it is closed,
+    and a watch run makes one per tool round."""
+    closed = []
+
+    class Stream:
+        async def __aiter__(self):
+            yield make_stream_chunk(content="hi")
+
+        async def close(self):
+            closed.append(True)
+
+    provider = DeepSeekProvider({"api_key": "x"})
+    provider.client = object()
+    provider.open_stream = lambda **kwargs: as_awaitable(Stream())
+
+    events = [e async for e in provider.stream_completion(messages=[])]
+
+    assert events == [("content", "hi")]
+    assert closed == [True]
+
+
+async def test_an_abandoned_stream_is_still_closed():
+    """A caller that stops iterating — or a round that raises — must not
+    leak the connection."""
+    closed = []
+
+    class Stream:
+        async def __aiter__(self):
+            for text in ("hel", "lo", "!"):
+                yield make_stream_chunk(content=text)
+
+        async def close(self):
+            closed.append(True)
+
+    provider = DeepSeekProvider({"api_key": "x"})
+    provider.client = object()
+
+    async def open_stream(**kwargs):
+        return Stream()
+
+    provider.open_stream = open_stream
+
+    stream = provider.stream_completion(messages=[])
+    async for _ in stream:
+        break
+    await stream.aclose()
+
+    assert closed == [True]

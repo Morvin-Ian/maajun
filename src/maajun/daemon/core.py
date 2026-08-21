@@ -29,7 +29,6 @@ from maajun.vcs import CommandResult, GitHubClient, GitWorkspace
 
 log = logging.getLogger(__name__)
 
-SHUTDOWN_EVENT = asyncio.Event()
 # How many commits of history to offer the model for deploy blame.
 RECENT_COMMIT_LIMIT = 15
 LOCAL_REPO_LABEL = "(local)"
@@ -60,6 +59,8 @@ def make_permission_policy(mode: str, workspace: Path) -> PermissionCallback | N
         return Path(path).expanduser().resolve().is_relative_to(root)
 
     return approve
+
+
 class LocalWorkspace:
     """Stands in for GitWorkspace when no GitHub repo is configured.
 
@@ -151,6 +152,11 @@ class Daemon:
         # processed one at a time, so a single slot is unambiguous, and it
         # spares every caller from re-deriving the artifact from the mode.
         self.last_artifact_kind: str | None = None
+        # Per-daemon, not module-global: a global one stays set after the
+        # first shutdown, so a second Daemon in the same process — a test, a
+        # supervisor restarting in-process — returned from run() immediately
+        # without polling anything.
+        self.shutdown = asyncio.Event()
 
     def notice(self, message: str, level: str = "info") -> None:
         if self.on_notice:
@@ -264,11 +270,10 @@ class Daemon:
             self.local_mode,
         )
         loop = asyncio.get_running_loop()
-        for sig in (signal.SIGTERM, signal.SIGINT):
-            loop.add_signal_handler(sig, SHUTDOWN_EVENT.set)
+        installed = self.install_signal_handlers(loop)
 
         try:
-            while not SHUTDOWN_EVENT.is_set():
+            while not self.shutdown.is_set():
                 await self.poll_once(dry_run=dry_run)
                 if once:
                     # Drain any carried-over partial state from monitors (e.g. a
@@ -284,14 +289,37 @@ class Daemon:
                 self.progress("Watching for errors")
                 try:
                     await asyncio.wait_for(
-                        SHUTDOWN_EVENT.wait(),
+                        self.shutdown.wait(),
                         timeout=self.config.monitor.poll_interval,
                     )
                 except TimeoutError:
                     pass
             log.info("daemon shutting down gracefully")
         finally:
+            for sig in installed:
+                loop.remove_signal_handler(sig)
             await self.aclose()
+
+    def install_signal_handlers(self, loop) -> list[int]:
+        """Ask the loop to set self.shutdown on SIGTERM/SIGINT.
+
+        Returns what was installed, so run() can take them off again — the
+        loop outlives one daemon, and a handler left pointing at a finished
+        daemon's event would silently do nothing for the next one.
+
+        add_signal_handler is Unix-only; on Windows the proactor loop raises
+        NotImplementedError and Ctrl-C arrives as KeyboardInterrupt instead,
+        which the CLI already catches.
+        """
+        installed: list[int] = []
+        for sig in (signal.SIGTERM, signal.SIGINT):
+            try:
+                loop.add_signal_handler(sig, self.shutdown.set)
+            except NotImplementedError:
+                log.debug("this event loop has no signal handlers (%s)", sig)
+                continue
+            installed.append(sig)
+        return installed
 
     async def aclose(self) -> None:
         """Close the GitHub client and any monitor HTTP clients."""
