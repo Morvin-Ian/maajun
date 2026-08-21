@@ -29,7 +29,7 @@ class GitHubActionsMonitor(HTTPPollMonitor):
     def name(self) -> str:
         return f"gh-actions:{self.repo}"
 
-    async def _fetch(self) -> list[dict[str, Any]]:
+    async def fetch(self) -> list[dict[str, Any]]:
         url = f"https://api.github.com/repos/{self.repo}/actions/runs"
         params = {
             "status": "failure",
@@ -37,15 +37,15 @@ class GitHubActionsMonitor(HTTPPollMonitor):
             "sort": "created",
             "direction": "desc",
         }
-        resp = await self._client.get(url, params=params)
+        resp = await self.client.get(url, params=params)
         resp.raise_for_status()
         data = resp.json()
         return data.get("workflow_runs", [])
 
-    def _item_id(self, item: dict[str, Any]) -> str:
+    def item_id(self, item: dict[str, Any]) -> str:
         return str(item["id"])
 
-    def _to_event(self, run: dict[str, Any]) -> ErrorEvent:
+    def to_event(self, run: dict[str, Any]) -> ErrorEvent:
         name = run.get("name", "unknown workflow")
         head_branch = run.get("head_branch", "")
         run_number = run.get("run_number", 0)
@@ -73,11 +73,11 @@ class GitHubActionsMonitor(HTTPPollMonitor):
             source=self.name,
             message=title[:200],
             details=details,
-            fingerprint=self._fingerprint(run),
+            fingerprint=self.fingerprint(run),
         )
 
     @staticmethod
-    def _fingerprint(run: dict[str, Any]) -> str:
+    def fingerprint(run: dict[str, Any]) -> str:
         """Identify the failure by workflow *and* commit, not commit alone.
 
         Keyed on head_sha by itself, one commit that broke five workflows

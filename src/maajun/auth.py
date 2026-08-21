@@ -39,19 +39,19 @@ class AuthManager:
     }
 
     def __init__(self):
-        self._cache = {}
+        self.cache = {}
 
     def get_api_key(self, provider: str) -> str | None:
         key_name = self.SUPPORTED_PROVIDERS.get(provider)
         if not key_name:
             return None
 
-        if provider in self._cache:
-            return self._cache[provider]
+        if provider in self.cache:
+            return self.cache[provider]
 
         key = get_keyring(key_name)
         if key:
-            self._cache[provider] = key
+            self.cache[provider] = key
         return key
 
     def set_api_key(self, provider: str, key: str) -> None:
@@ -61,7 +61,7 @@ class AuthManager:
 
         key = key.strip()
         set_keyring(key_name, key)
-        self._cache[provider] = key
+        self.cache[provider] = key
 
     def has_api_key(self, provider: str) -> bool:
         return self.get_api_key(provider) is not None
@@ -77,7 +77,7 @@ class AuthManager:
         if not key_name:
             return
         delete_keyring(key_name)
-        self._cache.pop(provider, None)
+        self.cache.pop(provider, None)
 
     def get_github_token(self) -> str | None:
         return get_keyring(GITHUB_KEY_NAME)
@@ -95,4 +95,4 @@ class AuthManager:
         for provider in self.SUPPORTED_PROVIDERS:
             self.clear_provider_key(provider)
         self.clear_github_token()
-        self._cache = {}
+        self.cache = {}

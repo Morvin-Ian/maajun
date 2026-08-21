@@ -9,6 +9,7 @@ import re
 from pathlib import Path
 
 from maajun.agent.tools.base import Tool, json_schema, resolve_path
+from maajun.agent.tools.sandbox import Sandbox
 from maajun.providers.base import ToolDefinition
 
 SKIP_DIRS = {
@@ -22,25 +23,29 @@ SKIP_DIRS = {
 MAX_FILE_SIZE = 5 * 1024 * 1024
 
 
-def _in_skip_dir(rel: Path) -> bool:
+def in_skip_dir(rel: Path) -> bool:
     return any(part in SKIP_DIRS for part in rel.parts)
 
 
-def _glob_sync(root: Path, pattern: str) -> list[str]:
+def glob_sync(root: Path, pattern: str) -> list[str]:
     results = []
     for match in sorted(root.glob(pattern)):
         rel = match.relative_to(root)
-        if _in_skip_dir(rel):
+        if in_skip_dir(rel):
             continue
         results.append(str(rel) + ("/" if match.is_dir() else ""))
     return results
 
 
-async def _glob(pattern: str, path: str = ".") -> str:
+async def glob(pattern: str, path: str = ".") -> str:
     root = resolve_path(path)
     if not root.exists():
         return f"Error: {path} does not exist"
-    results = await asyncio.to_thread(_glob_sync, root, pattern)
+    # The root is checked before the call; '..' in the pattern would walk out
+    # of it afterwards.
+    if ".." in Path(pattern).parts:
+        return "Error: '..' is not allowed in a glob pattern. Search from a path instead."
+    results = await asyncio.to_thread(glob_sync, root, pattern)
     if not results:
         return f"No files matched pattern: {pattern}"
     return "\n".join(results)
@@ -68,19 +73,31 @@ GLOB: Tool = Tool(
             required=["pattern"],
         ),
     ),
-    _glob,
+    glob,
 )
 
 
-def _is_probably_binary(data: bytes) -> bool:
+def is_probably_binary(data: bytes) -> bool:
     return b"\x00" in data[:8192]
 
 
-def _grep_sync(
-    root: Path, regex: re.Pattern[str], include: str | None, max_results: int
-) -> tuple[list[str], int]:
+def grep_sync(
+    root: Path,
+    regex: re.Pattern[str],
+    include: str | None,
+    max_results: int,
+    sandbox: Sandbox | None,
+) -> tuple[list[str], int, int]:
+    """Search under `root`. Returns (matches, files searched, files refused).
+
+    Every file is put to the sandbox before it is opened. The registry gates
+    the directory this was pointed at, but grep then reads whatever is under
+    it — so a .env or an id_rsa inside an allowed root would otherwise come
+    straight back as matched lines.
+    """
     results: list[str] = []
     files_searched = 0
+    files_refused = 0
 
     for dirpath, dirnames, filenames in os.walk(root):
         dirnames[:] = [d for d in dirnames if d not in SKIP_DIRS]
@@ -88,13 +105,16 @@ def _grep_sync(
             if include and not fnmatch.fnmatch(fname, include):
                 continue
             fpath = Path(dirpath) / fname
+            if sandbox is not None and not sandbox.readable(fpath):
+                files_refused += 1
+                continue
             try:
                 if fpath.stat().st_size > MAX_FILE_SIZE:
                     continue
                 data = fpath.read_bytes()
             except OSError:
                 continue
-            if _is_probably_binary(data):
+            if is_probably_binary(data):
                 continue
             files_searched += 1
             for i, line in enumerate(data.decode(errors="replace").splitlines(), 1):
@@ -102,15 +122,16 @@ def _grep_sync(
                     rel = fpath.relative_to(root)
                     results.append(f"{rel}:{i}: {line.strip()}")
                     if len(results) >= max_results:
-                        return results, files_searched
-    return results, files_searched
+                        return results, files_searched, files_refused
+    return results, files_searched, files_refused
 
 
-async def _grep(
+async def grep(
     pattern: str,
     path: str = ".",
     include: str | None = None,
     max_results: int = 50,
+    sandbox: Sandbox | None = None,
 ) -> str:
     root = resolve_path(path)
     if not root.exists():
@@ -121,13 +142,23 @@ async def _grep(
     except re.error as e:
         return f"Error: invalid regex: {e}"
 
-    results, files_searched = await asyncio.to_thread(
-        _grep_sync, root, regex, include, max_results
+    results, files_searched, files_refused = await asyncio.to_thread(
+        grep_sync, root, regex, include, max_results, sandbox
     )
 
+    # Said out loud so the model knows the search was not exhaustive, and
+    # does not go looking for another way into the files it skipped.
+    skipped = (
+        f", {files_refused} off-limits files skipped"
+        if files_refused
+        else ""
+    )
     if not results:
-        return f"No matches for /{pattern}/ (searched {files_searched} files)"
-    header = f"Matches for /{pattern}/ ({len(results)} results, {files_searched} files searched):"
+        return f"No matches for /{pattern}/ (searched {files_searched} files{skipped})"
+    header = (
+        f"Matches for /{pattern}/ ({len(results)} results, "
+        f"{files_searched} files searched{skipped}):"
+    )
     return header + "\n" + "\n".join(results)
 
 
@@ -160,25 +191,26 @@ GREP: Tool = Tool(
             required=["pattern"],
         ),
     ),
-    _grep,
+    grep,
+    walks_files=True,
 )
 
 
-def _list_dir_sync(p: Path) -> list[str]:
+def list_dir_sync(p: Path) -> list[str]:
     return [
         entry.name + ("/" if entry.is_dir() else "")
         for entry in sorted(p.iterdir())
     ]
 
 
-async def _list_dir(path: str = ".") -> str:
+async def list_dir(path: str = ".") -> str:
     p = resolve_path(path)
     if not p.exists():
         return f"Error: {p} does not exist"
     if not p.is_dir():
         return f"Error: {p} is not a directory"
 
-    entries = await asyncio.to_thread(_list_dir_sync, p)
+    entries = await asyncio.to_thread(list_dir_sync, p)
     if not entries:
         return f"Directory {p} is empty"
     return "\n".join(entries)
@@ -197,5 +229,5 @@ LIST_DIR: Tool = Tool(
             },
         ),
     ),
-    _list_dir,
+    list_dir,
 )

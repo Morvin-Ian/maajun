@@ -5,6 +5,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 from maajun.agent.core import Agent
+from maajun.agent.tools import Sandbox, default_registry
 from maajun.auth import AuthManager
 from maajun.config import AIProviderConfig, Config, RepoConfig
 from maajun.daemon.core import Daemon, LocalWorkspace, make_permission_policy
@@ -15,7 +16,7 @@ from maajun.vcs import GitHubClient, GitWorkspace
 log = logging.getLogger(__name__)
 
 
-class _DaemonDeps:
+class DaemonDeps:
     """Credentials and shared state common to every Daemon wiring."""
 
     def __init__(self, config: Config, auth: AuthManager):
@@ -38,7 +39,7 @@ class _DaemonDeps:
             self.token = None
             self.github = None
             self.repos = [RepoConfig(mode="suggest")]
-            self.workspaces = {"": LocalWorkspace(_local_repo_path(config))}
+            self.workspaces = {"": LocalWorkspace(local_repo_path(config))}
         else:
             token = auth.get_github_token()
             if not token:
@@ -62,6 +63,9 @@ class _DaemonDeps:
             def factory() -> Agent:
                 return Agent(
                     Config(ai=AIProviderConfig(**ai.model_dump())),
+                    # Reads are confined as tightly as writes: whatever the
+                    # agent opens can be quoted in a public issue.
+                    tools=default_registry(Sandbox([workspace.path])),
                     approve=make_permission_policy(repo_config.mode, workspace.path),
                 )
             return factory
@@ -69,7 +73,7 @@ class _DaemonDeps:
         self.agent_factory_for_repo = agent_factory_for_repo
 
 
-def _local_repo_path(config: Config) -> Path:
+def local_repo_path(config: Config) -> Path:
     """The checkout local mode analyzes: daemon.repo_path, else the cwd."""
     path = Path(config.daemon.repo_path or Path.cwd()).expanduser().resolve()
     if not path.is_dir():
@@ -80,7 +84,7 @@ def _local_repo_path(config: Config) -> Path:
     return path
 
 
-def _build_monitors(
+def build_monitors(
     config: Config, repos: list[RepoConfig], auth: AuthManager | None = None
 ) -> tuple[list[Monitor], dict[int, RepoConfig]]:
     """Build monitors and map each to the repo whose PRs it should open.
@@ -162,8 +166,8 @@ def _build_monitors(
 def build_daemon(config: Config, auth: AuthManager | None = None) -> Daemon:
     """Wire a Daemon from config + stored credentials."""
     auth = auth or AuthManager()
-    deps = _DaemonDeps(config, auth)
-    monitors, monitor_to_repo = _build_monitors(config, deps.repos, auth)
+    deps = DaemonDeps(config, auth)
+    monitors, monitor_to_repo = build_monitors(config, deps.repos, auth)
     if not monitors:
         raise RuntimeError(
             "No monitors configured. Add log files under [monitor] "
@@ -186,7 +190,7 @@ def build_daemon(config: Config, auth: AuthManager | None = None) -> Daemon:
 
 def build_daemon_for_report(config: Config, auth: AuthManager | None = None) -> Daemon:
     """Wire a Daemon for manual reports — no monitors required."""
-    deps = _DaemonDeps(config, auth or AuthManager())
+    deps = DaemonDeps(config, auth or AuthManager())
     return Daemon(
         config,
         monitors=[],

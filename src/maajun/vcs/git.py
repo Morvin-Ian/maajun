@@ -43,15 +43,15 @@ class GitWorkspace:
         self.token = token
         self.remote_url = remote_url or f"https://x-access-token@github.com/{repo}.git"
         self.path = self.root / repo.replace("/", "__")
-        self._env: dict[str, str] | None = None
+        self.env: dict[str, str] | None = None
 
-    def _auth_env(self) -> dict[str, str]:
+    def auth_env(self) -> dict[str, str]:
         """Build the git environment once and reuse it across commands.
 
         Writing the askpass helper and copying os.environ on every git call
         was pure overhead — the token and paths never change for a workspace.
         """
-        if self._env is None:
+        if self.env is None:
             env = os.environ.copy()
             if self.token:
                 askpass = self.root / "askpass.sh"
@@ -63,35 +63,35 @@ class GitWorkspace:
                 env["MAAJUN_GIT_TOKEN"] = self.token
                 # Never fall back to an interactive prompt in the daemon.
                 env["GIT_TERMINAL_PROMPT"] = "0"
-            self._env = env
-        return self._env
+            self.env = env
+        return self.env
 
-    def _run(self, args: tuple[str, ...], cwd: Path | None) -> str:
+    def run(self, args: tuple[str, ...], cwd: Path | None) -> str:
         proc = subprocess.run(
             ["git", *args],
             capture_output=True,
             text=True,
             timeout=120,
             cwd=str(cwd or self.path),
-            env=self._auth_env(),
+            env=self.auth_env(),
         )
         if proc.returncode != 0:
             raise GitError(f"git {' '.join(args)} failed: {proc.stderr.strip()}")
         return proc.stdout.strip()
 
-    async def _git(self, *args: str, cwd: Path | None = None) -> str:
+    async def git(self, *args: str, cwd: Path | None = None) -> str:
         """Run a git command in a worker thread, off the event loop."""
-        return await asyncio.to_thread(self._run, args, cwd)
+        return await asyncio.to_thread(self.run, args, cwd)
 
     async def sync(self, base_branch: str) -> None:
         """Clone if missing, otherwise fetch; leaves base branch up to date."""
         if not (self.path / ".git").exists():
             self.root.mkdir(parents=True, exist_ok=True)
-            await self._git("clone", self.remote_url, str(self.path), cwd=self.root)
+            await self.git("clone", self.remote_url, str(self.path), cwd=self.root)
         else:
-            await self._git("fetch", "origin")
+            await self.git("fetch", "origin")
         try:
-            await self._git("checkout", "-B", base_branch, f"origin/{base_branch}")
+            await self.git("checkout", "-B", base_branch, f"origin/{base_branch}")
         except GitError as err:
             raise GitError(
                 f"Branch '{base_branch}' not found in {self.repo}. "
@@ -99,21 +99,21 @@ class GitWorkspace:
             ) from err
 
     async def create_branch(self, branch: str, base_branch: str) -> None:
-        await self._git("checkout", "-B", branch, f"origin/{base_branch}")
+        await self.git("checkout", "-B", branch, f"origin/{base_branch}")
 
     async def has_changes(self) -> bool:
-        return bool(await self._git("status", "--porcelain"))
+        return bool(await self.git("status", "--porcelain"))
 
     async def commit_all(self, message: str) -> None:
-        await self._git("add", "-A")
-        await self._git(
+        await self.git("add", "-A")
+        await self.git(
             "-c", f"user.name={COMMIT_AUTHOR}",
             "-c", f"user.email={COMMIT_EMAIL}",
             "commit", "-m", message,
         )
 
     async def push(self, branch: str) -> None:
-        await self._git("push", "--force-with-lease", "origin", f"{branch}:{branch}")
+        await self.git("push", "--force-with-lease", "origin", f"{branch}:{branch}")
 
     async def recent_commits(self, limit: int = 10) -> list[str]:
         """The newest commits on the checked-out branch, as "sha subject".
@@ -123,7 +123,7 @@ class GitWorkspace:
         is already on disk when the analysis runs.
         """
         try:
-            output = await self._git(
+            output = await self.git(
                 "log", f"-{limit}", "--no-merges", "--format=%h %s",
             )
         except GitError:
@@ -131,7 +131,7 @@ class GitWorkspace:
             return []
         return [line for line in output.splitlines() if line.strip()]
 
-    def _run_shell(self, command: str, timeout: float) -> CommandResult:
+    def run_shell(self, command: str, timeout: float) -> CommandResult:
         try:
             proc = subprocess.run(
                 command,
@@ -161,4 +161,4 @@ class GitWorkspace:
         running something else. Never raises — a failing or absent test
         command is a result to report, not a reason to abort the incident.
         """
-        return await asyncio.to_thread(self._run_shell, command, timeout)
+        return await asyncio.to_thread(self.run_shell, command, timeout)

@@ -19,32 +19,32 @@ class GitHubClient:
     def __init__(self, token: str, *, api_url: str = API_URL,
                  transport: httpx.AsyncBaseTransport | None = None):
         self.api_url = api_url.rstrip("/")
-        self._headers = github_headers(token)
-        self._transport = transport
-        self._client: httpx.AsyncClient | None = None
+        self.headers = github_headers(token)
+        self.transport = transport
+        self.client: httpx.AsyncClient | None = None
 
-    def _get_client(self) -> httpx.AsyncClient:
+    def get_client(self) -> httpx.AsyncClient:
         """Return a shared client, so repeated calls reuse the connection
         pool and TLS session instead of handshaking anew each request."""
-        if self._client is None or self._client.is_closed:
-            self._client = httpx.AsyncClient(
+        if self.client is None or self.client.is_closed:
+            self.client = httpx.AsyncClient(
                 base_url=self.api_url,
-                headers=self._headers,
+                headers=self.headers,
                 timeout=30,
-                transport=self._transport,
+                transport=self.transport,
             )
-        return self._client
+        return self.client
 
-    async def _request(self, method: str, path: str, **kwargs) -> httpx.Response:
+    async def request(self, method: str, path: str, **kwargs) -> httpx.Response:
         try:
-            return await self._get_client().request(method, path, **kwargs)
+            return await self.get_client().request(method, path, **kwargs)
         except httpx.HTTPError as e:
             raise GitHubError(f"Could not reach GitHub: {e}") from e
 
     async def aclose(self) -> None:
-        if self._client is not None and not self._client.is_closed:
-            await self._client.aclose()
-        self._client = None
+        if self.client is not None and not self.client.is_closed:
+            await self.client.aclose()
+        self.client = None
 
     async def __aenter__(self) -> GitHubClient:
         return self
@@ -54,7 +54,7 @@ class GitHubClient:
 
     async def validate_token(self) -> str:
         """Return the authenticated login, or raise GitHubError."""
-        resp = await self._request("GET", "/user")
+        resp = await self.request("GET", "/user")
         if resp.status_code == 401:
             raise GitHubError("GitHub rejected the token. Check it and try again.")
         if resp.status_code != 200:
@@ -63,7 +63,7 @@ class GitHubClient:
 
     async def can_push(self, repo: str) -> bool:
         """Whether the token has push (contents write) access to the repo."""
-        resp = await self._request("GET", f"/repos/{repo}")
+        resp = await self.request("GET", f"/repos/{repo}")
         if resp.status_code == 404:
             raise GitHubError(
                 f"Repo '{repo}' not found or the token has no access to it."
@@ -76,7 +76,7 @@ class GitHubClient:
         self, repo: str, *, head: str, base: str, title: str, body: str,
     ) -> str:
         """Open a PR and return its URL; reuses an existing PR for the branch."""
-        resp = await self._request(
+        resp = await self.request(
             "POST",
             f"/repos/{repo}/pulls",
             json={"title": title, "head": head, "base": base, "body": body},
@@ -88,7 +88,7 @@ class GitHubClient:
             if existing:
                 return existing
         raise GitHubError(
-            f"Could not create PR ({resp.status_code}): {self._error_detail(resp)}"
+            f"Could not create PR ({resp.status_code}): {self.error_detail(resp)}"
         )
 
     async def create_issue(self, repo: str, *, title: str, body: str) -> str:
@@ -97,18 +97,18 @@ class GitHubClient:
         Suggest mode's artifact: an analysis that changes no code is an issue,
         not a pull request whose diff is empty.
         """
-        resp = await self._request(
+        resp = await self.request(
             "POST", f"/repos/{repo}/issues", json={"title": title, "body": body},
         )
         if resp.status_code == 201:
             return resp.json()["html_url"]
         raise GitHubError(
-            f"Could not create issue ({resp.status_code}): {self._error_detail(resp)}"
+            f"Could not create issue ({resp.status_code}): {self.error_detail(resp)}"
         )
 
     async def find_pull_request(self, repo: str, *, head: str) -> str | None:
         owner = repo.split("/")[0]
-        resp = await self._request(
+        resp = await self.request(
             "GET",
             f"/repos/{repo}/pulls",
             params={"head": f"{owner}:{head}", "state": "open"},
@@ -119,7 +119,7 @@ class GitHubClient:
         return pulls[0]["html_url"] if pulls else None
 
     @staticmethod
-    def _error_detail(resp: httpx.Response) -> str:
+    def error_detail(resp: httpx.Response) -> str:
         try:
             data: dict[str, Any] = resp.json()
         except ValueError:

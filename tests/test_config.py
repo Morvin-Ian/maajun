@@ -307,7 +307,7 @@ def test_base_url_is_settable_by_dot_notation(tmp_path):
 # ---------------------------------------------------------------------------
 
 
-def _two_repos() -> Config:
+def two_repos() -> Config:
     return Config(github=GitHubConfig(repos=[
         RepoConfig(repo="acme/api", base_branch="main", mode="suggest"),
         RepoConfig(repo="acme/web", base_branch="develop", mode="fix"),
@@ -316,21 +316,21 @@ def _two_repos() -> Config:
 
 def test_a_github_field_with_no_repo_applies_to_every_repo():
     """Regression: only mode cascaded, so base_branch silently did nothing."""
-    config = _two_repos()
+    config = two_repos()
     config.set("github.base_branch", "trunk")
 
     assert [rc.base_branch for rc in config.github.repos] == ["trunk", "trunk"]
 
 
 def test_test_command_cascades_too():
-    config = _two_repos()
+    config = two_repos()
     config.set("github.test_command", "pytest -q")
 
     assert [rc.test_command for rc in config.github.repos] == ["pytest -q", "pytest -q"]
 
 
 def test_repo_scoped_set_touches_only_that_repo():
-    config = _two_repos()
+    config = two_repos()
     config.set("github.test_command", "pytest -q", "acme/web")
 
     assert config.github.repos[0].test_command == ""
@@ -338,20 +338,20 @@ def test_repo_scoped_set_touches_only_that_repo():
 
 
 def test_repo_scoped_get_reads_that_repos_value():
-    config = _two_repos()
+    config = two_repos()
 
     assert config.get("github.base_branch", "acme/web") == "develop"
     assert config.get("github.mode", "acme/api") == "suggest"
 
 
 def test_repo_scoped_set_validates_the_value():
-    config = _two_repos()
+    config = two_repos()
     with pytest.raises(ValueError, match='mode must be "suggest" or "fix"'):
         config.set("github.mode", "yolo", "acme/api")
 
 
 def test_repo_scoped_set_reaches_per_repo_only_fields():
-    config = _two_repos()
+    config = two_repos()
     config.set("github.log_files", "/a.log,/b.log", "acme/api")
 
     assert config.github.repos[0].log_files == ["/a.log", "/b.log"]
@@ -359,26 +359,26 @@ def test_repo_scoped_set_reaches_per_repo_only_fields():
 
 
 def test_repo_scoped_set_on_an_unknown_repo_says_how_to_add_it():
-    config = _two_repos()
+    config = two_repos()
     with pytest.raises(ValueError, match="add-repo other/thing"):
         config.set("github.mode", "fix", "other/thing")
 
 
 def test_repo_scoped_set_rejects_a_non_github_key():
-    config = _two_repos()
+    config = two_repos()
     with pytest.raises(ValueError, match="github.\\* keys only"):
         config.set("monitor.poll_interval", "10", "acme/api")
 
 
 def test_repo_scoped_set_rejects_a_field_that_is_not_per_repo():
-    config = _two_repos()
+    config = two_repos()
     with pytest.raises(ValueError, match="Unknown per-repo field: poll_interval"):
         config.set("github.poll_interval", "10", "acme/api")
 
 
 def test_setting_github_repo_is_not_a_thing():
     """There is no top-level repo any more; add-repo owns which repos exist."""
-    config = _two_repos()
+    config = two_repos()
     with pytest.raises(ValueError, match="Unknown field"):
         config.set("github.repo", "someone/else")
 
@@ -390,7 +390,7 @@ def test_a_per_repo_key_with_no_repos_says_add_one():
 
 
 def test_get_a_per_repo_key_names_each_repo_when_they_differ():
-    config = _two_repos()
+    config = two_repos()
     assert config.get("github.mode") == "acme/api=suggest, acme/web=fix"
 
 
@@ -407,7 +407,7 @@ def test_setting_github_repos_explains_itself():
 
 def test_add_repo_updates_in_place_and_keeps_the_order():
     """The first repo owns global monitor.log_files, so order is load-bearing."""
-    config = _two_repos()
+    config = two_repos()
     config.add_repo(RepoConfig(repo="acme/api", mode="fix"))
 
     assert [rc.repo for rc in config.github.repos] == ["acme/api", "acme/web"]
@@ -415,7 +415,7 @@ def test_add_repo_updates_in_place_and_keeps_the_order():
 
 
 def test_add_repo_appends_a_genuinely_new_repo():
-    config = _two_repos()
+    config = two_repos()
     config.add_repo(RepoConfig(repo="acme/jobs"))
 
     assert [rc.repo for rc in config.github.repos] == [

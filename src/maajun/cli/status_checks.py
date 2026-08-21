@@ -48,7 +48,7 @@ async def gather_github(
         await client.aclose()
 
 
-def _log_file_check(log_path: str) -> Check:
+def log_file_check(log_path: str) -> Check:
     """Existence *and* readability.
 
     A missing file is only a warning — the app may create it on its first
@@ -131,7 +131,7 @@ def build_status(
             "add monitor.log_files or GitHub Actions",
         ))
     for log_path in log_paths:
-        monitors.checks.append(_log_file_check(log_path))
+        monitors.checks.append(log_file_check(log_path))
     if watches_actions:
         monitors.checks.append(Check(
             f"GitHub Actions: {', '.join(config.monitor.github_actions_repos)}",
