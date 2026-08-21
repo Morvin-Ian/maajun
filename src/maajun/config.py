@@ -97,7 +97,7 @@ def default_data_dir() -> Path:
 
 class AIProviderConfig(Base):
     provider: str = ProviderType.DEEPSEEK.value
-    model: str | None = None  
+    model: str | None = None
     api_key: str | None = None
     base_url: str | None = None
     temperature: float = 0.3
@@ -158,7 +158,7 @@ class MonitorConfig(Base):
     # Emit nothing until burst_threshold events land within the window.
     burst_threshold: int = 1
     burst_window_seconds: float = 60.0
-    # Repos to poll for failed workflow runs. 
+    # Repos to poll for failed workflow runs.
     github_actions_repos: list[str] = Field(default_factory=list)
 
     @property

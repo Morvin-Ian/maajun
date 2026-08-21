@@ -51,11 +51,22 @@ load-bearing: the [spend cap](monitoring.md#capping-spend) decides whether to
 analyze the next incident from these numbers, and an unpriced model logs a
 warning rather than silently costing at the fallback rate.
 
+Anything the table does not recognise — including a gateway that never names
+the model it ran — is costed at the dearest entry in it, derived from the
+table rather than written down so adding a pricier model moves it too. Every
+error here rounds the same way on purpose: over-reporting pauses a daemon
+early, under-reporting lets it run past a cap the user set.
+
 ### Provider resilience
 
 API calls to the provider retry automatically on transient failures —
 HTTP 429, 500, 502, 503, and connection errors — up to 3 attempts with
-exponential backoff and jitter (capped at 30s between attempts).
+exponential backoff and jitter (capped at 30s between attempts). The backoff
+sits *between* attempts only: sleeping after the last one just made the
+caller wait up to 30s for an error it was always going to get. A streamed
+response is closed on the way out even when the round raises or the caller
+stops reading, so its connection goes back to the pool rather than waiting
+on the collector.
 Authentication errors and other client errors fail immediately; a bad key
 is reported on the first call, not after a retry dance.
 
@@ -309,6 +320,14 @@ The database records its version in `PRAGMA user_version`, and
 `store.connect()` applies any pending migrations at open, each in its own
 transaction so an interrupted upgrade resumes rather than half-applies. A
 file written by a *newer* maajun is refused instead of being rewritten.
+
+The `BEGIN` is issued explicitly rather than leaning on `with conn`. Under
+sqlite3's legacy transaction control — still the default — a transaction is
+opened implicitly before DML and *not* before DDL, so every `CREATE`, `ALTER`
+and `DROP` autocommitted on its own and `with conn` committed nothing that
+mattered. The atomicity above was a claim, not a fact: killed between
+migration 1's `RENAME` and its `INSERT ... SELECT`, the upgrade left an empty
+incidents table beside an orphaned `incidents_outdated`.
 
 This replaced a hard failure that told the user to delete the database —
 acceptable while the schema was settled, not once chat needed to add to

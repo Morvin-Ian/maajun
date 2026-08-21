@@ -1,4 +1,5 @@
 import asyncio
+import inspect
 import logging
 import random
 from collections.abc import AsyncIterator
@@ -28,7 +29,8 @@ MAX_DELAY = 30.0
 
 NON_RETRYABLE = (AuthenticationError,)
 
-class ChatCompletionsProvider(AIProvider): 
+
+class ChatCompletionsProvider(AIProvider):
     name: str = ""
     base_url: str | None = None
     default_model: str = ""
@@ -84,16 +86,20 @@ class ChatCompletionsProvider(AIProvider):
                 transient = isinstance(e, APIConnectionError) or (
                     isinstance(e, APIError) and status in (429, 500, 502, 503)
                 )
-                if transient:
-                    delay = min(MAX_DELAY, BASE_DELAY * (2 ** attempt) * (1 + random.random()))
-                    log.warning(
-                        "API error (attempt %d/%d): %s — retrying in %.1fs",
-                        attempt + 1, MAX_RETRIES, e, delay,
-                    )
-                    await asyncio.sleep(delay)
-                else:
+                # Nothing follows the last attempt, so sleeping before giving
+                # up just made the caller wait up to MAX_DELAY for an error it
+                # was always going to get.
+                if not transient or attempt == MAX_RETRIES - 1:
                     break
-        raise wrap_error(last_exc)
+                delay = min(MAX_DELAY, BASE_DELAY * (2 ** attempt) * (1 + random.random()))
+                log.warning(
+                    "API error (attempt %d/%d): %s — retrying in %.1fs",
+                    attempt + 1, MAX_RETRIES, e, delay,
+                )
+                await asyncio.sleep(delay)
+        # `from last_exc`: the raise is outside the except block, so without
+        # it the provider's own traceback is dropped from the chain.
+        raise wrap_error(last_exc) from last_exc
 
     async def chat_completion(
         self,
@@ -136,6 +142,7 @@ class ChatCompletionsProvider(AIProvider):
         tool_calls = ToolCallAccumulator()
         usage: dict[str, int] | None = None
 
+        stream = None
         try:
             stream = await self.open_stream(
                 model=self.model,
@@ -164,6 +171,12 @@ class ChatCompletionsProvider(AIProvider):
             raise
         except APIError as e:
             raise wrap_error(e) from e
+        finally:
+            # An abandoned stream — the caller stopped iterating, or a round
+            # raised — holds its connection out of the pool until the object
+            # is collected. A watch run makes one of these per tool round.
+            if stream is not None:
+                await close_quietly(stream)
 
         if tool_calls:
             yield "tool_calls", tool_calls.result()
@@ -254,6 +267,19 @@ class ChatCompletionsProvider(AIProvider):
             thinking=getattr(message, "reasoning_content", None),
             model=self.model,
         )
+
+
+async def close_quietly(stream: Any) -> None:
+    """Release a stream, tolerating one that is finished, sync, or has none."""
+    closer = getattr(stream, "close", None)
+    if closer is None:
+        return
+    try:
+        result = closer()
+        if inspect.isawaitable(result):
+            await result
+    except Exception:
+        log.debug("could not close the response stream", exc_info=True)
 
 
 def usage_of(usage: Any) -> dict[str, int]:

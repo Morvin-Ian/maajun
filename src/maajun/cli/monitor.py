@@ -7,6 +7,7 @@ from pathlib import Path
 
 import typer
 from rich.live import Live
+from rich.markup import escape
 from rich.panel import Panel
 
 from maajun.auth import AuthManager
@@ -26,8 +27,11 @@ def watch_with_spinner(daemon, *, once: bool) -> None:
     status = WorkingStatus("Watching for errors")
 
     def notice(message: str, level: str) -> None:
+        # Escaped: a notice carries an error message or a log line, and a
+        # stray closing tag in one is a MarkupError that would take the
+        # daemon down instead of reporting the incident that produced it.
         style = NOTICE_STYLES.get(level, "dim")
-        console.print(f"[{style}]{message}[/{style}]")
+        console.print(f"[{style}]{escape(message)}[/{style}]")
 
     daemon.progress = status.set
     daemon.on_notice = notice

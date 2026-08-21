@@ -30,7 +30,19 @@ class DaemonDeps:
         workdir = Path(config.daemon.workdir).expanduser()
         self.store = IncidentStore(workdir / "incidents.db")
         self.report_dir = workdir / "reports"
+        # From here on a failure has a database to close. `maajun status`
+        # builds deps speculatively, so leaking a handle per attempt is a
+        # long-running process holding WAL files open for nothing.
+        try:
+            self.wire(config, auth, workdir, api_key)
+        except Exception:
+            self.store.close()
+            raise
 
+    def wire(
+        self, config: Config, auth: AuthManager, workdir: Path, api_key: str
+    ) -> None:
+        """Everything that can fail after the database is already open."""
         repos = config.github.get_all_repos()
         # GitHub is optional. With no repo configured, errors are still
         # detected and analyzed — the report lands on disk instead of in a PR.
@@ -167,12 +179,18 @@ def build_daemon(config: Config, auth: AuthManager | None = None) -> Daemon:
     """Wire a Daemon from config + stored credentials."""
     auth = auth or AuthManager()
     deps = DaemonDeps(config, auth)
-    monitors, monitor_to_repo = build_monitors(config, deps.repos, auth)
-    if not monitors:
-        raise RuntimeError(
-            "No monitors configured. Add log files under [monitor] "
-            "or GitHub Actions settings."
-        )
+    try:
+        monitors, monitor_to_repo = build_monitors(config, deps.repos, auth)
+        if not monitors:
+            raise RuntimeError(
+                "No monitors configured. Add log files under [monitor] "
+                "or GitHub Actions settings."
+            )
+    except Exception:
+        # deps owns an open database by now; a config the CLI is about to
+        # reject should not leave it behind.
+        deps.store.close()
+        raise
 
     return Daemon(
         config,

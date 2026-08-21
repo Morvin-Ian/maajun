@@ -97,6 +97,16 @@ class LogFileMonitor(Monitor):
 
 
     def read_new(self) -> str:
+        """Read whatever has been appended since the last poll.
+
+        Byte offsets, and the file is opened in binary. TextIOWrapper.tell()
+        returns an opaque cookie that packs the decoder's state alongside the
+        position, not a byte count — it happens to equal one until a read ends
+        mid-character, at which point it becomes a very large integer and the
+        `st_size < offset` test below reads as "truncated", re-reporting the
+        whole file. Decoding here instead keeps the offset comparable with
+        st_size, which is what it is being compared against.
+        """
         if not self.path.exists():
             return ""
         stat = self.path.stat()
@@ -107,13 +117,16 @@ class LogFileMonitor(Monitor):
             self.carryover_text = ""
         self.inode = stat.st_ino
 
-        if stat.st_size == self.offset:
+        if stat.st_size <= self.offset:
             return ""
-        with open(self.path, errors="replace") as f:
+        with open(self.path, "rb") as f:
             f.seek(self.offset)
-            text = f.read()
+            data = f.read()
             self.offset = f.tell()
-        return text
+        # A read can land mid-character when the writer is still going; the
+        # replacement character is better than losing the line, and the next
+        # poll starts from the byte after it either way.
+        return data.decode("utf-8", errors="replace")
 
 
     def matches_error_level(self, line: str) -> bool:
@@ -219,7 +232,19 @@ class LogFileMonitor(Monitor):
         i = start + 1
         while i < len(lines):
             line = lines[i]
-            if line.startswith((" ", "\t")) or self.is_traceback_start(line) or not line.strip():
+            if not line.strip():
+                # A blank line inside a traceback is part of it (a chained
+                # "During handling…" block), but a blank line followed by an
+                # unindented line ends it: that next line belongs to whatever
+                # the application logged next. Swallowing it used to make an
+                # unrelated INFO line the block's exception — and therefore
+                # the incident's title and its fingerprint.
+                if self.blank_ends_block(lines, i):
+                    return block, i + 1
+                block.append(line)
+                i += 1
+                continue
+            if line.startswith((" ", "\t")) or self.is_traceback_start(line):
                 block.append(line)
                 i += 1
                 continue
@@ -232,6 +257,21 @@ class LogFileMonitor(Monitor):
             block.append(line)
             return block, i + 1
         return block, None
+
+    def blank_ends_block(self, lines: list[str], index: int) -> bool:
+        """Whether the blank line at `index` is the end of the traceback.
+
+        It is, unless the next non-blank line continues one: indented detail,
+        or a chained-exception header like "During handling of the above".
+        """
+        for line in lines[index + 1:]:
+            if not line.strip():
+                continue
+            return not (
+                line.startswith((" ", "\t")) or self.is_traceback_start(line)
+            )
+        # Nothing but blanks left; the caller decides whether more is coming.
+        return False
 
     def traceback_event(self, block: list[str], context: str | None = None) -> ErrorEvent:
         details = "\n".join(block)

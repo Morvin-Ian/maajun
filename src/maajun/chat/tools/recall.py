@@ -10,6 +10,19 @@ from maajun.utils import truncate
 # Messages are replayed for context, not verbatim transcription.
 MESSAGE_PREVIEW = 600
 
+# Ceiling on what one recall call may ask the database for. cap_result already
+# bounds what reaches the model, but a limit of 100000 still makes the query
+# and builds every row first.
+MAX_LIMIT = 100
+
+
+def clamp(limit: int, default: int) -> int:
+    """A model-supplied limit, kept sane. Non-numeric falls back to default."""
+    try:
+        return max(1, min(MAX_LIMIT, int(limit)))
+    except (TypeError, ValueError):
+        return default
+
 
 def recall_tools(memory: ChatMemory, current_session: int) -> list[Tool]:
     """Build the recall tools bound to the session currently running."""
@@ -19,7 +32,7 @@ def recall_tools(memory: ChatMemory, current_session: int) -> list[Tool]:
     ) -> str:
         hits = memory.search(
             query,
-            limit=max(1, limit),
+            limit=clamp(limit, 10),
             exclude_session=current_session,
             since=since,
             until=until,
@@ -30,7 +43,7 @@ def recall_tools(memory: ChatMemory, current_session: int) -> list[Tool]:
 
     async def recall_session(session_id: int = 0, limit: int = 30) -> str:
         if not session_id:
-            sessions = memory.recent_sessions(limit=max(1, limit))
+            sessions = memory.recent_sessions(limit=clamp(limit, 30))
             listed = [
                 {
                     "session_id": row["id"],
@@ -48,7 +61,7 @@ def recall_tools(memory: ChatMemory, current_session: int) -> list[Tool]:
 
         if memory.session(session_id) is None:
             return f"No chat session {session_id}."
-        messages = memory.messages(session_id, limit=max(1, limit))
+        messages = memory.messages(session_id, limit=clamp(limit, 30))
         return json.dumps({
             "session_id": session_id,
             "messages": [

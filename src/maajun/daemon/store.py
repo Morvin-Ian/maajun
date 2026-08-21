@@ -287,8 +287,11 @@ def connect(path: str | Path) -> sqlite3.Connection:
     migrate(conn, path)
     # After migrate, which is what creates chat_messages for the index to
     # shadow. Repairs a database that was upgraded on a build without FTS5.
-    ensure_fts(conn)
-    conn.commit()
+    conn.execute("BEGIN")
+    if ensure_fts(conn):
+        conn.commit()
+    else:
+        conn.rollback()
     return conn
 
 
@@ -298,6 +301,13 @@ def migrate(conn: sqlite3.Connection, path: Path) -> None:
     Each migration runs in its own transaction and bumps user_version, so an
     interrupted upgrade resumes from the last step that committed rather than
     half-applying.
+
+    The BEGIN is explicit, not `with conn`. Under sqlite3's legacy transaction
+    control — still the default — a transaction is opened implicitly before
+    DML and *not* before DDL, so CREATE/ALTER/DROP would each autocommit on
+    their own and `with conn` would commit nothing that mattered. Killed
+    between migrate_to_1's RENAME and its INSERT ... SELECT, that left an
+    empty incidents table and an orphaned incidents_outdated beside it.
     """
     version = conn.execute("PRAGMA user_version").fetchone()[0]
     if version > SCHEMA_VERSION:
@@ -309,12 +319,14 @@ def migrate(conn: sqlite3.Connection, path: Path) -> None:
         )
     for target, migration in enumerate(MIGRATIONS[version:], start=version + 1):
         try:
-            with conn:
-                migration(conn)
-                # Not parameterizable, and `target` is a loop index over a
-                # module constant — never user input.
-                conn.execute(f"PRAGMA user_version = {target}")
+            conn.execute("BEGIN")
+            migration(conn)
+            # Not parameterizable, and `target` is a loop index over a
+            # module constant — never user input.
+            conn.execute(f"PRAGMA user_version = {target}")
+            conn.commit()
         except sqlite3.Error as e:
+            conn.rollback()
             conn.close()
             raise StoreError(
                 f"Could not upgrade {path} to schema {target}: {e}"

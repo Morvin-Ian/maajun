@@ -67,10 +67,22 @@ def test_extract_usage_uses_model_pricing():
     assert pro_cost > flash_cost
 
 
-def test_extract_usage_none_model_defaults_to_flash():
+def test_an_unnamed_model_is_costed_at_the_dearest_rate():
+    """A gateway that does not say what it ran must not be assumed cheap:
+    the cap can survive over-reporting, not under-reporting."""
     usage = {"prompt_tokens": 1_000_000, "completion_tokens": 1_000_000}
     _, _, cost = extract_usage(usage, None)
-    assert cost == compute_cost(1_000_000, 1_000_000, "deepseek-v4-flash")
+    assert cost == compute_cost(1_000_000, 1_000_000, "unrecognised-model")
+    assert cost > compute_cost(1_000_000, 1_000_000, "deepseek-v4-flash")
+
+
+def test_the_fallback_rate_is_never_below_a_priced_model():
+    """Derived from the table, so adding a dearer model moves it too."""
+    from maajun.providers.pricing import DEFAULT_PRICING, PRICING
+
+    for rates in PRICING.values():
+        assert DEFAULT_PRICING["input"] >= rates["input"]
+        assert DEFAULT_PRICING["output"] >= rates["output"]
 
 
 # ---------------------------------------------------------------------------

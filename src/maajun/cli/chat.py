@@ -6,7 +6,6 @@ from pathlib import Path
 import typer
 
 from maajun.auth import AuthManager
-from maajun.chat.session import run_chat_session
 from maajun.cli.shared import (
     app,
     configured_providers,
@@ -78,6 +77,13 @@ def chat(
     config.ai.api_key = api_key
 
     workdir = Path(config.daemon.workdir).expanduser()
+    # Imported here, not at module scope: maajun.chat.session reaches into
+    # maajun.cli.shared for its prompt, and importing that runs this package's
+    # __init__, which imports this module. At module scope the cycle closes
+    # and `import maajun.chat.session` fails outright unless something else
+    # happened to import the CLI first.
+    from maajun.chat.session import run_chat_session
+
     try:
         run_chat_session(
             config,

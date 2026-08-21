@@ -12,7 +12,6 @@ import pytest
 
 from maajun.config import Config, DaemonConfig, GitHubConfig, MonitorConfig, RepoConfig
 from maajun.daemon.core import (
-    SHUTDOWN_EVENT,
     Daemon,
     LocalWorkspace,
     make_permission_policy,
@@ -489,17 +488,14 @@ async def test_notice_emitted_on_failure(setup):
 # ---------------------------------------------------------------------------
 
 
-async def test_shutdown_event_stops_daemon():
-    """Daemon.run exits cleanly when SHUTDOWN_EVENT is set."""
-    SHUTDOWN_EVENT.clear()
-
+def bare_daemon():
     config = Config(
         github=GitHubConfig(repos=[RepoConfig(repo="owner/name", base_branch="main")]),
         monitor=MonitorConfig(log_files=["/dev/null"], poll_interval=9999),
     )
     workspace = GitWorkspace(Path("/tmp/ws"), "owner/name", remote_url="http://x")
     store = IncidentStore(Path("/tmp/does-not-exist/test.db"))
-    daemon = Daemon(
+    return Daemon(
         config,
         monitors=[],
         store=store,
@@ -509,12 +505,68 @@ async def test_shutdown_event_stops_daemon():
         agent_factory_for_repo=lambda rc, ws: lambda: None,
     )
 
+
+async def test_shutdown_event_stops_daemon():
+    """Daemon.run exits cleanly once its shutdown event is set."""
+    daemon = bare_daemon()
+
     async def set_shutdown():
         await asyncio.sleep(0.05)
-        SHUTDOWN_EVENT.set()
+        daemon.shutdown.set()
 
     await asyncio.gather(daemon.run(), set_shutdown())
-    SHUTDOWN_EVENT.clear()
+
+
+async def test_a_second_daemon_is_not_shut_down_by_the_first():
+    """The event used to be module-global, so once anything had shut down,
+    every later Daemon in the process returned from run() without polling."""
+    first = bare_daemon()
+    await asyncio.gather(first.run(), stop_soon(first))
+    assert first.shutdown.is_set()
+
+    second = bare_daemon()
+    assert not second.shutdown.is_set()
+    polled = []
+    second.poll_once = lambda **kw: polled.append(kw) or asyncio.sleep(0)
+    await asyncio.gather(second.run(), stop_soon(second))
+    assert polled, "the second daemon should still do a poll cycle"
+
+
+async def stop_soon(daemon):
+    await asyncio.sleep(0.05)
+    daemon.shutdown.set()
+
+
+async def test_signal_handlers_are_removed_when_run_returns(monkeypatch):
+    """The loop outlives one daemon; a handler left pointing at a finished
+    daemon's event would silently do nothing for the next one."""
+    daemon = bare_daemon()
+    added, removed = [], []
+    loop = asyncio.get_running_loop()
+    monkeypatch.setattr(
+        loop, "add_signal_handler", lambda sig, cb: added.append(sig)
+    )
+    monkeypatch.setattr(loop, "remove_signal_handler", lambda sig: removed.append(sig))
+
+    await daemon.run(once=True)
+    assert added and added == removed
+
+
+async def test_a_loop_without_signal_handlers_still_runs(monkeypatch):
+    """Windows' proactor loop raises NotImplementedError; Ctrl-C arrives as
+    KeyboardInterrupt there instead."""
+    daemon = bare_daemon()
+    loop = asyncio.get_running_loop()
+
+    def unsupported(sig, cb):
+        raise NotImplementedError
+
+    monkeypatch.setattr(loop, "add_signal_handler", unsupported)
+    monkeypatch.setattr(
+        loop, "remove_signal_handler", lambda sig: pytest.fail("nothing to remove")
+    )
+
+    await daemon.run(once=True)
 
 
 # ---------------------------------------------------------------------------

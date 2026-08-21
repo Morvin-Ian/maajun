@@ -5,7 +5,7 @@ from rich.console import Console
 
 from maajun.chat.memory import ChatMemory
 from maajun.chat.prompt import build_system_prompt
-from maajun.chat.session import ChatSession
+from maajun.chat.session import COMMANDS, HELP, ChatSession
 from maajun.config import AIProviderConfig, Config, GitHubConfig, RepoConfig
 from maajun.daemon.store import IncidentStore
 from maajun.providers.base import CompletionResponse, ProviderError
@@ -71,12 +71,17 @@ class Driver:
 @pytest.fixture
 def session_factory(tmp_path):
     made = []
+    opened = []
 
     def build(lines, *, agent=None, config=None):
         database = tmp_path / "incidents.db"
         store = IncidentStore(database)
         memory = ChatMemory(database)
-        console = Console(file=open(tmp_path / "out.txt", "a"), width=100)
+        # Tracked so the fixture can close it: an unclosed handle per session
+        # is a ResourceWarning on every run, which buries real ones.
+        out = open(tmp_path / "out.txt", "a")
+        opened.append(out)
+        console = Console(file=out, width=100)
         session = ChatSession(
             config or Config(ai=AIProviderConfig(provider="deepseek", api_key="x")),
             console=console,
@@ -92,6 +97,8 @@ def session_factory(tmp_path):
     yield build
     for session in made:
         session.close()
+    for handle in opened:
+        handle.close()
 
 
 def printed(session):
@@ -103,7 +110,8 @@ def printed(session):
     same reason tests/cli/test_commands.py has flat().
     """
     session.console.file.flush()
-    return " ".join(open(session.console.file.name).read().split())
+    with open(session.console.file.name) as handle:
+        return " ".join(handle.read().split())
 
 
 # ---------------------------------------------------------------------------
@@ -651,3 +659,112 @@ def test_a_tool_call_is_announced_before_it_runs(session_factory):
     output = printed(session)
     assert "run_maajun_command" in output
     assert "Ready." in output
+
+
+# ---------------------------------------------------------------------------
+# Text that is not markup
+# ---------------------------------------------------------------------------
+
+
+def test_an_error_containing_a_closing_tag_does_not_crash_the_turn(session_factory):
+    """Rich parses square brackets. A provider error quoting the model back
+    can carry "[/INST]" and friends, and an unmatched closing tag is a
+    MarkupError — the reported failure taking down the loop reporting it."""
+    session = session_factory([])
+
+    def explode(coro):
+        coro.close()  # the turn never awaits it; closing keeps the run quiet
+        raise RuntimeError("model returned [/INST] unexpectedly")
+
+    session.runner.run = explode
+    session.turn("hello")
+
+    assert "[/INST]" in printed(session)
+
+
+def test_a_provider_error_with_markup_is_shown_literally(session_factory):
+    session = session_factory([])
+
+    def explode(coro):
+        coro.close()
+        raise ProviderError("rate limited on [model/v2]")
+
+    session.runner.run = explode
+    session.turn("hello")
+
+    assert "[model/v2]" in printed(session)
+
+
+def test_the_watch_notice_escapes_the_message():
+    """A daemon notice carries an error message or a log line verbatim."""
+    import io
+
+    from maajun.cli import monitor as monitor_cli
+
+    console = Console(file=io.StringIO(), width=200)
+    original = monitor_cli.console
+    monitor_cli.console = console
+
+    class FakeDaemon:
+        progress = None
+        on_notice = None
+
+        async def run(self, **kwargs):
+            self.on_notice("failed on [/red] input", "error")
+
+    try:
+        monitor_cli.watch_with_spinner(FakeDaemon(), once=True)
+    finally:
+        monitor_cli.console = original
+
+    assert "[/red]" in console.file.getvalue()
+
+
+# ---------------------------------------------------------------------------
+# Slash dispatch
+# ---------------------------------------------------------------------------
+
+
+def test_every_advertised_slash_command_has_a_handler(session_factory):
+    session = session_factory([])
+    handlers = session.slash_handlers()
+    missing = [name for name in COMMANDS if name not in handlers]
+    assert not missing, f"advertised in COMMANDS but not handled: {missing}"
+
+
+def test_every_handler_is_advertised(session_factory):
+    session = session_factory([])
+    extra = [name for name in session.slash_handlers() if name not in COMMANDS]
+    assert not extra, f"handled but not offered for completion: {extra}"
+
+
+def test_every_slash_command_is_documented_in_help(session_factory):
+    session = session_factory([])
+    for name in session.slash_handlers():
+        assert name in HELP, f"{name} is not in /help"
+
+
+# ---------------------------------------------------------------------------
+# Rebuilding the agent
+# ---------------------------------------------------------------------------
+
+
+def test_switching_model_carries_the_conversation_over(session_factory):
+    """Same conversation, different model."""
+    session = session_factory([])
+    session.agent.history = [{"role": "user", "content": "remember this"}]
+
+    session.replace_agent()
+
+    assert session.agent.history == [{"role": "user", "content": "remember this"}]
+
+
+def test_starting_a_new_session_does_not(session_factory):
+    """/new, /resume and /forget used to carry the history over and then
+    clear it, which read as though the old context might survive."""
+    session = session_factory([])
+    session.agent.history = [{"role": "user", "content": "old talk"}]
+
+    session.replace_agent(keep_history=False)
+
+    assert session.agent.history == []
