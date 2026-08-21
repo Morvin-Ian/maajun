@@ -6,8 +6,7 @@ from pathlib import Path
 import typer
 
 from maajun.auth import AuthManager
-from maajun.chat.session import run_chat_session
-from maajun.cli._shared import (
+from maajun.cli.shared import (
     app,
     configured_providers,
     console,
@@ -28,11 +27,19 @@ def chat(
         False, "--thinking", help="Use the provider's reasoning model"
     ),
     session: int | None = typer.Option(
-        None, "--session", "-s", help="Resume the context of an earlier session"
+        None, "--session", "-s", help="Carry on an earlier session"
+    ),
+    prompt: str = typer.Option(
+        "", "--prompt", "-p",
+        help="Answer one question and exit, instead of opening the REPL",
     ),
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Debug logging"),
 ):
     """Talk to maajun: ask what it can do, have it do it, or recall past work."""
+    # Imported here: the session reaches back into this package for its
+    # prompt helpers, and at module scope the two would deadlock whenever
+    # maajun.chat.session is the first of the pair to be imported.
+
     if verbose:
         logging.basicConfig(
             level=logging.DEBUG,
@@ -70,8 +77,21 @@ def chat(
     config.ai.api_key = api_key
 
     workdir = Path(config.daemon.workdir).expanduser()
+    # Imported here, not at module scope: maajun.chat.session reaches into
+    # maajun.cli.shared for its prompt, and importing that runs this package's
+    # __init__, which imports this module. At module scope the cycle closes
+    # and `import maajun.chat.session` fails outright unless something else
+    # happened to import the CLI first.
+    from maajun.chat.session import run_chat_session
+
     try:
-        run_chat_session(config, console=console, workdir=workdir, resume=session)
+        run_chat_session(
+            config,
+            console=console,
+            workdir=workdir,
+            resume=session,
+            prompt=prompt.strip(),
+        )
     except ValueError as e:
         console.print(f"[red]✗ {e}[/red]")
         raise typer.Exit(1) from e

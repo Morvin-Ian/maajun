@@ -4,11 +4,11 @@ from maajun.cli.status_checks import build_status
 from maajun.config import Config, GitHubConfig, MonitorConfig, RepoConfig
 
 
-def _labels(sections):
+def check_labels(sections):
     return [c.label for s in sections for c in s.checks]
 
 
-def _find(sections, label):
+def find(sections, label):
     return next(c for s in sections for c in s.checks if c.label == label)
 
 
@@ -27,7 +27,7 @@ def test_all_green(tmp_path):
     )
 
     assert ok is True
-    labels = _labels(sections)
+    labels = check_labels(sections)
     assert "API key for deepseek" in labels
     assert "Authenticated as morvin" in labels
     assert "Can push to owner/name" in labels
@@ -51,7 +51,7 @@ def test_no_repo_configured_is_a_warning_not_a_failure():
         repos=[], network=None,
     )
     assert ok is True
-    assert "Repository configured" in _labels(sections)
+    assert "Repository configured" in check_labels(sections)
 
 
 def test_missing_token_fails_once_a_repo_is_configured():
@@ -65,7 +65,7 @@ def test_missing_token_fails_once_a_repo_is_configured():
         repos=[RepoConfig(repo="owner/name")], network=None,
     )
     assert ok is False
-    assert "GitHub token stored" in _labels(sections)
+    assert "GitHub token stored" in check_labels(sections)
 
 
 def test_missing_log_file_is_warning_not_failure(tmp_path):
@@ -124,7 +124,7 @@ def test_no_monitors_at_all_still_fails():
         repos=[RepoConfig(repo="owner/name")], network=None,
     )
     assert ok is False
-    assert "At least one monitor configured" in _labels(sections)
+    assert "At least one monitor configured" in check_labels(sections)
 
 
 # ---------------------------------------------------------------------------
@@ -132,7 +132,7 @@ def test_no_monitors_at_all_still_fails():
 # ---------------------------------------------------------------------------
 
 
-def _status_for_log(tmp_path, log_path):
+def status_for_log(tmp_path, log_path):
     config = Config(
         github=GitHubConfig(repos=[RepoConfig(repo="owner/name")]),
         monitor=MonitorConfig(log_files=[str(log_path)]),
@@ -153,7 +153,7 @@ def test_unreadable_log_file_fails_the_preflight(tmp_path):
     log_file.write_text("")
     log_file.chmod(0o000)
     try:
-        sections, ok = _status_for_log(tmp_path, log_file)
+        sections, ok = status_for_log(tmp_path, log_file)
         detail = next(c.detail for s in sections for c in s.checks
                       if c.label.startswith("Log file"))
         assert ok is False
@@ -165,13 +165,13 @@ def test_unreadable_log_file_fails_the_preflight(tmp_path):
 def test_readable_log_file_passes(tmp_path):
     log_file = tmp_path / "app.log"
     log_file.write_text("")
-    _, ok = _status_for_log(tmp_path, log_file)
+    _, ok = status_for_log(tmp_path, log_file)
     assert ok is True
 
 
 def test_missing_log_file_is_still_only_a_warning(tmp_path):
     """It may not exist until the app logs its first error."""
-    sections, ok = _status_for_log(tmp_path, tmp_path / "not-yet.log")
+    sections, ok = status_for_log(tmp_path, tmp_path / "not-yet.log")
     check = next(c for s in sections for c in s.checks if c.label.startswith("Log file"))
     assert ok is True
     assert check.warn is True
@@ -179,20 +179,20 @@ def test_missing_log_file_is_still_only_a_warning(tmp_path):
 
 def test_token_check_says_stored_because_the_keyring_is_the_only_source():
     sections, _ = build_status(
-        _config(), provider="deepseek", has_key=True, has_token=True,
+        make_config(), provider="deepseek", has_key=True, has_token=True,
         repos=[RepoConfig(repo="owner/name")], network=None,
     )
-    check = _find(sections, "GitHub token stored")
+    check = find(sections, "GitHub token stored")
     assert check.ok
     assert check.detail == ""
 
 
 def test_missing_token_still_says_how_to_supply_one():
     sections, ok = build_status(
-        _config(), provider="deepseek", has_key=True, has_token=False,
+        make_config(), provider="deepseek", has_key=True, has_token=False,
         repos=[RepoConfig(repo="owner/name")], network=None,
     )
-    check = _find(sections, "GitHub token stored")
+    check = find(sections, "GitHub token stored")
     assert not check.ok and not ok
     assert "maajun setup" in check.detail
     # Neither the environment nor gh is a source any more.
@@ -200,5 +200,5 @@ def test_missing_token_still_says_how_to_supply_one():
     assert "gh auth" not in check.detail
 
 
-def _config() -> Config:
+def make_config() -> Config:
     return Config(monitor=MonitorConfig(log_files=["/x.log"]))

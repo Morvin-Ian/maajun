@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import io
+import os
 import shlex
 import sys
+import threading
+from collections.abc import Callable, Iterator
 from enum import Enum
 from typing import NamedTuple
 
@@ -21,6 +25,32 @@ except ImportError:  # pragma: no cover - typer built against the real click
     from click import ClickException
 
 PROG_NAME = "maajun"
+
+# Width the captured output is rendered at. Rich wraps to 80 when it cannot
+# see a terminal, which breaks repo names and URLs across lines.
+CAPTURE_WIDTH = "120"
+
+# Rich draws tables and panels in box-drawing characters. The model reads the
+# capture as text, so the border is redrawn in ASCII and rules are dropped.
+BOX = str.maketrans({
+    "│": "|", "┃": "|", "║": "|",
+    "─": "-", "━": "-", "═": "-",
+    "┌": "+", "┐": "+", "└": "+", "┘": "+", "├": "+", "┤": "+",
+    "┬": "+", "┴": "+", "┼": "+", "╭": "+", "╮": "+", "╰": "+", "╯": "+",
+    "┏": "+", "┓": "+", "┗": "+", "┛": "+", "┡": "+", "┩": "+", "╇": "+",
+    "┳": "+", "┻": "+", "╋": "+", "┠": "+", "┨": "+", "╞": "+", "╡": "+",
+})
+
+
+def plain(text: str) -> str:
+    """Captured terminal output as prose: ASCII borders, no rule lines."""
+    lines = []
+    for line in text.translate(BOX).splitlines():
+        stripped = line.strip()
+        if stripped and not stripped.strip("+-| "):
+            continue
+        lines.append(line.rstrip())
+    return "\n".join(lines).strip()
 
 
 class Gate(Enum):
@@ -60,7 +90,7 @@ class CommandInfo(NamedTuple):
     gate: Gate
 
 
-def _cli_command() -> TyperGroup:
+def cli_command() -> TyperGroup:
     # Imported here, not at module scope: maajun.cli imports the chat command,
     # which imports this module. A top-level import would close the loop.
     from maajun.cli import app
@@ -68,7 +98,7 @@ def _cli_command() -> TyperGroup:
     return typer.main.get_command(app)
 
 
-def _context(command, info_name: str = PROG_NAME, parent=None):
+def context(command, info_name: str = PROG_NAME, parent=None):
     """A context built from the command's own class, not an imported one.
 
     command.context_class is whichever Context the installed typer vendors,
@@ -77,16 +107,16 @@ def _context(command, info_name: str = PROG_NAME, parent=None):
     return command.context_class(command, info_name=info_name, parent=parent)
 
 
-def _parsed_params(name: str, argv: list[str]) -> dict | None:
+def parsed_params(name: str, argv: list[str]) -> dict | None:
     """What the CLI's own parser makes of `argv`, or None if it cannot.
 
     Used instead of eyeballing the arguments: "config github.mode -c f.toml"
     has two non-flag tokens but only one of them is the key, and only the
     parser knows which options take a value.
     """
-    command = _cli_command()
+    command = cli_command()
     try:
-        with _context(command) as ctx:
+        with context(command) as ctx:
             sub = command.get_command(ctx, name)
             if sub is None:
                 return None
@@ -111,7 +141,7 @@ def classify(name: str, argv: list[str] | None = None) -> Gate:
     if name in BLOCKED:
         return Gate.BLOCKED
     if name == "config":
-        params = _parsed_params("config", argv or [])
+        params = parsed_params("config", argv or [])
         if params is None:
             return Gate.MUTATING  # cannot tell — err towards asking
         return Gate.READ_ONLY if params.get("value") is None else Gate.MUTATING
@@ -122,8 +152,8 @@ def classify(name: str, argv: list[str] | None = None) -> Gate:
 
 def command_index() -> list[CommandInfo]:
     """Every registered command, with its one-line help and gating."""
-    command = _cli_command()
-    with _context(command) as ctx:
+    command = cli_command()
+    with context(command) as ctx:
         infos = []
         for name in sorted(command.list_commands(ctx)):
             sub = command.get_command(ctx, name)
@@ -141,8 +171,8 @@ def command_help(name: str) -> str:
     Captured from stdout, not taken from the return value: typer renders help
     through rich, which writes to the console and hands back an empty string.
     """
-    command = _cli_command()
-    with _context(command) as ctx:
+    command = cli_command()
+    with context(command) as ctx:
         sub = command.get_command(ctx, name)
         if sub is None:
             known = ", ".join(info.name for info in command_index())
@@ -150,14 +180,14 @@ def command_help(name: str) -> str:
         buffer = io.StringIO()
         # info_name is the bare command: the parent context already supplies
         # "maajun", and passing it again renders "Usage: maajun maajun ...".
-        with _context(sub, info_name=name, parent=ctx) as sub_ctx:
+        with context(sub, info_name=name, parent=ctx) as sub_ctx:
             with contextlib.redirect_stdout(buffer):
                 returned = sub.get_help(sub_ctx)
     return (returned or "").strip() or buffer.getvalue().strip()
 
 
 @contextlib.contextmanager
-def _empty_stdin():
+def empty_stdin():
     """Swap stdin for an empty stream (contextlib has no redirect_stdin)."""
     original = sys.stdin
     sys.stdin = io.StringIO()
@@ -165,6 +195,26 @@ def _empty_stdin():
         yield
     finally:
         sys.stdin = original
+
+
+@contextlib.contextmanager
+def capture_width():
+    original = os.environ.get("COLUMNS")
+    os.environ["COLUMNS"] = CAPTURE_WIDTH
+    try:
+        yield
+    finally:
+        if original is None:
+            del os.environ["COLUMNS"]
+        else:
+            os.environ["COLUMNS"] = original
+
+
+# run_cli swaps sys.stdout, sys.stderr, sys.stdin and $COLUMNS — process-wide
+# state, from whichever thread asyncio.to_thread happens to pick. Held for the
+# duration so two captures can never interleave and hand each other's output
+# back to the model.
+CAPTURE_LOCK = threading.Lock()
 
 
 def run_cli(argv: list[str]) -> tuple[int, str]:
@@ -178,14 +228,20 @@ def run_cli(argv: list[str]) -> tuple[int, str]:
     fails immediately instead of hanging a session that has no one at the
     keyboard — prompt_line falls back to console.input() once isatty() is
     False, and that raises EOFError on an empty stream.
+
+    The capture is process-wide, so nothing else may be writing to the
+    terminal while it runs; callers hand in a `quiet` scope that takes the
+    session's spinner down first. See run_maajun_command.
     """
-    command = _cli_command()
+    command = cli_command()
     buffer = io.StringIO()
     try:
         with (
+            CAPTURE_LOCK,
             contextlib.redirect_stdout(buffer),
             contextlib.redirect_stderr(buffer),
-            _empty_stdin(),
+            empty_stdin(),
+            capture_width(),
         ):
             # With standalone_mode=False click *returns* the exit code of a
             # typer.Exit rather than raising it, so a command that failed
@@ -217,8 +273,25 @@ def parse_args(args: str) -> list[str]:
     return shlex.split(args) if args.strip() else []
 
 
-def command_tools() -> list[Tool]:
-    """The three tools that let chat see and drive the CLI."""
+@contextlib.contextmanager
+def unquieted() -> Iterator[None]:
+    """The default `quiet` scope: nothing else is drawing, so nothing to stop."""
+    yield
+
+
+QuietScope = Callable[[], contextlib.AbstractContextManager[None]]
+
+
+def command_tools(quiet: QuietScope = unquieted) -> list[Tool]:
+    """The three tools that let chat see and drive the CLI.
+
+    `quiet` wraps the one tool that captures the process's stdout. Rich
+    resolves sys.stdout on every write, so a live spinner on the main thread
+    paints straight into the capture buffer while run_cli holds the redirect
+    in a worker thread: the animation vanishes from the terminal and its
+    escape codes are handed to the model as part of the command's output.
+    Taking the spinner down for the duration is what keeps the two apart.
+    """
 
     async def list_commands() -> str:
         lines = [
@@ -258,8 +331,13 @@ def command_tools() -> list[Tool]:
                 "in their terminal."
             )
 
-        exit_code, output = run_cli([command, *argv])
-        rendered = output.strip() or "(no output)"
+        # In a worker thread, not inline: several commands run an event loop
+        # of their own, and asyncio.run() refuses to nest inside the one the
+        # tool call is already running on. It also keeps a long `report` from
+        # blocking every other await in the session.
+        with quiet():
+            exit_code, output = await asyncio.to_thread(run_cli, [command, *argv])
+        rendered = plain(output) or "(no output)"
         status = "succeeded" if exit_code == 0 else f"failed (exit {exit_code})"
         return f"$ maajun {command} {args}".rstrip() + f"\n{status}\n\n{rendered}"
 

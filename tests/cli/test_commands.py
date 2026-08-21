@@ -39,7 +39,7 @@ def fake_keyring(monkeypatch):
     return store
 
 
-class _FakeGitHubClient:
+class FakeGitHubClient:
     def __init__(self, token, **kwargs):
         self.token = token
 
@@ -223,7 +223,7 @@ def test_status_reports_missing_credentials(fake_keyring, tmp_path):
 
 
 def test_status_all_green(fake_keyring, tmp_path, monkeypatch):
-    monkeypatch.setattr("maajun.cli.monitor.GitHubClient", _FakeGitHubClient)
+    monkeypatch.setattr("maajun.cli.monitor.GitHubClient", FakeGitHubClient)
     auth = AuthManager()
     auth.set_api_key("deepseek", "sk-test")
     auth.set_github_token("ghp_test")

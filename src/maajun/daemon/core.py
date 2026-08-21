@@ -29,7 +29,6 @@ from maajun.vcs import CommandResult, GitHubClient, GitWorkspace
 
 log = logging.getLogger(__name__)
 
-SHUTDOWN_EVENT = asyncio.Event()
 # How many commits of history to offer the model for deploy blame.
 RECENT_COMMIT_LIMIT = 15
 LOCAL_REPO_LABEL = "(local)"
@@ -60,6 +59,8 @@ def make_permission_policy(mode: str, workspace: Path) -> PermissionCallback | N
         return Path(path).expanduser().resolve().is_relative_to(root)
 
     return approve
+
+
 class LocalWorkspace:
     """Stands in for GitWorkspace when no GitHub repo is configured.
 
@@ -80,9 +81,9 @@ class LocalWorkspace:
         always report "Unclear", purely because this method did not exist —
         the daemon probes for it with getattr and skipped the section.
         """
-        return await asyncio.to_thread(self._read_commits, limit)
+        return await asyncio.to_thread(self.read_commits, limit)
 
-    def _read_commits(self, limit: int) -> list[str]:
+    def read_commits(self, limit: int) -> list[str]:
         try:
             proc = subprocess.run(
                 ["git", "log", f"-{limit}", "--no-merges", "--format=%h %s"],
@@ -124,7 +125,7 @@ class Daemon:
                 overwriting the other;.
             github: GitHub API client, or None in local mode
             agent_factory_for_repo: (repo_config, workspace) -> () -> Agent
-            repo_configs: Repos to act on, already normalized by _DaemonDeps
+            repo_configs: Repos to act on, already normalized by DaemonDeps
             report_dir: Where local-mode reports are written
             local_mode: No GitHub configured — analyze and write reports to
                 disk instead of opening pull requests
@@ -144,19 +145,24 @@ class Daemon:
         self.progress = progress or no_operation
         self.on_notice = on_notice
         # UTC day we have already warned about hitting the spend cap on.
-        self._budget_warned_for = ""
+        self.budget_warned_for = ""
         # Incidents analyzed so far in the current poll cycle.
-        self._handled_this_cycle = 0
+        self.handled_this_cycle = 0
         # What the most recent handled incident published. Incidents are
         # processed one at a time, so a single slot is unambiguous, and it
         # spares every caller from re-deriving the artifact from the mode.
         self.last_artifact_kind: str | None = None
+        # Per-daemon, not module-global: a global one stays set after the
+        # first shutdown, so a second Daemon in the same process — a test, a
+        # supervisor restarting in-process — returned from run() immediately
+        # without polling anything.
+        self.shutdown = asyncio.Event()
 
-    def _notice(self, message: str, level: str = "info") -> None:
+    def notice(self, message: str, level: str = "info") -> None:
         if self.on_notice:
             self.on_notice(message, level)
 
-    def _over_budget(self) -> bool:
+    def over_budget(self) -> bool:
         """Whether today's spend has reached daemon.max_usd_per_day."""
         cap = self.config.daemon.max_usd_per_day
         if cap <= 0:
@@ -165,8 +171,8 @@ class Daemon:
         spent = self.store.cost_since(day_start)
         if spent < cap:
             return False
-        if self._budget_warned_for != day_start:
-            self._budget_warned_for = day_start
+        if self.budget_warned_for != day_start:
+            self.budget_warned_for = day_start
             message = (
                 # :g not :.2f — a cap of 0.005 must not be reported as $0.01.
                 f"Daily spend cap reached: ${spent:.4f} of ${cap:g}. "
@@ -174,10 +180,10 @@ class Daemon:
                 "Raise it with 'maajun config daemon.max_usd_per_day <amount>'."
             )
             log.warning(message)
-            self._notice(message, "warn")
+            self.notice(message, "warn")
         return True
 
-    async def _recent_commits_section(
+    async def recent_commits_section(
         self, repo_config: RepoConfig, workspace
     ) -> str:
         """Commit history for the prompt, so the report can blame a deploy.
@@ -207,7 +213,7 @@ class Daemon:
             branch=branch, commits="\n".join(commits)
         )
 
-    def _cycle_full(self) -> bool:
+    def cycle_full(self) -> bool:
         """Whether this poll cycle has already analyzed its allowance.
 
         The daily cap bounds the day; this bounds the burst. Fifty novel
@@ -215,7 +221,7 @@ class Daemon:
         back. The remainder is picked up on the next poll.
         """
         limit = self.config.daemon.max_incidents_per_cycle
-        if limit <= 0 or self._handled_this_cycle < limit:
+        if limit <= 0 or self.handled_this_cycle < limit:
             return False
         log.info(
             "reached max_incidents_per_cycle (%d); remaining errors will be "
@@ -246,13 +252,13 @@ class Daemon:
             raise ValueError(f"No repo configured for monitor: {monitor.name}")
         return repo_config
 
-    def _workspace_for(self, repo_config: RepoConfig) -> GitWorkspace:
+    def workspace_for(self, repo_config: RepoConfig) -> GitWorkspace:
         workspace = self.workspaces.get(repo_config.repo)
         if not workspace:
             raise ValueError(f"No workspace for repo: {repo_config.repo}")
         return workspace
 
-    def _repo_label(self, repo_config: RepoConfig) -> str:
+    def repo_label(self, repo_config: RepoConfig) -> str:
         return repo_config.repo or LOCAL_REPO_LABEL
 
     async def run(self, *, once: bool = False, dry_run: bool = False) -> None:
@@ -264,11 +270,10 @@ class Daemon:
             self.local_mode,
         )
         loop = asyncio.get_running_loop()
-        for sig in (signal.SIGTERM, signal.SIGINT):
-            loop.add_signal_handler(sig, SHUTDOWN_EVENT.set)
+        installed = self.install_signal_handlers(loop)
 
         try:
-            while not SHUTDOWN_EVENT.is_set():
+            while not self.shutdown.is_set():
                 await self.poll_once(dry_run=dry_run)
                 if once:
                     # Drain any carried-over partial state from monitors (e.g. a
@@ -279,19 +284,42 @@ class Daemon:
                         except Exception:
                             log.exception("monitor %s failed to flush", monitor.name)
                             continue
-                        await self._process_events(monitor, events, dry_run=dry_run)
+                        await self.process_events(monitor, events, dry_run=dry_run)
                     return
                 self.progress("Watching for errors")
                 try:
                     await asyncio.wait_for(
-                        SHUTDOWN_EVENT.wait(),
+                        self.shutdown.wait(),
                         timeout=self.config.monitor.poll_interval,
                     )
                 except TimeoutError:
                     pass
             log.info("daemon shutting down gracefully")
         finally:
+            for sig in installed:
+                loop.remove_signal_handler(sig)
             await self.aclose()
+
+    def install_signal_handlers(self, loop) -> list[int]:
+        """Ask the loop to set self.shutdown on SIGTERM/SIGINT.
+
+        Returns what was installed, so run() can take them off again — the
+        loop outlives one daemon, and a handler left pointing at a finished
+        daemon's event would silently do nothing for the next one.
+
+        add_signal_handler is Unix-only; on Windows the proactor loop raises
+        NotImplementedError and Ctrl-C arrives as KeyboardInterrupt instead,
+        which the CLI already catches.
+        """
+        installed: list[int] = []
+        for sig in (signal.SIGTERM, signal.SIGINT):
+            try:
+                loop.add_signal_handler(sig, self.shutdown.set)
+            except NotImplementedError:
+                log.debug("this event loop has no signal handlers (%s)", sig)
+                continue
+            installed.append(sig)
+        return installed
 
     async def aclose(self) -> None:
         """Close the GitHub client and any monitor HTTP clients."""
@@ -317,17 +345,17 @@ class Daemon:
                 log.exception("monitor %s failed to poll", monitor.name)
                 return None
 
-        self._handled_this_cycle = 0
+        self.handled_this_cycle = 0
         results = await asyncio.gather(*(poll(m) for m in self.monitors))
 
         handled: list[str] = []
         for monitor, events in zip(self.monitors, results, strict=True):
             if events is None:
                 continue
-            handled.extend(await self._process_events(monitor, events, dry_run=dry_run))
+            handled.extend(await self.process_events(monitor, events, dry_run=dry_run))
         return handled
 
-    async def _process_events(
+    async def process_events(
         self, monitor: Monitor, events: list[ErrorEvent], *, dry_run: bool
     ) -> list[str]:
         """Dedup, handle, and record a batch of events from one monitor.
@@ -341,12 +369,12 @@ class Daemon:
         """
         try:
             repo_config = self.repo_for(monitor)
-            workspace = self._workspace_for(repo_config)
+            workspace = self.workspace_for(repo_config)
         except ValueError as exc:
             log.error("skipping monitor %s: %s", monitor.name, exc)
-            self._notice(f"Monitor {monitor.name} is not usable: {exc}", "error")
+            self.notice(f"Monitor {monitor.name} is not usable: {exc}", "error")
             return []
-        label = self._repo_label(repo_config)
+        label = self.repo_label(repo_config)
         handled: list[str] = []
         for event in events:
             # Attribute the error before it is recorded: the monitor knows
@@ -355,7 +383,7 @@ class Daemon:
             if not self.store.record(event):
                 log.debug("known error fp=%s repo=%s", event.fingerprint, label)
                 continue
-            if not dry_run and (self._over_budget() or self._cycle_full()):
+            if not dry_run and (self.over_budget() or self.cycle_full()):
                 # Left recorded at status 'new', which a later poll picks up.
                 # This used to call forget(), deleting the row outright: while
                 # the cap held, every poll re-inserted and re-deleted it, so
@@ -371,11 +399,11 @@ class Daemon:
                 "new error fp=%s repo=%s: %s",
                 event.fingerprint, label, event.message,
             )
-            self._notice(f"New error in {label}: {event.message[:80]}", "info")
+            self.notice(f"New error in {label}: {event.message[:80]}", "info")
             # Counted before the attempt, not after it succeeds: the limit
             # exists to bound AI calls, and a failed incident has already
             # made (and paid for) one.
-            self._handled_this_cycle += 1
+            self.handled_this_cycle += 1
             try:
                 destination = await self.handle_incident(
                     event, repo_config, workspace,
@@ -383,7 +411,7 @@ class Daemon:
                 )
                 handled.append(event.fingerprint)
                 if destination:
-                    self._notice(
+                    self.notice(
                         f"{self.artifact_label(self.last_artifact_kind)} "
                         f"for {label}: "
                         f"{destination}",
@@ -391,7 +419,7 @@ class Daemon:
                     )
             except Exception as exc:
                 log.exception("incident fp=%s repo=%s failed", event.fingerprint, label)
-                self._notice(f"Incident in {label} failed: {exc}", "error")
+                self.notice(f"Incident in {label} failed: {exc}", "error")
                 self.store.mark_failed(event.fingerprint, event.repo)
         return handled
 
@@ -418,7 +446,7 @@ class Daemon:
             timestamp=event.timestamp,
             details=event.details[:8000],
         )
-        return await self._analyze_and_open_pr(
+        return await self.analyze_and_open_pr(
             event,
             repo_config,
             workspace,
@@ -445,7 +473,7 @@ class Daemon:
         progress: ProgressCallback = no_operation,
     ) -> str:
         """Analyze a manually described issue. Returns the issue or PR URL."""
-        workspace = self._workspace_for(repo_config)
+        workspace = self.workspace_for(repo_config)
         event = ErrorEvent(
             source="manual",
             message=description[:200],
@@ -456,7 +484,7 @@ class Daemon:
             workspace=workspace.path,
             description=description[:8000],
         )
-        return await self._analyze_and_open_pr(
+        return await self.analyze_and_open_pr(
             event,
             repo_config,
             workspace,
@@ -469,7 +497,29 @@ class Daemon:
             progress=progress,
         )
 
-    async def _analyze_and_open_pr(
+    def record_failed_spend(self, event: ErrorEvent, agent) -> None:
+        """Bank what an analysis spent before it failed, against its incident.
+
+        Best-effort: the incident is already failing, and losing the cost
+        figure is not a reason to lose the original exception with it. A
+        manual report has no recorded row, so the update simply matches
+        nothing — the same as mark_processed on that path.
+        """
+        try:
+            prompt_tokens, completion_tokens, cost = extract_usage(
+                agent.take_usage(), agent.model
+            )
+            self.store.add_spend(
+                event.fingerprint,
+                event.repo,
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+                cost_usd=cost,
+            )
+        except Exception:
+            log.debug("could not record the spend of a failed analysis", exc_info=True)
+
+    async def analyze_and_open_pr(
         self,
         event: ErrorEvent,
         repo_config: RepoConfig,
@@ -501,7 +551,7 @@ class Daemon:
         # Appended after sync, not when the prompt was built: the clone has to
         # exist before there is any history to read.
         if blame_deploy:
-            prompt += await self._recent_commits_section(repo_config, workspace)
+            prompt += await self.recent_commits_section(repo_config, workspace)
 
         if repo_config.mode == "fix":
             prompt += FIX_PROMPT_SUFFIX.format(workspace=workspace.path)
@@ -510,6 +560,14 @@ class Daemon:
         agent = self.agent_factory_for_repo(repo_config, workspace)()
         try:
             response = await agent.chat(prompt)
+        except BaseException:
+            # Every tool round is a billed request, and the analysis may have
+            # made thirty before it died. Reading the usage off the response
+            # would drop all of it, so a failed attempt banks its spend on the
+            # incident on the way out — otherwise the daily cap under-counts
+            # exactly the incidents that are retried hardest.
+            self.record_failed_spend(event, agent)
+            raise
         finally:
             # Free the agent's HTTP client; a long watch run creates one
             # agent per incident and would otherwise leak connection pools.
@@ -521,7 +579,7 @@ class Daemon:
 
         if dry_run:
             reports.print_dry_run(
-                dry_run_header, self._repo_label(repo_config), report,
+                dry_run_header, self.repo_label(repo_config), report,
                 (prompt_tokens, completion_tokens, cost), dry_run_extra,
             )
             if forget_on_dry_run:
@@ -529,7 +587,7 @@ class Daemon:
             return ""
 
         if self.local_mode:
-            return self._save_local_report(
+            return self.save_local_report(
                 event, report, (prompt_tokens, completion_tokens, cost), progress
             )
 
@@ -547,13 +605,13 @@ class Daemon:
             )
             opens_pull_request = False
             unfixed = (
-                "> ℹ️ This repo is in `fix` mode, but the analysis did not "
+                "> This repo is in `fix` mode, but the analysis did not "
                 "change any code — so this is an issue rather than a pull "
                 "request."
             )
 
         if opens_pull_request:
-            verification = await self._verify(repo_config, workspace, progress)
+            verification = await self.verify(repo_config, workspace, progress)
             progress("Opening PR")
             reports.write_report_file(
                 workspace.path / "docs" / "incidents", event, report
@@ -601,7 +659,7 @@ class Daemon:
         )
         return url
 
-    def _save_local_report(
+    def save_local_report(
         self,
         event: ErrorEvent,
         report: str,
@@ -634,7 +692,7 @@ class Daemon:
         )
         return str(report_path)
 
-    async def _verify(
+    async def verify(
         self, repo_config: RepoConfig, workspace: GitWorkspace, progress: ProgressCallback
     ) -> CommandResult | None:
         """Run the repo's test_command against the agent's edits.

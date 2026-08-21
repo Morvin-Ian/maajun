@@ -5,7 +5,7 @@ import asyncio
 from rich.table import Table
 
 from maajun.auth import AuthManager
-from maajun.cli._shared import (
+from maajun.cli.shared import (
     app,
     build_agent_config,
     console,
@@ -15,7 +15,7 @@ from maajun.providers.base import ProviderType
 from maajun.providers.factory import ProviderFactory
 
 
-def _validate_key(auth: AuthManager, provider: str) -> None:
+def validate_key(auth: AuthManager, provider: str) -> None:
     if provider not in implemented_providers():
         console.print(f"[dim]{provider} support is coming soon; key stored for later.[/dim]")
         return

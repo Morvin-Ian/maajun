@@ -16,6 +16,17 @@ so counting only the last one would under-report a tool-heavy analysis
 several times over — and the [spend cap](monitoring.md#capping-spend)
 decides from these numbers.
 
+Usage is also readable after the fact, with `take_usage()`: a turn that
+dies on round thirty still spent what the first twenty-nine cost, and the
+caller reads the total from a `finally` rather than from a response it
+never got.
+
+A finished turn keeps its tool calls and their results in history, so a
+follow-up question does not re-read a file the previous answer just read.
+Only the newest turn keeps them — older rounds collapse back to the
+conversation, which is what the user is still talking about, and context
+stays bounded.
+
 Two ceilings keep a long tool loop inside the context window. Each tool
 result is capped (and says how much was cut, so the model does not read a
 truncated file as a complete one), and the request itself is trimmed
@@ -40,11 +51,22 @@ load-bearing: the [spend cap](monitoring.md#capping-spend) decides whether to
 analyze the next incident from these numbers, and an unpriced model logs a
 warning rather than silently costing at the fallback rate.
 
+Anything the table does not recognise — including a gateway that never names
+the model it ran — is costed at the dearest entry in it, derived from the
+table rather than written down so adding a pricier model moves it too. Every
+error here rounds the same way on purpose: over-reporting pauses a daemon
+early, under-reporting lets it run past a cap the user set.
+
 ### Provider resilience
 
 API calls to the provider retry automatically on transient failures —
 HTTP 429, 500, 502, 503, and connection errors — up to 3 attempts with
-exponential backoff and jitter (capped at 30s between attempts).
+exponential backoff and jitter (capped at 30s between attempts). The backoff
+sits *between* attempts only: sleeping after the last one just made the
+caller wait up to 30s for an error it was always going to get. A streamed
+response is closed on the way out even when the round raises or the caller
+stops reading, so its connection goes back to the pool rather than waiting
+on the collector.
 Authentication errors and other client errors fail immediately; a bad key
 is reported on the first call, not after a retry dance.
 
@@ -221,8 +243,13 @@ run immediately, with nothing to update — `settings.py` previously carried
 a hand-written list of commands for its welcome panel and it had already
 drifted.
 
-**Commands run in-process**, through the same Click tree, with stdout and
-stderr captured and stdin swapped for an empty stream. A subprocess would
+**Commands run in-process on a worker thread**, through the same Click
+tree, with stdout and stderr captured and stdin swapped for an empty
+stream. The thread is not optional: `status`, `report` and `setup` each
+call `asyncio.run()` internally, which refuses to nest inside the loop the
+tool call is already running on — inline, the two most useful commands in
+the index answered with a `RuntimeError`. It also keeps a long `report`
+from blocking the rest of the session. A subprocess would
 need `maajun` on `PATH`, which it is not under `uv run` or an unactivated
 venv, and would not see the state the session already loaded. The empty
 stdin matters: `prompt_line` falls back to `console.input()` once
@@ -248,9 +275,44 @@ Recall tools are bound to the running session id and exclude it: the live
 conversation is already in the agent's context, and returning it as a
 search hit would just pay for it twice.
 
-Chat spend is accumulated per session and reported by `/cost`, but the
-daily cap is not applied — it exists to bound an unattended daemon, and
-ending an interactive answer mid-sentence is the worse failure.
+Messages are indexed for full-text search (FTS5, kept current by
+triggers). Substring `LIKE` only ever matched a query that appeared
+verbatim and contiguously, so "checkout KeyError" found nothing — which is
+exactly how anyone refers back to a past error. Terms are quoted, ANDed and
+prefix-matched, so punctuation in a traceback cannot be read as FTS
+syntax. A SQLite built without FTS5 skips the migration and falls back to
+`LIKE` rather than failing to open — but the skip is not permanent: bumping
+`user_version` past it would have marked the file current with no index and
+no way back, so `connect()` probes for the index on every open and builds it
+the first time maajun runs somewhere FTS5 exists. The rebuild reads from
+`chat_messages`, so conversations recorded while unindexed become searchable
+too.
+
+Chat spend is accumulated per session — including what a failed turn
+spent — and bounded by `chat.max_usd_per_day`, checked before a question is
+sent. The daemon's cap is separate: one bounds an unattended process, the
+other an interactive one, and neither truncates work already in flight.
+
+### The session loop
+
+The REPL holds a single `asyncio.Runner` for its lifetime and every turn
+runs on it. `asyncio.run()` per turn closed the loop underneath the
+provider's HTTP client, and the pooled keep-alive connection it left behind
+raised `Event loop is closed` on the first request of every later turn —
+retried transparently, so the cost was a wasted request and a backoff sleep
+on every question rather than a visible failure.
+
+Answers stream: the spinner is a Live region that stops the moment anything
+is printed, so an approval prompt is never drawn over by an animation, and
+tool calls are announced before they run rather than only after.
+
+The spinner also comes down for `run_maajun_command`. That tool runs the CLI
+in-process on a worker thread and captures it by swapping `sys.stdout`, which
+is process-wide; Rich resolves `sys.stdout` on every write, so a spinner left
+running would paint its animation into the capture buffer and hand the escape
+codes to the model as part of the command's output. The session passes a
+`quiet` scope down to the tool for exactly that window, and a lock keeps two
+captures from overlapping.
 
 ### Schema migrations
 
@@ -259,11 +321,53 @@ The database records its version in `PRAGMA user_version`, and
 transaction so an interrupted upgrade resumes rather than half-applies. A
 file written by a *newer* maajun is refused instead of being rewritten.
 
+The `BEGIN` is issued explicitly rather than leaning on `with conn`. Under
+sqlite3's legacy transaction control — still the default — a transaction is
+opened implicitly before DML and *not* before DDL, so every `CREATE`, `ALTER`
+and `DROP` autocommitted on its own and `with conn` committed nothing that
+mattered. The atomicity above was a claim, not a fact: killed between
+migration 1's `RENAME` and its `INSERT ... SELECT`, the upgrade left an empty
+incidents table beside an orphaned `incidents_outdated`.
+
 This replaced a hard failure that told the user to delete the database —
 acceptable while the schema was settled, not once chat needed to add to
 it. Migration 1 rebuilds an outdated incidents table by copying rows across
 whatever columns it has, which covers both a missing column and the
 pre-multi-repo primary key.
+
+### The sandbox
+
+`ToolRegistry` refuses a call whose `path` falls outside its `Sandbox`
+before the executor runs, so the boundary cannot be forgotten by the next
+file tool somebody adds. The tool's *schema* decides whether it takes a
+path, not the arguments — `grep` and `list_dir` default to the working
+directory, which would otherwise be a way out whenever the sandbox is not
+the cwd. Paths are resolved first, so a symlink is checked at its
+destination, and `..` in a glob pattern is rejected because the pattern is
+expanded after the root has been approved.
+
+Two things are refused wherever they sit, allowed root or not: files whose
+whole purpose is to hold a credential (`.env`, `id_rsa`, `*.pem`, `.netrc`,
+`.git-credentials`, …), and maajun's own `incidents.db`, which holds every
+incident and every conversation anyone has had with it. Reading either one
+would put it in front of the AI provider, and from the daemon into a public
+issue.
+
+That is two gates, not one, because a tool can open a file it was never
+handed. `ToolRegistry.off_limits` checks the path in the *arguments*; a tool
+marked `walks_files` is also passed the `Sandbox` and must put every path it
+discovers through `Sandbox.readable`. `grep` is the case that matters: it is
+pointed at a directory it is allowed into and then reads the whole tree under
+it, so with only the argument gate a refused `read_file .env` came straight
+back as matched lines from `grep`. `readable` judges the resolved path, so a
+symlink planted in the workspace cannot be used to read its target outside,
+and grep says how many files it skipped — a silent omission would invite the
+model to go looking for another way in.
+
+The roots are the narrowest thing that still works: the daemon gets the one
+workspace it is analyzing; chat gets the working directory, `daemon.workdir`,
+and the configured log files named one by one — `/var/log` is not the
+project.
 
 ## Security posture
 

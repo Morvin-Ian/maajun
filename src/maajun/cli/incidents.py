@@ -6,7 +6,7 @@ import typer
 from rich.panel import Panel
 from rich.table import Table
 
-from maajun.cli._shared import app, console, load_config
+from maajun.cli.shared import app, console, load_config
 from maajun.config import Config
 from maajun.daemon.core import LOCAL_REPO_LABEL
 from maajun.daemon.store import MAX_ATTEMPTS, IncidentStore, StoreError

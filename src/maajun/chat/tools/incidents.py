@@ -16,7 +16,7 @@ REPORT_PREVIEW = 400
 LOCAL = "(local)"
 
 
-def _summary(row: dict, *, preview: bool = True) -> dict:
+def summarize(row: dict, *, preview: bool = True) -> dict:
     """One incident as the model sees it, with the noisy columns dropped."""
     summary = {
         "fingerprint": row["fingerprint"],
@@ -39,12 +39,19 @@ def _summary(row: dict, *, preview: bool = True) -> dict:
     return summary
 
 
-def _matches(row: dict, needle: str) -> bool:
+def matches(row: dict, query: str) -> bool:
+    """Every word of the query appears somewhere in the incident.
+
+    Words, not the whole string: an incident is referred to from memory
+    ("that checkout KeyError"), never in the order the report happens to
+    use.
+    """
     haystack = " ".join([
         row["fingerprint"], row["repo"], row["message"], row["source"],
         row["status"], row["artifact_kind"] or "", row["report_text"] or "",
-    ])
-    return needle in haystack.lower()
+        row["pr_url"] or "",
+    ]).lower()
+    return all(word in haystack for word in query.lower().split())
 
 
 def incident_tools(store: IncidentStore) -> list[Tool]:
@@ -55,15 +62,21 @@ def incident_tools(store: IncidentStore) -> list[Tool]:
         repo: str = "",
         status: str = "",
         artifact: str = "",
+        since: str = "",
+        until: str = "",
         limit: int = 10,
     ) -> str:
         rows = store.all(repo or None)
         if query:
-            rows = [row for row in rows if _matches(row, query.lower())]
+            rows = [row for row in rows if matches(row, query)]
         if status:
             rows = [row for row in rows if row["status"] == status]
         if artifact:
             rows = [row for row in rows if (row["artifact_kind"] or "") == artifact]
+        if since:
+            rows = [row for row in rows if row["last_seen"] >= since]
+        if until:
+            rows = [row for row in rows if row["last_seen"] <= until]
         if not rows:
             known = [name for name in store.repos() if name]
             hint = f" Repos with incidents: {', '.join(known)}." if known else ""
@@ -73,7 +86,7 @@ def incident_tools(store: IncidentStore) -> list[Tool]:
         payload = {
             "matched": total,
             "showing": len(rows),
-            "incidents": [_summary(row) for row in rows],
+            "incidents": [summarize(row) for row in rows],
         }
         return json.dumps(payload, indent=2)
 
@@ -93,7 +106,7 @@ def incident_tools(store: IncidentStore) -> list[Tool]:
                     f"exists for: {repos}. Pass the matching repo."
                 )
             return f"No incident with fingerprint {fingerprint}."
-        return json.dumps(_summary(row, preview=False), indent=2)
+        return json.dumps(summarize(row, preview=False), indent=2)
 
     async def incident_stats() -> str:
         rows = store.all()
@@ -128,8 +141,9 @@ def incident_tools(store: IncidentStore) -> list[Tool]:
                     "query": {
                         "type": "string",
                         "description": (
-                            "Text to match against the error, report, "
-                            "fingerprint, or source. Omit to list recent ones."
+                            "Words to match against the error, report, "
+                            "fingerprint, URL, or source; all must appear, in "
+                            "any order. Omit to list recent ones."
                         ),
                     },
                     "repo": {
@@ -148,6 +162,17 @@ def incident_tools(store: IncidentStore) -> list[Tool]:
                             "Limit to incidents that produced a pull request, "
                             "a GitHub issue, or a local report file"
                         ),
+                    },
+                    "since": {
+                        "type": "string",
+                        "description": (
+                            "Only incidents last seen on or after this UTC "
+                            "date, e.g. '2026-08-01'"
+                        ),
+                    },
+                    "until": {
+                        "type": "string",
+                        "description": "Only incidents last seen on or before this date",
                     },
                     "limit": {
                         "type": "integer",

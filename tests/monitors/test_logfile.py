@@ -408,3 +408,132 @@ async def test_traceback_within_lookahead_still_merges(logfile):
     assert len(events) == 1
     assert events[0].message == "IndexError: list index out of range"
     assert "user_id=42" in events[0].details
+
+
+# ---------------------------------------------------------------------------
+# Where a traceback ends
+# ---------------------------------------------------------------------------
+
+
+JAVA_THEN_IDLE = """\
+Exception in thread "main" java.lang.NullPointerException
+\tat com.example.Foo.bar(Foo.java:10)
+\tat com.example.Foo.main(Foo.java:5)
+
+2026-08-21 10:00:00 INFO server ready on :8080
+"""
+
+
+async def test_a_blank_line_ends_a_trace_before_the_next_log_line(logfile):
+    """Blank lines used to be swallowed and the following unindented line
+    taken as the exception, so an unrelated INFO line ended up quoted in the
+    incident — and, for a header that is not self-describing, became its
+    title."""
+    monitor = LogFileMonitor(logfile)
+    await monitor.poll()
+    with open(logfile, "a") as f:
+        f.write(JAVA_THEN_IDLE)
+
+    events = await monitor.poll()
+
+    assert len(events) == 1
+    assert "server ready" not in events[0].details
+    assert "Foo.java:10" in events[0].details
+
+
+async def test_the_line_after_a_trace_does_not_change_its_fingerprint(logfile):
+    """Absorbing it meant the same failure fingerprinted differently
+    depending on what the application happened to log next — two incidents,
+    two issues, for one error."""
+    monitor = LogFileMonitor(logfile)
+    await monitor.poll()
+    with open(logfile, "a") as f:
+        f.write(JAVA_THEN_IDLE)
+    first = (await monitor.poll())[0]
+
+    other = logfile.parent / "other.log"
+    other.write_text("")
+    monitor2 = LogFileMonitor(other)
+    await monitor2.poll()
+    with open(other, "a") as f:
+        f.write(JAVA_THEN_IDLE.replace("server ready on :8080", "cache warmed"))
+    second = (await monitor2.poll())[0]
+
+    assert first.fingerprint == second.fingerprint
+
+
+async def test_a_blank_line_inside_a_chained_trace_is_kept(logfile):
+    """"During handling of the above" continues the trace; the blank line
+    before it is part of it, not the end of it."""
+    monitor = LogFileMonitor(logfile)
+    await monitor.poll()
+    with open(logfile, "a") as f:
+        f.write(
+            "Exception in thread \"main\" java.lang.IllegalStateException\n"
+            "\tat com.example.A.run(A.java:3)\n"
+            "\n"
+            "Caused by: java.io.IOException: disk full\n"
+            "\tat com.example.B.write(B.java:9)\n"
+            "\n"
+            "2026-08-21 10:00:01 INFO idle\n"
+        )
+
+    events = await monitor.poll()
+
+    assert len(events) == 1
+    assert "disk full" in events[0].details
+    assert "idle" not in events[0].details
+
+
+# ---------------------------------------------------------------------------
+# Reading bytes, not the host's locale
+# ---------------------------------------------------------------------------
+
+
+READS_UTF8 = """\
+import asyncio, pathlib, sys
+from maajun.monitors import LogFileMonitor
+
+path = pathlib.Path(sys.argv[1])
+events = asyncio.run(LogFileMonitor(path).poll())
+sys.stdout.buffer.write(events[0].message.encode("utf-8"))
+"""
+
+
+def test_a_log_is_decoded_as_utf8_whatever_the_host_locale_is(tmp_path):
+    """Text mode picks the *locale* encoding. A container defaulting to the C
+    locale therefore turned every non-ASCII byte in the log into U+FFFD, and
+    the mangled text is what went to the model and into the issue.
+
+    Run in a subprocess because open()'s encoding is resolved in C, below
+    anything a monkeypatch can reach.
+    """
+    import subprocess
+    import sys
+
+    log = tmp_path / "app.log"
+    log.write_bytes("ERROR café lookup failed for Ünal\nINFO idle\n".encode())
+    script = tmp_path / "read.py"
+    script.write_text(READS_UTF8)
+
+    proc = subprocess.run(
+        [sys.executable, str(script), str(log)],
+        capture_output=True,
+        env={"LC_ALL": "C", "LANG": "C", "PYTHONUTF8": "0", "PATH": "/usr/bin:/bin"},
+        check=True,
+    )
+
+    assert proc.stdout.decode("utf-8") == "ERROR café lookup failed for Ünal"
+
+
+def test_the_offset_stays_comparable_with_the_file_size(tmp_path):
+    """read_new decides a file was truncated by comparing its offset against
+    st_size, so the offset has to be a byte count. TextIOWrapper.tell()
+    returns an opaque cookie that only usually happens to be one."""
+    log = tmp_path / "app.log"
+    log.write_bytes("ERROR café ☕ Ünal\n".encode())
+    monitor = LogFileMonitor(log)
+
+    monitor.read_new()
+
+    assert monitor.offset == log.stat().st_size

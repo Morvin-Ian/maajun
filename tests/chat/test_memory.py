@@ -147,7 +147,9 @@ def test_a_long_message_is_snipped_around_the_match(memory):
     from maajun.chat.memory import SNIPPET_LENGTH
 
     session = memory.start_session()
-    memory.add_message(session, "assistant", "a" * 2000 + "NEEDLE" + "b" * 2000)
+    memory.add_message(
+        session, "assistant", "before " * 400 + "NEEDLE " + "after " * 400
+    )
 
     snippet = memory.search("NEEDLE")[0]["snippet"]
     assert "NEEDLE" in snippet
@@ -252,3 +254,84 @@ def test_sessions_persist_across_reopen(tmp_path):
     second = ChatMemory(path)
     assert second.search("remember")[0]["session_id"] == session
     second.close()
+
+
+# ---------------------------------------------------------------------------
+# Full-text search
+# ---------------------------------------------------------------------------
+
+
+def test_search_matches_words_in_any_order(memory):
+    """The way anyone refers to a past error, and what LIKE could never find."""
+    session = memory.start_session()
+    memory.add_message(
+        session, "assistant", "the checkout 500 was a KeyError on 'discount'"
+    )
+
+    assert len(memory.search("checkout KeyError")) == 1
+    assert len(memory.search("KeyError checkout")) == 1
+
+
+def test_search_requires_every_word(memory):
+    session = memory.start_session()
+    memory.add_message(session, "assistant", "a KeyError in payments")
+
+    assert memory.search("KeyError checkout") == []
+
+
+def test_search_matches_a_word_prefix(memory):
+    session = memory.start_session()
+    memory.add_message(session, "user", "the discounts are wrong")
+
+    assert len(memory.search("discount")) == 1
+
+
+def test_punctuation_in_a_query_is_not_read_as_syntax(memory):
+    session = memory.start_session()
+    memory.add_message(session, "user", 'raise KeyError("discount")')
+
+    assert len(memory.search('KeyError("discount")')) == 1
+
+
+def test_search_can_be_limited_to_a_date_range(memory):
+    session = memory.start_session()
+    memory.add_message(session, "user", "checkout broke")
+
+    assert memory.search("checkout", since="2000-01-01")
+    assert memory.search("checkout", until="2000-01-01") == []
+
+
+# ---------------------------------------------------------------------------
+# Erasing
+# ---------------------------------------------------------------------------
+
+
+def test_a_session_can_be_deleted_with_its_messages(memory):
+    session = memory.start_session()
+    memory.add_message(session, "user", "something private")
+
+    assert memory.delete_session(session) is True
+    assert memory.session(session) is None
+    assert memory.messages(session) == []
+    assert memory.search("private") == []
+
+
+def test_deleting_an_unknown_session_says_so(memory):
+    assert memory.delete_session(999) is False
+
+
+def test_everything_can_be_deleted(memory):
+    for _ in range(3):
+        memory.add_message(memory.start_session(), "user", "a secret")
+
+    assert memory.delete_all() == 3
+    assert memory.recent_sessions() == []
+    assert memory.search("secret") == []
+
+
+def test_chat_spend_is_summed_from_a_date(memory):
+    session = memory.start_session()
+    memory.record_usage(session, prompt_tokens=1, completion_tokens=1, cost_usd=0.25)
+
+    assert memory.cost_since("2000-01-01") == pytest.approx(0.25)
+    assert memory.cost_since("2999-01-01") == 0

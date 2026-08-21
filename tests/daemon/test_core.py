@@ -12,7 +12,6 @@ import pytest
 
 from maajun.config import Config, DaemonConfig, GitHubConfig, MonitorConfig, RepoConfig
 from maajun.daemon.core import (
-    SHUTDOWN_EVENT,
     Daemon,
     LocalWorkspace,
     make_permission_policy,
@@ -172,7 +171,7 @@ async def test_suggest_mode_pushes_no_branch(setup):
 async def test_fix_mode_opens_a_pull_request_with_the_report_committed(setup):
     """Fix mode has a real diff, so it still gets a branch and a PR."""
     daemon, logfile, agent, github, store, remote = setup
-    _fix_mode(daemon, agent)
+    fix_mode(daemon, agent)
 
     with open(logfile, "a") as f:
         f.write(TRACEBACK)
@@ -230,6 +229,102 @@ async def test_failed_incident_is_marked_and_loop_survives(setup):
     assert handled == []
     row = store.all()[0]
     assert row["status"] == "failed"
+
+
+class SpendingAgent:
+    """Fails partway, having already paid for the rounds it did make.
+
+    Mirrors the real Agent: usage accumulates across tool rounds and is read
+    back with take_usage(), not off a response that a failed turn never
+    produced.
+    """
+
+    model = "deepseek-v4-flash"
+
+    def __init__(self, usage=None):
+        # `is None`, not `or`: an empty dict is a real case — a turn that died
+        # before the provider reported anything.
+        self.usage = (
+            {"prompt_tokens": 500_000, "completion_tokens": 100_000}
+            if usage is None
+            else usage
+        )
+        self.closed = False
+
+    async def chat(self, message):
+        raise RuntimeError("provider gave up on round 30")
+
+    def take_usage(self):
+        usage, self.usage = self.usage, {}
+        return usage
+
+    async def aclose(self):
+        self.closed = True
+
+
+async def test_a_failed_analysis_still_banks_what_it_spent(setup):
+    """Every tool round is a billed request. Reading the cost off the response
+    drops all of it when there is no response, and the daily cap under-counts
+    exactly the incidents that are retried hardest."""
+    daemon, logfile, agent, github, store, remote = setup
+    spender = SpendingAgent()
+    daemon.agent_factory_for_repo = lambda rc, ws: lambda: spender
+
+    with open(logfile, "a") as f:
+        f.write(TRACEBACK)
+    handled = await daemon.poll_once()
+
+    assert handled == []
+    row = store.all()[0]
+    assert row["status"] == "failed"
+    assert row["prompt_tokens"] == 500_000
+    assert row["completion_tokens"] == 100_000
+    assert row["cost_usd"] > 0
+    assert store.cost_since("1970-01-01T00:00:00Z") == row["cost_usd"]
+    assert spender.closed, "the HTTP client is still released on the failure path"
+
+
+async def test_banked_spend_from_failures_reaches_the_cap(setup):
+    """Three retries of a failing incident must eventually stop the daemon."""
+    daemon, logfile, agent, github, store, remote = setup
+    daemon.config.daemon.max_usd_per_day = 0.05
+    daemon.agent_factory_for_repo = lambda rc, ws: lambda: SpendingAgent()
+
+    with open(logfile, "a") as f:
+        f.write(TRACEBACK)
+    await daemon.poll_once()
+
+    assert daemon.over_budget(), "a failed analysis is not a free one"
+
+
+async def test_a_failure_before_the_first_response_banks_nothing(setup):
+    daemon, logfile, agent, github, store, remote = setup
+    daemon.agent_factory_for_repo = lambda rc, ws: lambda: SpendingAgent(usage={})
+
+    with open(logfile, "a") as f:
+        f.write(TRACEBACK)
+    await daemon.poll_once()
+
+    assert store.all()[0]["cost_usd"] == 0
+
+
+async def test_recording_the_spend_never_masks_the_original_failure(setup):
+    """The incident is already failing; a store that also breaks must not
+    swallow the exception that explains why."""
+    daemon, logfile, agent, github, store, remote = setup
+    daemon.agent_factory_for_repo = lambda rc, ws: lambda: SpendingAgent()
+
+    def broken(*args, **kwargs):
+        raise RuntimeError("database is locked")
+
+    store.add_spend = broken
+
+    with open(logfile, "a") as f:
+        f.write(TRACEBACK)
+    handled = await daemon.poll_once()
+
+    assert handled == []
+    assert store.all()[0]["status"] == "failed"
 
 
 async def test_fix_mode_commits_agent_changes(setup):
@@ -393,17 +488,14 @@ async def test_notice_emitted_on_failure(setup):
 # ---------------------------------------------------------------------------
 
 
-async def test_shutdown_event_stops_daemon():
-    """Daemon.run exits cleanly when SHUTDOWN_EVENT is set."""
-    SHUTDOWN_EVENT.clear()
-
+def bare_daemon():
     config = Config(
         github=GitHubConfig(repos=[RepoConfig(repo="owner/name", base_branch="main")]),
         monitor=MonitorConfig(log_files=["/dev/null"], poll_interval=9999),
     )
     workspace = GitWorkspace(Path("/tmp/ws"), "owner/name", remote_url="http://x")
     store = IncidentStore(Path("/tmp/does-not-exist/test.db"))
-    daemon = Daemon(
+    return Daemon(
         config,
         monitors=[],
         store=store,
@@ -413,12 +505,68 @@ async def test_shutdown_event_stops_daemon():
         agent_factory_for_repo=lambda rc, ws: lambda: None,
     )
 
+
+async def test_shutdown_event_stops_daemon():
+    """Daemon.run exits cleanly once its shutdown event is set."""
+    daemon = bare_daemon()
+
     async def set_shutdown():
         await asyncio.sleep(0.05)
-        SHUTDOWN_EVENT.set()
+        daemon.shutdown.set()
 
     await asyncio.gather(daemon.run(), set_shutdown())
-    SHUTDOWN_EVENT.clear()
+
+
+async def test_a_second_daemon_is_not_shut_down_by_the_first():
+    """The event used to be module-global, so once anything had shut down,
+    every later Daemon in the process returned from run() without polling."""
+    first = bare_daemon()
+    await asyncio.gather(first.run(), stop_soon(first))
+    assert first.shutdown.is_set()
+
+    second = bare_daemon()
+    assert not second.shutdown.is_set()
+    polled = []
+    second.poll_once = lambda **kw: polled.append(kw) or asyncio.sleep(0)
+    await asyncio.gather(second.run(), stop_soon(second))
+    assert polled, "the second daemon should still do a poll cycle"
+
+
+async def stop_soon(daemon):
+    await asyncio.sleep(0.05)
+    daemon.shutdown.set()
+
+
+async def test_signal_handlers_are_removed_when_run_returns(monkeypatch):
+    """The loop outlives one daemon; a handler left pointing at a finished
+    daemon's event would silently do nothing for the next one."""
+    daemon = bare_daemon()
+    added, removed = [], []
+    loop = asyncio.get_running_loop()
+    monkeypatch.setattr(
+        loop, "add_signal_handler", lambda sig, cb: added.append(sig)
+    )
+    monkeypatch.setattr(loop, "remove_signal_handler", lambda sig: removed.append(sig))
+
+    await daemon.run(once=True)
+    assert added and added == removed
+
+
+async def test_a_loop_without_signal_handlers_still_runs(monkeypatch):
+    """Windows' proactor loop raises NotImplementedError; Ctrl-C arrives as
+    KeyboardInterrupt there instead."""
+    daemon = bare_daemon()
+    loop = asyncio.get_running_loop()
+
+    def unsupported(sig, cb):
+        raise NotImplementedError
+
+    monkeypatch.setattr(loop, "add_signal_handler", unsupported)
+    monkeypatch.setattr(
+        loop, "remove_signal_handler", lambda sig: pytest.fail("nothing to remove")
+    )
+
+    await daemon.run(once=True)
 
 
 # ---------------------------------------------------------------------------
@@ -526,7 +674,7 @@ async def test_local_mode_aclose_survives_no_github_client(local_setup):
 # ---------------------------------------------------------------------------
 
 
-def _seed_spend(store, fingerprint: str, cost: float) -> None:
+def seed_spend(store, fingerprint: str, cost: float) -> None:
     """Record an already-paid-for incident so today's spend is non-zero."""
     from maajun.monitors import ErrorEvent
 
@@ -540,7 +688,7 @@ async def test_spend_cap_stops_further_analysis(setup):
     """An unattended daemon must not be an unbounded bill."""
     daemon, logfile, agent, github, store, remote = setup
     daemon.config.daemon.max_usd_per_day = 0.01
-    _seed_spend(store, "earlier", 0.02)
+    seed_spend(store, "earlier", 0.02)
 
     with open(logfile, "a") as f:
         f.write(TRACEBACK)
@@ -555,7 +703,7 @@ async def test_capped_error_is_retried_later(setup):
     """Skipping for budget must not blacklist the error forever."""
     daemon, logfile, agent, github, store, remote = setup
     daemon.config.daemon.max_usd_per_day = 0.01
-    _seed_spend(store, "earlier", 0.02)
+    seed_spend(store, "earlier", 0.02)
 
     with open(logfile, "a") as f:
         f.write(TRACEBACK)
@@ -574,7 +722,7 @@ async def test_capped_error_is_retried_later(setup):
 async def test_spend_cap_warns_once_per_day(setup):
     daemon, logfile, agent, github, store, remote = setup
     daemon.config.daemon.max_usd_per_day = 0.01
-    _seed_spend(store, "earlier", 0.05)
+    seed_spend(store, "earlier", 0.05)
     notices: list[tuple[str, str]] = []
     daemon.on_notice = lambda message, level: notices.append((level, message))
 
@@ -593,7 +741,7 @@ async def test_capped_by_default(setup):
     """An install nobody tuned is still bounded — the default is a ceiling."""
     daemon, logfile, agent, github, store, remote = setup
     assert daemon.config.daemon.max_usd_per_day == 5.0
-    _seed_spend(store, "earlier", 999.0)
+    seed_spend(store, "earlier", 999.0)
 
     with open(logfile, "a") as f:
         f.write(TRACEBACK)
@@ -605,7 +753,7 @@ async def test_zero_disables_the_cap(setup):
     """0 is the opt-out, for someone who wants an unbounded daemon."""
     daemon, logfile, agent, github, store, remote = setup
     daemon.config.daemon.max_usd_per_day = 0.0
-    _seed_spend(store, "earlier", 999.0)
+    seed_spend(store, "earlier", 999.0)
 
     with open(logfile, "a") as f:
         f.write(TRACEBACK)
@@ -616,7 +764,7 @@ async def test_dry_run_ignores_the_cap(setup):
     """--dry-run costs money too, but it's an explicit interactive request."""
     daemon, logfile, agent, github, store, remote = setup
     daemon.config.daemon.max_usd_per_day = 0.01
-    _seed_spend(store, "earlier", 0.02)
+    seed_spend(store, "earlier", 0.02)
 
     with open(logfile, "a") as f:
         f.write(TRACEBACK)
@@ -630,7 +778,7 @@ async def test_dry_run_ignores_the_cap(setup):
 # ---------------------------------------------------------------------------
 
 
-def _fix_mode(daemon, agent=None, *, test_command: str = "") -> None:
+def fix_mode(daemon, agent=None, *, test_command: str = "") -> None:
     """Switch to fix mode and let the agent actually change something.
 
     Both halves matter now: fix mode with no code change deliberately falls
@@ -645,7 +793,7 @@ def _fix_mode(daemon, agent=None, *, test_command: str = "") -> None:
 
 async def test_passing_tests_are_reported_in_the_pr(setup):
     daemon, logfile, agent, github, store, remote = setup
-    _fix_mode(daemon, agent, test_command="exit 0")
+    fix_mode(daemon, agent, test_command="exit 0")
 
     with open(logfile, "a") as f:
         f.write(TRACEBACK)
@@ -659,7 +807,7 @@ async def test_passing_tests_are_reported_in_the_pr(setup):
 async def test_failing_tests_are_reported_not_suppressed(setup):
     """A fix that breaks the suite is exactly what a reviewer must be told."""
     daemon, logfile, agent, github, store, remote = setup
-    _fix_mode(daemon, agent, test_command="echo 'boom: 1 failed'; exit 1")
+    fix_mode(daemon, agent, test_command="echo 'boom: 1 failed'; exit 1")
 
     with open(logfile, "a") as f:
         f.write(TRACEBACK)
@@ -674,7 +822,7 @@ async def test_failing_tests_are_reported_not_suppressed(setup):
 
 async def test_unrunnable_test_command_does_not_abort_the_incident(setup):
     daemon, logfile, agent, github, store, remote = setup
-    _fix_mode(daemon, agent, test_command="this-command-does-not-exist-xyz")
+    fix_mode(daemon, agent, test_command="this-command-does-not-exist-xyz")
 
     with open(logfile, "a") as f:
         f.write(TRACEBACK)
@@ -686,7 +834,7 @@ async def test_unrunnable_test_command_does_not_abort_the_incident(setup):
 
 async def test_no_test_command_marks_the_pr_unverified(setup):
     daemon, logfile, agent, github, store, remote = setup
-    _fix_mode(daemon, agent)  # no test_command
+    fix_mode(daemon, agent)  # no test_command
 
     with open(logfile, "a") as f:
         f.write(TRACEBACK)
@@ -698,7 +846,7 @@ async def test_no_test_command_marks_the_pr_unverified(setup):
 async def test_tests_run_in_the_workspace_not_the_cwd(setup):
     """The command must see the agent's edits, which live in the clone."""
     daemon, logfile, agent, github, store, remote = setup
-    _fix_mode(daemon, agent, test_command="pwd")
+    fix_mode(daemon, agent, test_command="pwd")
 
     with open(logfile, "a") as f:
         f.write(TRACEBACK)
@@ -728,7 +876,7 @@ async def test_cap_warning_reports_the_configured_amount(setup):
     """A sub-cent cap must not be rounded up in the warning."""
     daemon, logfile, agent, github, store, remote = setup
     daemon.config.daemon.max_usd_per_day = 0.005
-    _seed_spend(store, "earlier", 0.02)
+    seed_spend(store, "earlier", 0.02)
     notices: list[tuple[str, str]] = []
     daemon.on_notice = lambda message, level: notices.append((level, message))
 
@@ -819,17 +967,17 @@ async def test_unreadable_git_history_does_not_break_the_incident(setup):
 # ---------------------------------------------------------------------------
 
 
-_DISTINCT_WORDS = ("alpha", "bravo", "charlie", "delta", "echo", "foxtrot")
+DISTINCT_WORDS = ("alpha", "bravo", "charlie", "delta", "echo", "foxtrot")
 
 
-def _distinct_errors(count: int) -> str:
+def distinct_errors(count: int) -> str:
     """Errors with genuinely different fingerprints.
 
     Numbered messages ("failure 1", "failure 2") all collapse to one incident,
     because fingerprinting strips digits so the same crash at a different line
     number stays one error.
     """
-    lines = [f"ERROR {word} subsystem broke" for word in _DISTINCT_WORDS[:count]]
+    lines = [f"ERROR {word} subsystem broke" for word in DISTINCT_WORDS[:count]]
     return "\n".join([*lines, "INFO end", ""])
 
 
@@ -839,7 +987,7 @@ async def test_cycle_limit_bounds_a_burst_of_novel_errors(setup):
     daemon.config.daemon.max_incidents_per_cycle = 2
 
     with open(logfile, "a") as f:
-        f.write(_distinct_errors(5))
+        f.write(distinct_errors(5))
 
     handled = await daemon.poll_once()
     assert len(handled) == 2
@@ -851,12 +999,12 @@ async def test_errors_beyond_the_cycle_limit_are_picked_up_next_poll(setup):
     daemon.config.daemon.max_incidents_per_cycle = 2
 
     with open(logfile, "a") as f:
-        f.write(_distinct_errors(5))
+        f.write(distinct_errors(5))
     await daemon.poll_once()
 
     # Same lines re-read on the next poll (the deferred ones were forgotten).
     with open(logfile, "a") as f:
-        f.write(_distinct_errors(5))
+        f.write(distinct_errors(5))
     handled = await daemon.poll_once()
 
     assert len(handled) == 2
@@ -878,7 +1026,7 @@ async def test_zero_means_unlimited(setup):
     daemon.config.daemon.max_incidents_per_cycle = 0
 
     with open(logfile, "a") as f:
-        f.write(_distinct_errors(4))
+        f.write(distinct_errors(4))
 
     assert len(await daemon.poll_once()) == 4
 
@@ -898,7 +1046,7 @@ async def test_cycle_limit_counts_failed_attempts_too(setup):
     github.create_issue = boom
 
     with open(logfile, "a") as f:
-        f.write(_distinct_errors(5))
+        f.write(distinct_errors(5))
     await daemon.poll_once()
 
     attempted = [row for row in store.all() if row["status"] == "failed"]
@@ -1105,7 +1253,7 @@ async def test_suggest_mode_records_the_report_and_marks_it_an_issue(setup):
 
 
 async def test_fix_mode_records_the_report_and_marks_it_a_pr(tmp_path, remote):
-    daemon, logfile, store = _fix_mode_daemon(tmp_path, remote)
+    daemon, logfile, store = fix_mode_daemon(tmp_path, remote)
 
     with open(logfile, "a") as f:
         f.write(TRACEBACK)
@@ -1116,7 +1264,7 @@ async def test_fix_mode_records_the_report_and_marks_it_a_pr(tmp_path, remote):
     assert "Root cause" in row["report_text"]
 
 
-def _fix_mode_daemon(tmp_path, remote):
+def fix_mode_daemon(tmp_path, remote):
     logfile = tmp_path / "app.log"
     logfile.write_text("")
     repo_config = RepoConfig(repo="owner/name", base_branch="main", mode="fix")
@@ -1224,7 +1372,7 @@ async def test_the_notice_names_what_was_actually_published(setup):
 
 async def test_the_notice_says_pr_when_one_was_opened(setup):
     daemon, logfile, agent, github, store, remote = setup
-    _fix_mode(daemon, agent)
+    fix_mode(daemon, agent)
     notices = []
     daemon.on_notice = lambda message, level: notices.append(message)
 
@@ -1253,7 +1401,7 @@ async def test_a_capped_error_keeps_its_history(setup):
     """
     daemon, logfile, agent, github, store, remote = setup
     daemon.config.daemon.max_usd_per_day = 0.01
-    _seed_spend(store, "earlier", 0.02)
+    seed_spend(store, "earlier", 0.02)
 
     for _ in range(3):
         with open(logfile, "a") as f:
@@ -1270,7 +1418,7 @@ async def test_a_capped_error_keeps_its_history(setup):
 async def test_first_seen_is_when_the_error_started_not_when_the_cap_lifted(setup):
     daemon, logfile, agent, github, store, remote = setup
     daemon.config.daemon.max_usd_per_day = 0.01
-    _seed_spend(store, "earlier", 0.02)
+    seed_spend(store, "earlier", 0.02)
 
     with open(logfile, "a") as f:
         f.write(TRACEBACK)
@@ -1290,7 +1438,7 @@ async def test_first_seen_is_when_the_error_started_not_when_the_cap_lifted(setu
 # ---------------------------------------------------------------------------
 
 
-def _local_daemon(tmp_path, repo_path):
+def local_daemon(tmp_path, repo_path):
     logfile = tmp_path / "app.log"
     logfile.write_text("")
     config = Config(
@@ -1329,7 +1477,7 @@ async def test_local_mode_offers_commit_history_for_deploy_blame(tmp_path):
     git("add", "-A", cwd=checkout)
     git("commit", "-m", "the suspicious commit", cwd=checkout)
 
-    daemon, logfile, agent, store = _local_daemon(tmp_path, checkout)
+    daemon, logfile, agent, store = local_daemon(tmp_path, checkout)
     with open(logfile, "a") as f:
         f.write(TRACEBACK)
     await daemon.poll_once()
@@ -1347,7 +1495,7 @@ async def test_local_mode_does_not_name_a_branch_it_cannot_vouch_for(tmp_path):
     git("add", "-A", cwd=checkout)
     git("commit", "-m", "only commit", cwd=checkout)
 
-    daemon, logfile, agent, store = _local_daemon(tmp_path, checkout)
+    daemon, logfile, agent, store = local_daemon(tmp_path, checkout)
     with open(logfile, "a") as f:
         f.write(TRACEBACK)
     await daemon.poll_once()
@@ -1360,7 +1508,7 @@ async def test_a_local_directory_that_is_not_a_repo_omits_the_section(tmp_path):
     plain = tmp_path / "plain"
     plain.mkdir()
 
-    daemon, logfile, agent, store = _local_daemon(tmp_path, plain)
+    daemon, logfile, agent, store = local_daemon(tmp_path, plain)
     with open(logfile, "a") as f:
         f.write(TRACEBACK)
     await daemon.poll_once()
@@ -1373,7 +1521,7 @@ async def test_local_mode_still_writes_its_report(tmp_path):
     checkout = tmp_path / "app"
     checkout.mkdir()
 
-    daemon, logfile, agent, store = _local_daemon(tmp_path, checkout)
+    daemon, logfile, agent, store = local_daemon(tmp_path, checkout)
     with open(logfile, "a") as f:
         f.write(TRACEBACK)
     fp = (await daemon.poll_once())[0]

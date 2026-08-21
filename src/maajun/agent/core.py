@@ -39,9 +39,10 @@ MIN_REQUEST_MESSAGES = 4
 
 TOOL_RESULT_PREVIEW = 200
 
-# Called with (tool_name, arguments) before a permission-gated tool runs;
-# returns whether the call is approved.
-PermissionCallback = Callable[[str, dict[str, Any]], Awaitable[bool]]
+# Called with (tool_name, arguments) before a permission-gated tool runs.
+# True approves the call; False denies it; any other string denies it and is
+# passed on as the user's reason.
+PermissionCallback = Callable[[str, dict[str, Any]], Awaitable[bool | str]]
 
 PERMISSION_DENIED = (
     "Error: the user denied permission for this tool call. "
@@ -73,7 +74,7 @@ Be concise, accurate, and helpful.  Use markdown when it improves readability.
 If you're unsure about something, say so rather than guessing."""
 
 
-def _message_size(message: dict[str, Any]) -> int:
+def message_size(message: dict[str, Any]) -> int:
     """Rough character cost of one message, including its tool calls."""
     size = len(message.get("content") or "")
     for call in message.get("tool_calls") or ():
@@ -90,11 +91,17 @@ def trim_request_messages(messages: list[dict[str, Any]]) -> None:
     front: it belongs to the assistant message that requested it, and the API
     rejects a tool result with no matching tool call ahead of it.
     """
-    total = sum(_message_size(message) for message in messages)
+    total = sum(message_size(message) for message in messages)
     while total > MAX_REQUEST_CHARS and len(messages) > MIN_REQUEST_MESSAGES:
-        total -= _message_size(messages.pop(1))
+        total -= message_size(messages.pop(1))
         while len(messages) > MIN_REQUEST_MESSAGES and messages[1].get("role") == "tool":
-            total -= _message_size(messages.pop(1))
+            total -= message_size(messages.pop(1))
+    # The floor above can stop mid-round, having dropped an assistant message
+    # but not the tool results that answered it. The API rejects an orphaned
+    # tool result outright, so the floor yields rather than the invariant:
+    # being a few messages short beats a request that cannot be sent at all.
+    while len(messages) > 1 and messages[1].get("role") == "tool":
+        total -= message_size(messages.pop(1))
     if total > MAX_REQUEST_CHARS:
         log.warning(
             "request is %d chars after trimming to %d messages — the provider "
@@ -103,7 +110,20 @@ def trim_request_messages(messages: list[dict[str, Any]]) -> None:
         )
 
 
-def _accumulate_usage(total: dict[str, int], usage: dict[str, int] | None) -> None:
+def is_tool_context(message: dict[str, Any]) -> bool:
+    """Whether a message is a tool call or its result rather than plain text."""
+    return message.get("role") == "tool" or bool(message.get("tool_calls"))
+
+
+def drop_leading_tool_results(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """A tool result whose call has been trimmed away is rejected by the API."""
+    start = 0
+    while start < len(messages) and messages[start].get("role") == "tool":
+        start += 1
+    return messages[start:]
+
+
+def accumulate_usage(total: dict[str, int], usage: dict[str, int] | None) -> None:
     """Add one response's token counts into a running total.
 
     Sums whatever keys the provider reported rather than a fixed set, so a
@@ -127,9 +147,10 @@ class Agent:
         system_prompt: str | None = None,
     ):
         self.config = config
-        self.history: list[dict[str, str]] = []
+        self.history: list[dict[str, Any]] = []
         self.registry = tools or default_registry()
         self.approve = approve
+        self.usage: dict[str, int] = {}
         # The daemon's incident analysis and an interactive chat want to be
         # told different things; the tool loop underneath is identical.
         self.system_prompt = system_prompt or SYSTEM_PROMPT
@@ -143,8 +164,22 @@ class Agent:
             },
         )
 
+    @property
+    def model(self) -> str | None:
+        return getattr(self.provider, "model", None)
+
     def clear_history(self) -> None:
         self.history.clear()
+
+    def take_usage(self) -> dict[str, int]:
+        """The tokens spent since the last call, including a turn that failed.
+
+        Every tool round is a billed request. A turn that dies on round thirty
+        still spent what the first twenty-nine cost, so the caller reads this
+        from a `finally` rather than from the response it never got.
+        """
+        usage, self.usage = self.usage, {}
+        return usage
 
     async def aclose(self) -> None:
         """Release the provider's HTTP client."""
@@ -152,9 +187,15 @@ class Agent:
 
     async def chat(self, message: str) -> CompletionResponse:
         self.history.append({"role": "user", "content": message})
-        self._trim_history()
+        self.trim_history()
 
-        messages = self._request_messages()
+        messages = self.request_messages()
+        produced: list[dict[str, Any]] = []
+
+        def emit(entry: dict[str, Any]) -> None:
+            messages.append(entry)
+            produced.append(entry)
+
         tools = self.registry.definitions()
         thinking_parts: list[str] = []
         last_content = ""
@@ -162,13 +203,13 @@ class Agent:
         # conversation — so reporting only the final round's usage would
         # under-count a tool-heavy analysis several times over, and the
         # daemon's spend cap reads these numbers.
-        total_usage: dict[str, int] = {}
+        self.usage = {}
 
         try:
             for _ in range(MAX_TOOL_ROUNDS):
                 trim_request_messages(messages)
-                response = await self._complete(messages, tools)
-                _accumulate_usage(total_usage, response.usage)
+                response = await self.complete(messages, tools)
+                accumulate_usage(self.usage, response.usage)
 
                 if response.thinking:
                     thinking_parts.append(response.thinking)
@@ -176,46 +217,52 @@ class Agent:
                     last_content = response.content
 
                 if not response.tool_calls:
-                    self.history.append({
-                        "role": "assistant",
-                        "content": response.content,
-                    })
+                    emit({"role": "assistant", "content": response.content})
+                    self.commit_turn(produced)
                     return CompletionResponse(
                         content=response.content,
                         thinking="".join(thinking_parts) or None,
-                        usage=total_usage or None,
+                        usage=self.usage or None,
                         model=response.model,
                     )
 
-                async for _name, _result in self._run_tools(messages, response):
+                async for _ in self.run_tools(emit, response):
                     pass
 
-            self.history.append({"role": "assistant", "content": last_content})
+            emit({"role": "assistant", "content": last_content})
+            self.commit_turn(produced)
             return CompletionResponse(
                 content=last_content,
                 thinking="".join(thinking_parts) or None,
-                usage=total_usage or None,
+                usage=self.usage or None,
                 model=response.model,
             )
 
         except Exception:
-            self._rollback_user_message()
+            self.rollback_user_message()
             raise
 
     async def chat_stream(self, message: str) -> AsyncIterator[StreamChunk]:
-        """Yield ("thinking" | "content" | "tool", text) chunks as they arrive.
+        """Yield ("thinking" | "content" | "running" | "tool", text) chunks.
 
         Tool calls are handled transparently: the provider emits them as a
-        single event once a round's stream ends, the tools run and each result
-        preview is yielded as a "tool" chunk, and the next round starts
-        streaming.
+        single event once a round's stream ends, each is announced as a
+        "running" chunk before it starts and yielded again as a "tool" chunk
+        with its result preview, and the next round starts streaming.
         """
         self.history.append({"role": "user", "content": message})
-        self._trim_history()
+        self.trim_history()
 
-        messages = self._request_messages()
+        messages = self.request_messages()
+        produced: list[dict[str, Any]] = []
+
+        def emit(entry: dict[str, Any]) -> None:
+            messages.append(entry)
+            produced.append(entry)
+
         tools = self.registry.definitions()
         content_parts: list[str] = []
+        self.usage = {}
 
         try:
             for _ in range(MAX_TOOL_ROUNDS):
@@ -231,6 +278,8 @@ class Agent:
                 ):
                     if kind == "tool_calls":
                         tool_calls = data
+                    elif kind == "usage":
+                        accumulate_usage(self.usage, data)
                     else:
                         if kind == "content":
                             round_content.append(data)
@@ -245,22 +294,22 @@ class Agent:
                     content="".join(round_content),
                     tool_calls=tool_calls,
                 )
-                async for name, result in self._run_tools(messages, response):
+                for call in tool_calls:
+                    yield "running", call["function"]["name"]
+                async for name, result in self.run_tools(emit, response):
                     preview = result[:TOOL_RESULT_PREVIEW]
                     if len(result) > TOOL_RESULT_PREVIEW:
                         preview += "..."
                     yield "tool", f"🔧 {name} → {preview}"
 
-            self.history.append({
-                "role": "assistant",
-                "content": "".join(content_parts),
-            })
+            emit({"role": "assistant", "content": "".join(content_parts)})
+            self.commit_turn(produced)
 
         except Exception:
-            self._rollback_user_message()
+            self.rollback_user_message()
             raise
 
-    async def _complete(self, messages: list[dict], tools: list) -> CompletionResponse:
+    async def complete(self, messages: list[dict], tools: list) -> CompletionResponse:
         return await self.provider.chat_completion(
             messages=messages,
             tools=tools,
@@ -268,25 +317,25 @@ class Agent:
             max_tokens=self.config.ai.max_tokens,
         )
 
-    async def _run_tools(
-        self, messages: list[dict], response: CompletionResponse
+    async def run_tools(
+        self, emit: Callable[[dict[str, Any]], None], response: CompletionResponse
     ) -> AsyncIterator[tuple[str, str]]:
-        """Execute the response's tool calls, appending the assistant message
-        and each tool result to messages. Yields (tool_name, result).
+        """Execute the response's tool calls, emitting the assistant message
+        and each tool result. Yields (tool_name, result).
 
         When a round has several calls that all need no approval (read-only
         tools like read_file/grep/glob), they run concurrently. If any call
         is permission-gated they run sequentially, so approval prompts stay
         ordered and interactive.
         """
-        messages.append({
+        emit({
             "role": "assistant",
             "content": response.content or "",
-            "tool_calls": self._format_tool_calls(response.tool_calls),
+            "tool_calls": self.format_tool_calls(response.tool_calls),
         })
 
         prepared = [
-            (tc, tc["function"]["name"], self._parse_args(tc["function"]))
+            (tc, tc["function"]["name"], self.parse_args(tc["function"]))
             for tc in response.tool_calls
         ]
         concurrent = len(prepared) > 1 and not any(
@@ -294,55 +343,71 @@ class Agent:
         )
         if concurrent:
             results = await asyncio.gather(
-                *(self._execute_tool(name, args) for _, name, args in prepared)
+                *(self.execute_tool(name, args) for _, name, args in prepared)
             )
         else:
-            results = [await self._execute_tool(name, args) for _, name, args in prepared]
+            results = [await self.execute_tool(name, args) for _, name, args in prepared]
 
-        for (tc, name, _args), result in zip(prepared, results, strict=True):
-            messages.append({
+        for (tc, name, _), result in zip(prepared, results, strict=True):
+            emit({
                 "role": "tool",
                 "tool_call_id": tc["id"],
                 "content": result,
             })
             yield name, result
 
-    async def _execute_tool(self, name: str, args: dict[str, Any]) -> str:
+    async def execute_tool(self, name: str, args: dict[str, Any]) -> str:
         log.info("tool_call name=%s args=%s", name, args)
-        if await self._permitted(name, args):
+        verdict = await self.permitted(name, args)
+        if verdict is True:
             result = await self.registry.execute(name, args)
             log.info("tool_result name=%s len=%d", name, len(result))
         else:
             result = PERMISSION_DENIED
+            if isinstance(verdict, str):
+                result += f" They said: {verdict}"
             log.info("tool_denied name=%s", name)
         return result
 
-    async def _permitted(self, name: str, args: dict[str, Any]) -> bool:
+    async def permitted(self, name: str, args: dict[str, Any]) -> bool | str:
         if not self.registry.requires_permission(name):
             return True
         if self.approve is None:
             return False
         return await self.approve(name, args)
 
-    def _request_messages(self) -> list[dict[str, str]]:
+    def request_messages(self) -> list[dict[str, Any]]:
         return [
             {"role": "system", "content": self.system_prompt},
-            *self.history[-MAX_HISTORY_MESSAGES:],
+            *drop_leading_tool_results(self.history[-MAX_HISTORY_MESSAGES:]),
         ]
 
-    def _trim_history(self) -> None:
-        """Drop oldest user/assistant pairs if history exceeds the cap."""
-        while len(self.history) > MAX_HISTORY_MESSAGES:
-            self.history.pop(0)
-            if self.history and self.history[0]["role"] == "assistant":
-                self.history.pop(0)
+    def commit_turn(self, produced: list[dict[str, Any]]) -> None:
+        """Fold a finished turn into the history the next one starts from.
 
-    def _rollback_user_message(self) -> None:
+        The turn's tool calls and their results are kept, so a follow-up
+        question doesn't re-read a file the previous answer already read.
+        Only the newest turn keeps them: older rounds collapse back to the
+        conversation, which is what the user is still talking about.
+        """
+        self.history = [
+            entry for entry in self.history if not is_tool_context(entry)
+        ]
+        self.history.extend(produced)
+        self.trim_history()
+
+    def trim_history(self) -> None:
+        """Drop the oldest entries once history exceeds the cap."""
+        if len(self.history) > MAX_HISTORY_MESSAGES:
+            del self.history[: len(self.history) - MAX_HISTORY_MESSAGES]
+        self.history = drop_leading_tool_results(self.history)
+
+    def rollback_user_message(self) -> None:
         if self.history and self.history[-1]["role"] == "user":
             self.history.pop()
 
     @staticmethod
-    def _format_tool_calls(tool_calls: list[dict]) -> list[dict]:
+    def format_tool_calls(tool_calls: list[dict]) -> list[dict]:
         """Normalize tool_call dicts for the messages API (arguments must be
         a JSON string on the wire)."""
         return [
@@ -362,7 +427,7 @@ class Agent:
         ]
 
     @staticmethod
-    def _parse_args(fn: dict) -> dict:
+    def parse_args(fn: dict) -> dict:
         try:
             args = (
                 json.loads(fn["arguments"])

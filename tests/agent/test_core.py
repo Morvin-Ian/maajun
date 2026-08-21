@@ -18,13 +18,13 @@ class FakeProvider:
         self.last_messages = None
 
     async def chat_completion(self, messages, **kwargs):
-        self.last_messages = messages
+        self.last_messages = list(messages)
         if self.fail:
             raise ProviderError("boom")
         return CompletionResponse(content=self.reply, thinking="hmm ")
 
     async def stream_completion(self, messages, **kwargs):
-        self.last_messages = messages
+        self.last_messages = list(messages)
         if self.fail:
             raise ProviderError("boom")
         yield "thinking", "hmm "
@@ -109,7 +109,7 @@ def test_base_url_reaches_the_provider(monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def _msg(role, content, tool_calls=None):
+def msg(role, content, tool_calls=None):
     message = {"role": role, "content": content}
     if tool_calls:
         message["tool_calls"] = tool_calls
@@ -117,7 +117,7 @@ def _msg(role, content, tool_calls=None):
 
 
 def test_trim_leaves_a_small_request_untouched():
-    messages = [_msg("system", "sys"), _msg("user", "hi"), _msg("assistant", "yo")]
+    messages = [msg("system", "sys"), msg("user", "hi"), msg("assistant", "yo")]
     before = list(messages)
     trim_request_messages(messages)
     assert messages == before
@@ -125,8 +125,8 @@ def test_trim_leaves_a_small_request_untouched():
 
 def test_trim_drops_oldest_but_keeps_the_system_prompt():
     filler = "z" * 50_000
-    messages = [_msg("system", "sys")] + [
-        _msg("user" if i % 2 == 0 else "assistant", filler) for i in range(10)
+    messages = [msg("system", "sys")] + [
+        msg("user" if i % 2 == 0 else "assistant", filler) for i in range(10)
     ]
     trim_request_messages(messages)
     assert messages[0]["role"] == "system"
@@ -140,19 +140,49 @@ def test_trim_never_leaves_an_orphan_tool_result_at_the_front():
     """A tool message with no preceding tool_call is rejected by the API."""
     filler = "z" * 40_000
     calls = [{"id": "c1", "function": {"name": "grep", "arguments": "{}"}}]
-    messages = [_msg("system", "sys")]
+    messages = [msg("system", "sys")]
     for _ in range(6):
-        messages.append(_msg("user", filler))
-        messages.append(_msg("assistant", "", calls))
-        messages.append(_msg("tool", filler))
+        messages.append(msg("user", filler))
+        messages.append(msg("assistant", "", calls))
+        messages.append(msg("tool", filler))
     trim_request_messages(messages)
     assert messages[0]["role"] == "system"
     assert messages[1]["role"] != "tool"
 
 
+def test_trim_drops_below_the_floor_rather_than_orphan_a_tool_result():
+    """The floor is MIN_REQUEST_MESSAGES, but a request the API rejects
+    outright is worse than a short one — so the floor is what gives way.
+
+    Two write_file calls carrying large arguments: each assistant message is
+    over the budget on its own, and cap_result does not bound tool_call
+    arguments the way it bounds results.
+    """
+    big = "x" * 90_000
+
+    def call(cid):
+        return [{"id": cid, "function": {"name": "write_file", "arguments": big}}]
+
+    messages = [
+        msg("system", "sys"),
+        msg("assistant", "", call("c1")),
+        msg("tool", "Wrote"),
+        msg("assistant", "", call("c2")),
+        msg("tool", "Wrote"),
+    ]
+    trim_request_messages(messages)
+    assert messages[0]["role"] == "system"
+    assert [m["role"] for m in messages[1:]] != ["tool", "assistant", "tool"]
+    assert all(
+        not (m["role"] == "tool" and messages[i - 1].get("role") == "system")
+        for i, m in enumerate(messages)
+        if i
+    )
+
+
 def test_trim_keeps_a_floor_even_when_one_message_blows_the_budget():
     huge = "z" * (MAX_REQUEST_CHARS * 3)
-    messages = [_msg("system", "sys"), _msg("user", "q"), _msg("assistant", huge)]
+    messages = [msg("system", "sys"), msg("user", "q"), msg("assistant", huge)]
     trim_request_messages(messages)
     assert len(messages) == 3
     assert messages[1]["content"] == "q"
@@ -161,11 +191,11 @@ def test_trim_keeps_a_floor_even_when_one_message_blows_the_budget():
 def test_trim_counts_tool_call_arguments_toward_the_budget():
     calls = [{"id": "c1", "function": {"name": "grep", "arguments": "a" * 90_000}}]
     messages = [
-        _msg("system", "sys"),
-        _msg("user", "q"),
-        _msg("assistant", "", calls),
-        _msg("assistant", "", calls),
-        _msg("assistant", "tail"),
+        msg("system", "sys"),
+        msg("user", "q"),
+        msg("assistant", "", calls),
+        msg("assistant", "", calls),
+        msg("assistant", "tail"),
     ]
     trim_request_messages(messages)
     assert len(messages) < 5

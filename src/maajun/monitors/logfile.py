@@ -13,9 +13,9 @@ from maajun.monitors.defaults import (
     TRACEBACK_LOOKAHEAD_LINES,
 )
 
-_SELF_DESCRIBING_HEADERS = ("panic:", "Exception in thread ")
+SELF_DESCRIBING_HEADERS = ("panic:", "Exception in thread ")
 
-_SEVERE_LEVEL_RE = re.compile(r"\b(ERROR|CRITICAL|FATAL)\b")
+SEVERE_LEVEL_RE = re.compile(r"\b(ERROR|CRITICAL|FATAL)\b")
 
 # Cap on carried-over text for tracebacks split across polls.
 MAX_PENDING = 64 * 1024
@@ -51,20 +51,20 @@ class LogFileMonitor(Monitor):
             burst_window_seconds=burst_window_seconds,
         )
         self.path = Path(path).expanduser()
-        self._error_level_re = re.compile(error_pattern)
-        self._json_level_field = json_level_field
-        self._json_level_values = json_level_values
-        self._traceback_header_re = re.compile(
+        self.error_level_re = re.compile(error_pattern)
+        self.json_level_field = json_level_field
+        self.json_level_values = json_level_values
+        self.traceback_header_re = re.compile(
             "|".join(
                 re.escape(header)
                 for header in (traceback_headers or DEFAULT_TRACEBACK_HEADERS)
             )
         )
-        self._traceback_lookahead = max(1, traceback_lookahead)
+        self.traceback_lookahead = max(1, traceback_lookahead)
 
-        self._offset = 0
-        self._inode: int | None = None
-        self._carryover_text = ""
+        self.offset = 0
+        self.inode: int | None = None
+        self.carryover_text = ""
 
 
     @property
@@ -73,68 +73,81 @@ class LogFileMonitor(Monitor):
 
     async def flush(self) -> list[ErrorEvent]:
         """Emit carried-over text plus any incomplete burst, unconditionally."""
-        events, _ = self._parse(self._carryover_text, flush=True)
-        self._carryover_text = ""
-        self._hold_for_burst(events)
-        return self._drain_burst_buffer()
+        events, _ = self.parse(self.carryover_text, flush=True)
+        self.carryover_text = ""
+        self.hold_for_burst(events)
+        return self.drain_burst_buffer()
 
     async def poll(self) -> list[ErrorEvent]:
-        text = self._read_new()
+        text = self.read_new()
         if not text:
-            if self._carryover_text:
+            if self.carryover_text:
                 # Nothing new for a whole interval — what we held back is
                 # not still streaming; emit it.
-                events, _ = self._parse(self._carryover_text, flush=True)
-                self._carryover_text = ""
-                return self._apply_burst_threshold(events)
+                events, _ = self.parse(self.carryover_text, flush=True)
+                self.carryover_text = ""
+                return self.apply_burst_threshold(events)
             return []
 
-        events, self._carryover_text = self._parse(self._carryover_text + text)
-        if len(self._carryover_text) > MAX_PENDING:
-            self._carryover_text = self._carryover_text[-MAX_PENDING:]
+        events, self.carryover_text = self.parse(self.carryover_text + text)
+        if len(self.carryover_text) > MAX_PENDING:
+            self.carryover_text = self.carryover_text[-MAX_PENDING:]
 
-        return self._apply_burst_threshold(events)
+        return self.apply_burst_threshold(events)
 
 
-    def _read_new(self) -> str:
+    def read_new(self) -> str:
+        """Read whatever has been appended since the last poll.
+
+        Byte offsets, and the file is opened in binary. TextIOWrapper.tell()
+        returns an opaque cookie that packs the decoder's state alongside the
+        position, not a byte count — it happens to equal one until a read ends
+        mid-character, at which point it becomes a very large integer and the
+        `st_size < offset` test below reads as "truncated", re-reporting the
+        whole file. Decoding here instead keeps the offset comparable with
+        st_size, which is what it is being compared against.
+        """
         if not self.path.exists():
             return ""
         stat = self.path.stat()
-        rotated = self._inode is not None and stat.st_ino != self._inode
-        truncated = stat.st_size < self._offset
+        rotated = self.inode is not None and stat.st_ino != self.inode
+        truncated = stat.st_size < self.offset
         if rotated or truncated:
-            self._offset = 0
-            self._carryover_text = ""
-        self._inode = stat.st_ino
+            self.offset = 0
+            self.carryover_text = ""
+        self.inode = stat.st_ino
 
-        if stat.st_size == self._offset:
+        if stat.st_size <= self.offset:
             return ""
-        with open(self.path, errors="replace") as f:
-            f.seek(self._offset)
-            text = f.read()
-            self._offset = f.tell()
-        return text
+        with open(self.path, "rb") as f:
+            f.seek(self.offset)
+            data = f.read()
+            self.offset = f.tell()
+        # A read can land mid-character when the writer is still going; the
+        # replacement character is better than losing the line, and the next
+        # poll starts from the byte after it either way.
+        return data.decode("utf-8", errors="replace")
 
 
-    def _matches_error_level(self, line: str) -> bool:
+    def matches_error_level(self, line: str) -> bool:
         """Whether a line reports an error, by JSON level or by regex."""
-        if self._json_level_field:
+        if self.json_level_field:
             try:
                 record: dict[str, Any] = json.loads(line)
-                level = str(record.get(self._json_level_field, "")).lower()
-                if level in self._json_level_values:
+                level = str(record.get(self.json_level_field, "")).lower()
+                if level in self.json_level_values:
                     return True
             except (json.JSONDecodeError, TypeError):
                 pass  # not a JSON line; fall through to the regex
-        return bool(self._error_level_re.search(line))
+        return bool(self.error_level_re.search(line))
 
-    def _is_traceback_start(self, line: str) -> bool:
-        return bool(self._traceback_header_re.search(line))
+    def is_traceback_start(self, line: str) -> bool:
+        return bool(self.traceback_header_re.search(line))
 
-    def _is_severe_level(self, line: str) -> bool:
-        return bool(_SEVERE_LEVEL_RE.search(line))
+    def is_severe_level(self, line: str) -> bool:
+        return bool(SEVERE_LEVEL_RE.search(line))
 
-    def _following_traceback_index(
+    def following_traceback_index(
         self, lines: list[str], start: int, *, lookahead: int
     ) -> int | None:
         """Index of a traceback header within `lookahead` lines of `start`.
@@ -147,13 +160,13 @@ class LogFileMonitor(Monitor):
         """
         limit = min(len(lines), start + lookahead)
         for index in range(start, limit):
-            if self._is_traceback_start(lines[index]):
+            if self.is_traceback_start(lines[index]):
                 return index
-            if self._matches_error_level(lines[index]):
+            if self.matches_error_level(lines[index]):
                 return None
         return None
 
-    def _parse(self, text: str, flush: bool = False) -> tuple[list[ErrorEvent], str]:
+    def parse(self, text: str, flush: bool = False) -> tuple[list[ErrorEvent], str]:
         """Extract events from complete lines; return (events, carry-over).
 
         With flush=True nothing is carried: held-back text is emitted even
@@ -170,34 +183,34 @@ class LogFileMonitor(Monitor):
         while i < len(lines):
             line = lines[i]
 
-            if self._is_traceback_start(line):
-                block, end = self._collect_traceback(lines, i)
+            if self.is_traceback_start(line):
+                block, end = self.collect_traceback(lines, i)
                 if end is None and not flush:
                     return events, "\n".join(lines[i:] + [tail])
-                events.append(self._traceback_event(block))
+                events.append(self.traceback_event(block))
                 i = end if end is not None else len(lines)
                 continue
 
-            if self._matches_error_level(line):
+            if self.matches_error_level(line):
                 next_index = i + 1
-                severe = self._is_severe_level(line)
+                severe = self.is_severe_level(line)
                 if severe and next_index == len(lines) and not flush:
                     # A traceback may be right behind this line; wait one poll.
                     return events, "\n".join([line, tail])
                 # Severe lines get a short lookahead (the traceback often lands
                 # a line or two later); anything else must be followed
                 # immediately to count as the same failure.
-                traceback_index = self._following_traceback_index(
+                traceback_index = self.following_traceback_index(
                     lines,
                     next_index,
-                    lookahead=self._traceback_lookahead if severe else 1,
+                    lookahead=self.traceback_lookahead if severe else 1,
                 )
                 if traceback_index is not None:
-                    block, end = self._collect_traceback(lines, traceback_index)
+                    block, end = self.collect_traceback(lines, traceback_index)
                     if end is None and not flush:
                         return events, "\n".join(lines[i:] + [tail])
                     context = "\n".join(lines[i:traceback_index]).strip()
-                    events.append(self._traceback_event(block, context=context))
+                    events.append(self.traceback_event(block, context=context))
                     i = end if end is not None else len(lines)
                     continue
                 events.append(ErrorEvent(
@@ -209,7 +222,7 @@ class LogFileMonitor(Monitor):
 
         return events, tail
 
-    def _collect_traceback(self, lines: list[str], start: int) -> tuple[list[str], int | None]:
+    def collect_traceback(self, lines: list[str], start: int) -> tuple[list[str], int | None]:
         """Collect a traceback starting at lines[start].
 
         Returns (block, index after block), or (partial, None) if the
@@ -219,7 +232,19 @@ class LogFileMonitor(Monitor):
         i = start + 1
         while i < len(lines):
             line = lines[i]
-            if line.startswith((" ", "\t")) or self._is_traceback_start(line) or not line.strip():
+            if not line.strip():
+                # A blank line inside a traceback is part of it (a chained
+                # "During handling…" block), but a blank line followed by an
+                # unindented line ends it: that next line belongs to whatever
+                # the application logged next. Swallowing it used to make an
+                # unrelated INFO line the block's exception — and therefore
+                # the incident's title and its fingerprint.
+                if self.blank_ends_block(lines, i):
+                    return block, i + 1
+                block.append(line)
+                i += 1
+                continue
+            if line.startswith((" ", "\t")) or self.is_traceback_start(line):
                 block.append(line)
                 i += 1
                 continue
@@ -233,18 +258,33 @@ class LogFileMonitor(Monitor):
             return block, i + 1
         return block, None
 
-    def _traceback_event(self, block: list[str], context: str | None = None) -> ErrorEvent:
+    def blank_ends_block(self, lines: list[str], index: int) -> bool:
+        """Whether the blank line at `index` is the end of the traceback.
+
+        It is, unless the next non-blank line continues one: indented detail,
+        or a chained-exception header like "During handling of the above".
+        """
+        for line in lines[index + 1:]:
+            if not line.strip():
+                continue
+            return not (
+                line.startswith((" ", "\t")) or self.is_traceback_start(line)
+            )
+        # Nothing but blanks left; the caller decides whether more is coming.
+        return False
+
+    def traceback_event(self, block: list[str], context: str | None = None) -> ErrorEvent:
         details = "\n".join(block)
         if context:
             details = f"{context.strip()}\n{details}"
         return ErrorEvent(
             source=self.name,
-            message=self._traceback_message(block)[:200],
+            message=self.traceback_message(block)[:200],
             details=details,
         )
 
     @staticmethod
-    def _traceback_message(block: list[str]) -> str:
+    def traceback_message(block: list[str]) -> str:
         """The one-line summary for a traceback block.
 
         Headers like "panic:" and "Exception in thread" self-describe the
@@ -253,7 +293,7 @@ class LogFileMonitor(Monitor):
         non-empty line instead.
         """
         header = block[0].strip()
-        if header.startswith(_SELF_DESCRIBING_HEADERS[0]) or _SELF_DESCRIBING_HEADERS[1] in header:
+        if header.startswith(SELF_DESCRIBING_HEADERS[0]) or SELF_DESCRIBING_HEADERS[1] in header:
             return header
         for line in reversed(block):
             if line.strip() and not line.startswith((" ", "\t")):

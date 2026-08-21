@@ -28,7 +28,7 @@ def no_git_detect(monkeypatch):
 @pytest.fixture(autouse=True)
 def no_network(monkeypatch):
     """Never let the push-access probe reach the real GitHub API."""
-    class _Client:
+    class Client:
         def __init__(self, token, **kwargs):
             self.token = token
 
@@ -41,7 +41,7 @@ def no_network(monkeypatch):
         async def aclose(self):
             pass
 
-    monkeypatch.setattr("maajun.cli.setup.GitHubClient", _Client)
+    monkeypatch.setattr("maajun.cli.setup.GitHubClient", Client)
 
 
 # ---------------------------------------------------------------------------

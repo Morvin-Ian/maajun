@@ -7,10 +7,11 @@ from pathlib import Path
 
 import typer
 from rich.live import Live
+from rich.markup import escape
 from rich.panel import Panel
 
 from maajun.auth import AuthManager
-from maajun.cli._shared import app, console, load_config, pick_repo
+from maajun.cli.shared import app, console, load_config, pick_repo
 from maajun.cli.status_checks import build_status, gather_github
 from maajun.config import RepoConfig
 from maajun.daemon import build_daemon, build_daemon_for_report
@@ -26,8 +27,11 @@ def watch_with_spinner(daemon, *, once: bool) -> None:
     status = WorkingStatus("Watching for errors")
 
     def notice(message: str, level: str) -> None:
+        # Escaped: a notice carries an error message or a log line, and a
+        # stray closing tag in one is a MarkupError that would take the
+        # daemon down instead of reporting the incident that produced it.
         style = NOTICE_STYLES.get(level, "dim")
-        console.print(f"[{style}]{message}[/{style}]")
+        console.print(f"[{style}]{escape(message)}[/{style}]")
 
     daemon.progress = status.set
     daemon.on_notice = notice
@@ -242,7 +246,7 @@ def report(
     try:
         if dry_run or verbose:
             console.print("\n[dim]Analyzing the issue — this can take a moment…[/dim]")
-            asyncio.run(run_report(lambda _phase: None))
+            asyncio.run(run_report(lambda phase: None))
             if dry_run:
                 console.print("\n[dim]Dry run complete.[/dim]")
         else:
@@ -314,7 +318,7 @@ def add_repo(
     console.print(f"[dim]Now watching: {names}[/dim]")
 
 
-def _print_check(label: str, ok: bool, detail: str = "", warn: bool = False) -> bool:
+def print_check(label: str, ok: bool, detail: str = "", warn: bool = False) -> bool:
     """Print one ✓/⚠/✗ status line. Returns ok."""
     if ok:
         mark = "[green]✓[/green]"
@@ -358,7 +362,7 @@ def status(
     for section in sections:
         console.print(f"\n[bold]{section.title}[/bold]")
         for check in section.checks:
-            _print_check(check.label, check.ok, check.detail, check.warn)
+            print_check(check.label, check.ok, check.detail, check.warn)
 
     if ok:
         console.print("\n[green]✓ Ready. Run [bold]maajun watch[/bold].[/green]")

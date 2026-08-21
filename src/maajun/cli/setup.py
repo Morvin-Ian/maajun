@@ -10,7 +10,7 @@ import typer
 from rich.panel import Panel
 
 from maajun.auth import AuthManager
-from maajun.cli._shared import (
+from maajun.cli.shared import (
     app,
     configured_providers,
     console,
@@ -34,7 +34,7 @@ PROVIDER_SIGNUP_URLS = {
 
 GITHUB_TOKEN_URL = "https://github.com/settings/personal-access-tokens"
 
-_GITHUB_REMOTE_RE = re.compile(r"github\.com[:/]([^/\s]+/[^/\s]+?)(?:\.git)?/?$")
+GITHUB_REMOTE_RE = re.compile(r"github\.com[:/]([^/\s]+/[^/\s]+?)(?:\.git)?/?$")
 
 
 def detect_repo_from_git(directory: Path | None = None) -> str | None:
@@ -45,10 +45,10 @@ def detect_repo_from_git(directory: Path | None = None) -> str | None:
         )
     except (subprocess.SubprocessError, OSError):
         return None
-    match = _GITHUB_REMOTE_RE.search(result.stdout.strip())
+    match = GITHUB_REMOTE_RE.search(result.stdout.strip())
     return match.group(1) if match else None
 
-class _Asker:
+class Asker:
     """Prompts that fall back to defaults when running non-interactively."""
 
     def __init__(self, interactive: bool):
@@ -75,12 +75,12 @@ class _Asker:
         return answer.startswith("y")
 
 
-def _step(number: int, total: int, title: str, optional: bool = False) -> None:
+def step(number: int, total: int, title: str, optional: bool = False) -> None:
     tag = " [dim](optional — press Enter to skip)[/dim]" if optional else ""
     console.print(f"\n[bold cyan]({number}/{total})[/bold cyan] [bold]{title}[/bold]{tag}")
 
 
-def _validate_api_key(provider: str, key: str, base_url: str | None = None) -> bool:
+def validate_api_key(provider: str, key: str, base_url: str | None = None) -> bool:
     instance = ProviderFactory.create_provider(
         ProviderType(provider), {"api_key": key, "base_url": base_url}
     )
@@ -95,9 +95,9 @@ def _validate_api_key(provider: str, key: str, base_url: str | None = None) -> b
         return asyncio.run(check())
 
 
-def _setup_provider(
+def setup_provider(
     auth: AuthManager,
-    ask: _Asker,
+    ask: Asker,
     requested: str | None,
     reconfigure: bool,
     base_url: str | None = None,
@@ -141,21 +141,21 @@ def _setup_provider(
             console.print("[red]✗ An API key is required — nothing else works "
                           "without it.[/red]")
             raise typer.Exit(1)
-        if _validate_api_key(provider, key, base_url):
-            _store_api_key(auth, provider, key)
+        if validate_api_key(provider, key, base_url):
+            store_api_key(auth, provider, key)
             console.print("  [green]✓[/green] Key validated and stored")
             return provider
         console.print("  [yellow]⚠ The API rejected that key.[/yellow]")
         if attempt < 2 and ask.confirm("Try again?", default=True):
             continue
         if ask.confirm("Store it anyway?", default=False):
-            _store_api_key(auth, provider, key)
+            store_api_key(auth, provider, key)
             return provider
         raise typer.Exit(1)
     return provider
 
 
-def _store_api_key(auth: AuthManager, provider: str, key: str) -> None:
+def store_api_key(auth: AuthManager, provider: str, key: str) -> None:
     try:
         auth.set_api_key(provider, key)
     except RuntimeError as e:
@@ -167,10 +167,10 @@ def _store_api_key(auth: AuthManager, provider: str, key: str) -> None:
         raise typer.Exit(1) from e
 
 
-def _setup_github(
+def setup_github(
     auth: AuthManager,
     config: Config,
-    ask: _Asker,
+    ask: Asker,
     *,
     requested_repo: str | None,
     base_branch: str | None,
@@ -244,15 +244,15 @@ def _setup_github(
             test_command=resolved_test_command,
         ))
 
-    _setup_github_token(auth, ask, repo, reconfigure=reconfigure)
+    setup_github_token(auth, ask, repo, reconfigure=reconfigure)
 
 
-def _setup_github_token(
-    auth: AuthManager, ask: _Asker, repo: str, *, reconfigure: bool
+def setup_github_token(
+    auth: AuthManager, ask: Asker, repo: str, *, reconfigure: bool
 ) -> None:
     if auth.has_github_token() and not reconfigure:
         console.print("  [green]✓[/green] GitHub token already stored")
-        _report_push_access(auth, repo)
+        report_push_access(auth, repo)
         return
 
     console.print(
@@ -273,10 +273,10 @@ def _setup_github_token(
     except RuntimeError as e:
         console.print(f"  [red]✗ Could not store the token: {e}[/red]")
         return
-    _report_push_access(auth, repo)
+    report_push_access(auth, repo)
 
 
-def _report_push_access(auth: AuthManager, repo: str) -> None:
+def report_push_access(auth: AuthManager, repo: str) -> None:
     """Warn early if the token cannot push — the daemon would fail much later."""
     token = auth.get_github_token()
     if not token:
@@ -301,10 +301,10 @@ def _report_push_access(auth: AuthManager, repo: str) -> None:
         )
 
 
-def _setup_error_sources(
+def setup_error_sources(
     auth: AuthManager,
     config: Config,
-    ask: _Asker,
+    ask: Asker,
     *,
     log_paths: str | None,
     github_actions: bool | None,
@@ -382,7 +382,7 @@ def setup(
 ):
     """Configure maajun: the provider key, GitHub, and the error sources."""
     path = config_path or default_config_path()
-    ask = _Asker(interactive=not non_interactive)
+    ask = Asker(interactive=not non_interactive)
     auth = AuthManager()
     config = load_config(path)
 
@@ -393,30 +393,30 @@ def setup(
     ))
 
     total = 3
-    _step(1, total, "AI provider")
-    config.ai.provider = _setup_provider(
+    step(1, total, "AI provider")
+    config.ai.provider = setup_provider(
         auth, ask, provider, reconfigure, config.ai.base_url
     )
 
-    _step(2, total, "GitHub", optional=True)
-    _setup_github(
+    step(2, total, "GitHub", optional=True)
+    setup_github(
         auth, config, ask,
         requested_repo=repo, base_branch=base_branch, mode=mode,
         test_command=test_command, reconfigure=reconfigure,
     )
 
-    _step(3, total, "Error sources", optional=True)
-    _setup_error_sources(
+    step(3, total, "Error sources", optional=True)
+    setup_error_sources(
         auth, config, ask,
         log_paths=logs, github_actions=github_actions,
     )
 
     config.save(path)
     console.print(f"\n[green]✓ Wrote {path}[/green]")
-    _print_summary(config, auth)
+    print_summary(config, auth)
 
 
-def _print_summary(config: Config, auth: AuthManager) -> None:
+def print_summary(config: Config, auth: AuthManager) -> None:
     repos = config.github.get_all_repos()
     has_token = auth.has_github_token()
     sections, ok = build_status(
