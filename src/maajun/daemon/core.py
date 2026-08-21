@@ -29,15 +29,13 @@ from maajun.vcs import CommandResult, GitHubClient, GitWorkspace
 
 log = logging.getLogger(__name__)
 
-# How many commits of history to offer the model for deploy blame.
+# Commits offered to the model for deploy blame.
 RECENT_COMMIT_LIMIT = 15
 LOCAL_REPO_LABEL = "(local)"
 
 ProgressCallback = Callable[[str], None]
 NoticeCallback = Callable[[str, str], None]
 
-# Used since None is not callable and the daemon's constructor requires a
-# callable for progress and notice.
 def no_operation(_: str) -> None:
     pass
 
@@ -144,18 +142,12 @@ class Daemon:
         self.local_mode = local_mode
         self.progress = progress or no_operation
         self.on_notice = on_notice
-        # UTC day we have already warned about hitting the spend cap on.
-        self.budget_warned_for = ""
-        # Incidents analyzed so far in the current poll cycle.
+        self.budget_warned_for = ""  # UTC day already warned about
         self.handled_this_cycle = 0
-        # What the most recent handled incident published. Incidents are
-        # processed one at a time, so a single slot is unambiguous, and it
-        # spares every caller from re-deriving the artifact from the mode.
+        # One slot is enough: incidents are handled one at a time.
         self.last_artifact_kind: str | None = None
-        # Per-daemon, not module-global: a global one stays set after the
-        # first shutdown, so a second Daemon in the same process — a test, a
-        # supervisor restarting in-process — returned from run() immediately
-        # without polling anything.
+        # Per-daemon: a global one stays set, so a second Daemon in the same
+        # process returned from run() without polling anything.
         self.shutdown = asyncio.Event()
 
     def notice(self, message: str, level: str = "info") -> None:
@@ -276,8 +268,7 @@ class Daemon:
             while not self.shutdown.is_set():
                 await self.poll_once(dry_run=dry_run)
                 if once:
-                    # Drain any carried-over partial state from monitors (e.g. a
-                    # trailing traceback still in a log buffer) before exiting.
+                    # Drain partial state, e.g. a half-read traceback.
                     for monitor in self.monitors:
                         try:
                             events = await monitor.flush()
@@ -303,13 +294,9 @@ class Daemon:
     def install_signal_handlers(self, loop) -> list[int]:
         """Ask the loop to set self.shutdown on SIGTERM/SIGINT.
 
-        Returns what was installed, so run() can take them off again — the
-        loop outlives one daemon, and a handler left pointing at a finished
-        daemon's event would silently do nothing for the next one.
-
-        add_signal_handler is Unix-only; on Windows the proactor loop raises
-        NotImplementedError and Ctrl-C arrives as KeyboardInterrupt instead,
-        which the CLI already catches.
+        Returns what was installed so run() can remove it: the loop outlives
+        one daemon. Unix-only — Windows raises NotImplementedError and
+        delivers Ctrl-C as KeyboardInterrupt, which the CLI catches.
         """
         installed: list[int] = []
         for sig in (signal.SIGTERM, signal.SIGINT):
@@ -377,19 +364,14 @@ class Daemon:
         label = self.repo_label(repo_config)
         handled: list[str] = []
         for event in events:
-            # Attribute the error before it is recorded: the monitor knows
-            # which repo it was configured for, the event does not.
+            # The monitor knows its repo; the event does not.
             event.repo = repo_config.repo
             if not self.store.record(event):
                 log.debug("known error fp=%s repo=%s", event.fingerprint, label)
                 continue
             if not dry_run and (self.over_budget() or self.cycle_full()):
-                # Left recorded at status 'new', which a later poll picks up.
-                # This used to call forget(), deleting the row outright: while
-                # the cap held, every poll re-inserted and re-deleted it, so
-                # the sighting count never accumulated and first_seen ended up
-                # being whenever the cap lifted rather than when the error
-                # actually started.
+                # Left at 'new' for a later poll. Deleting the row instead
+                # reset first_seen and the sighting count every cycle.
                 log.debug(
                     "deferring fp=%s repo=%s until there is budget",
                     event.fingerprint, label,
@@ -400,9 +382,7 @@ class Daemon:
                 event.fingerprint, label, event.message,
             )
             self.notice(f"New error in {label}: {event.message[:80]}", "info")
-            # Counted before the attempt, not after it succeeds: the limit
-            # exists to bound AI calls, and a failed incident has already
-            # made (and paid for) one.
+            # Counted before the attempt: a failed one still cost an AI call.
             self.handled_this_cycle += 1
             try:
                 destination = await self.handle_incident(
@@ -500,10 +480,8 @@ class Daemon:
     def record_failed_spend(self, event: ErrorEvent, agent) -> None:
         """Bank what an analysis spent before it failed, against its incident.
 
-        Best-effort: the incident is already failing, and losing the cost
-        figure is not a reason to lose the original exception with it. A
-        manual report has no recorded row, so the update simply matches
-        nothing — the same as mark_processed on that path.
+        Best-effort: losing the cost figure is no reason to lose the original
+        exception. A manual report has no row, so the update matches nothing.
         """
         try:
             prompt_tokens, completion_tokens, cost = extract_usage(
@@ -542,14 +520,13 @@ class Daemon:
         opens_pull_request = repo_config.mode == "fix"
         if not dry_run and not self.local_mode:
             progress("Preparing workspace")
-            # The clone is needed either way — the agent reads the code from
-            # it — but only fix mode has a diff to put on a branch.
+            # The agent reads code from the clone either way; only fix mode
+            # needs a branch.
             await workspace.sync(repo_config.base_branch)
             if opens_pull_request:
                 await workspace.create_branch(branch, repo_config.base_branch)
 
-        # Appended after sync, not when the prompt was built: the clone has to
-        # exist before there is any history to read.
+        # After sync: there is no history to read until the clone exists.
         if blame_deploy:
             prompt += await self.recent_commits_section(repo_config, workspace)
 
@@ -561,16 +538,12 @@ class Daemon:
         try:
             response = await agent.chat(prompt)
         except BaseException:
-            # Every tool round is a billed request, and the analysis may have
-            # made thirty before it died. Reading the usage off the response
-            # would drop all of it, so a failed attempt banks its spend on the
-            # incident on the way out — otherwise the daily cap under-counts
-            # exactly the incidents that are retried hardest.
+            # There is no response to read the usage off, and the rounds it
+            # did make were billed. Bank them before the failure propagates.
             self.record_failed_spend(event, agent)
             raise
         finally:
-            # Free the agent's HTTP client; a long watch run creates one
-            # agent per incident and would otherwise leak connection pools.
+            # One agent per incident; a watch run would leak their pools.
             await agent.aclose()
         report = response.content.strip()
         prompt_tokens, completion_tokens, cost = extract_usage(
@@ -591,11 +564,8 @@ class Daemon:
                 event, report, (prompt_tokens, completion_tokens, cost), progress
             )
 
-        # Asked before the report file is written: that file is itself a
-        # change, so checking afterwards would always say the agent edited
-        # something. Fix mode is free to conclude that no code change is
-        # warranted, and a "fix" PR whose entire diff is an incident report
-        # wastes a review and a CI run.
+        # Asked before the report file is written — that file is itself a
+        # change, so afterwards the answer is always yes.
         unfixed = ""
         if opens_pull_request and not await workspace.has_changes():
             log.info(
@@ -628,8 +598,7 @@ class Daemon:
             recorded_branch = branch
             artifact_kind = ARTIFACT_PR
         else:
-            # Suggest mode changes no code, so a PR would be an empty diff that
-            # still demands review and triggers CI. An issue is the artifact.
+            # No code changed, so a PR would be an empty diff to review.
             progress("Filing issue")
             url = await self.github.create_issue(
                 repo_config.repo,

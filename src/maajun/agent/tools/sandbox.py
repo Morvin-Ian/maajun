@@ -10,8 +10,7 @@ from __future__ import annotations
 from collections.abc import Iterable
 from pathlib import Path
 
-# Files that exist to hold a credential. Refused even inside an allowed root:
-# a .env in the project directory is exactly the thing not to hand to a model.
+# Refused even inside an allowed root.
 SECRET_NAMES = frozenset({
     ".env", ".netrc", ".npmrc", ".pypirc", ".git-credentials", ".htpasswd",
     "credentials", "id_rsa", "id_dsa", "id_ecdsa", "id_ed25519",
@@ -19,8 +18,7 @@ SECRET_NAMES = frozenset({
 
 SECRET_SUFFIXES = (".pem", ".key", ".p12", ".pfx", ".keystore")
 
-# maajun's own record: every incident it has handled and every chat anyone has
-# had with it, in one file.
+# maajun's own record of every incident and conversation.
 PRIVATE_NAMES = frozenset({"incidents.db", "incidents.db-wal", "incidents.db-shm"})
 
 
@@ -46,13 +44,9 @@ class Sandbox:
     def readable(self, path: Path) -> bool:
         """Whether a file a tool found by itself may be opened.
 
-        refusal() gates the path a tool was *handed*; this gates every path it
-        then discovers. grep walks a directory it was allowed into and reads
-        whatever it finds there, so without this a .env one level down comes
-        back quoted verbatim — the exact thing refusal() exists to prevent.
-
-        Judged on the resolved path, so a symlink planted in the workspace
-        cannot be used to read its target outside.
+        refusal() gates the path a tool was *handed*; this gates what it then
+        discovers, so a .env one level down cannot come back through grep.
+        Judged on the resolved path, so a planted symlink cannot escape.
         """
         try:
             return not self.refusal(path.resolve())
