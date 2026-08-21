@@ -1,5 +1,7 @@
 """Tests for CLI awareness, execution, and gating."""
 
+import io
+
 import pytest
 
 from maajun.chat.permissions import chat_permissions, describe
@@ -14,7 +16,7 @@ from maajun.chat.tools.commands import (
 )
 
 
-def _tool(tools, name):
+def tool(tools, name):
     return next(t for t in tools if t.definition.name == name).executor
 
 
@@ -144,7 +146,7 @@ def test_parse_args_on_empty_input():
 def run_tool():
     from maajun.chat.tools.commands import command_tools
 
-    return _tool(command_tools(), "run_maajun_command")
+    return tool(command_tools(), "run_maajun_command")
 
 
 async def test_the_run_tool_reports_the_command_it_ran(run_tool, tmp_path):
@@ -188,10 +190,93 @@ async def test_a_failing_command_is_reported_not_raised(run_tool):
     assert "failed (exit 1)" in result
 
 
+# ---------------------------------------------------------------------------
+# Quieting the terminal while the capture is held
+# ---------------------------------------------------------------------------
+
+
+async def test_the_run_tool_quiets_the_terminal_around_the_capture(tmp_path):
+    """run_cli swaps sys.stdout process-wide from a worker thread. Rich
+    resolves sys.stdout on every write, so a spinner left running on the main
+    thread paints into the capture buffer instead of the terminal."""
+    import contextlib
+
+    from maajun.chat.tools.commands import command_tools
+
+    events = []
+
+    @contextlib.contextmanager
+    def quiet():
+        events.append("stopped")
+        yield
+        events.append("released")
+
+    run = tool(command_tools(quiet), "run_maajun_command")
+    config = tmp_path / "config.toml"
+    config.write_text('[ai]\nprovider = "deepseek"\n')
+
+    result = await run(command="config", args=f"-c {config}")
+    assert "succeeded" in result
+    assert events == ["stopped", "released"]
+
+
+async def test_a_refused_command_does_not_quiet_the_terminal(tmp_path):
+    """Nothing is captured, so there is no reason to take the spinner down."""
+    import contextlib
+
+    from maajun.chat.tools.commands import command_tools
+
+    events = []
+
+    @contextlib.contextmanager
+    def quiet():
+        events.append("stopped")
+        yield
+
+    run = tool(command_tools(quiet), "run_maajun_command")
+    assert "Refusing to run 'watch'" in await run(command="watch")
+    assert events == []
+
+
+async def test_the_default_quiet_scope_is_a_no_op(tmp_path):
+    """command_tools is usable without a session to quiet."""
+    from maajun.chat.tools.commands import command_tools
+
+    run = tool(command_tools(), "run_maajun_command")
+    config = tmp_path / "config.toml"
+    config.write_text('[ai]\nprovider = "deepseek"\n')
+    assert "succeeded" in await run(command="config", args=f"-c {config}")
+
+
+def test_the_chat_session_quiets_its_spinner(tmp_path):
+    """The scope the session actually hands down stops the Live region."""
+    from rich.console import Console
+
+    from maajun.chat.session import ChatSession, TurnView
+
+    console = Console(file=io.StringIO())
+    session = ChatSession.__new__(ChatSession)
+    session.view = TurnView(console)
+    session.view.waiting("Running run_maajun_command")
+    assert session.view.live is not None
+
+    with ChatSession.quiet(session):
+        assert session.view.live is None, "the spinner is down for the capture"
+
+
+def test_the_session_scope_tolerates_no_active_turn():
+    from maajun.chat.session import ChatSession
+
+    session = ChatSession.__new__(ChatSession)
+    session.view = None
+    with ChatSession.quiet(session):
+        pass
+
+
 async def test_listing_commands_marks_the_ones_it_cannot_run():
     from maajun.chat.tools.commands import command_tools
 
-    listing = await _tool(command_tools(), "list_maajun_commands")()
+    listing = await tool(command_tools(), "list_maajun_commands")()
     assert "status" in listing
     assert "[cannot be run here]" in listing
     watch_line = next(
@@ -205,7 +290,7 @@ async def test_listing_commands_marks_the_ones_it_cannot_run():
 # ---------------------------------------------------------------------------
 
 
-def _recording_confirm(answer):
+def recording_confirm(answer):
     asked = []
 
     def confirm(prompt):
@@ -216,7 +301,7 @@ def _recording_confirm(answer):
 
 
 async def test_read_only_commands_run_without_asking():
-    confirm, asked = _recording_confirm(False)
+    confirm, asked = recording_confirm(False)
     approve = chat_permissions(confirm)
 
     assert await approve("run_maajun_command", {"command": "status"}) is True
@@ -224,7 +309,7 @@ async def test_read_only_commands_run_without_asking():
 
 
 async def test_reading_a_config_value_does_not_ask():
-    confirm, asked = _recording_confirm(False)
+    confirm, asked = recording_confirm(False)
     approve = chat_permissions(confirm)
 
     assert await approve(
@@ -234,7 +319,7 @@ async def test_reading_a_config_value_does_not_ask():
 
 
 async def test_setting_a_config_value_asks_first():
-    confirm, asked = _recording_confirm(True)
+    confirm, asked = recording_confirm(True)
     approve = chat_permissions(confirm)
 
     assert await approve(
@@ -244,7 +329,7 @@ async def test_setting_a_config_value_asks_first():
 
 
 async def test_a_declined_mutation_is_not_run():
-    confirm, _ = _recording_confirm(False)
+    confirm, _ = recording_confirm(False)
     approve = chat_permissions(confirm)
 
     assert await approve(
@@ -253,7 +338,7 @@ async def test_a_declined_mutation_is_not_run():
 
 
 async def test_blocked_commands_are_denied_without_asking():
-    confirm, asked = _recording_confirm(True)
+    confirm, asked = recording_confirm(True)
     approve = chat_permissions(confirm)
 
     assert await approve("run_maajun_command", {"command": "reset"}) is False
@@ -261,7 +346,7 @@ async def test_blocked_commands_are_denied_without_asking():
 
 
 async def test_file_edits_still_ask():
-    confirm, asked = _recording_confirm(True)
+    confirm, asked = recording_confirm(True)
     approve = chat_permissions(confirm)
 
     assert await approve("edit_file", {"path": "/tmp/x.py"}) is True
@@ -276,3 +361,149 @@ def test_the_confirmation_shows_the_exact_command():
 
 def test_the_confirmation_omits_empty_arguments():
     assert describe("run_maajun_command", {"command": "status"}) == "maajun status"
+
+
+# ---------------------------------------------------------------------------
+# Running a command from inside the agent's event loop
+# ---------------------------------------------------------------------------
+
+
+async def test_a_command_that_runs_its_own_event_loop_still_works(monkeypatch):
+    """`status` and `report` call asyncio.run inside; nesting one is fatal.
+
+    The tool has to hand the CLI to a worker thread, or the two most useful
+    commands in the index answer with a RuntimeError.
+    """
+    import asyncio
+
+    from maajun.chat.tools import commands as module
+
+    def cli_with_its_own_loop(argv):
+        async def work():
+            return "did the thing"
+
+        return 0, asyncio.run(work())
+
+    monkeypatch.setattr(module, "run_cli", cli_with_its_own_loop)
+    run = tool(module.command_tools(), "run_maajun_command")
+
+    result = await run("status")
+    assert "did the thing" in result
+    assert "RuntimeError" not in result
+
+
+async def test_running_a_command_does_not_block_the_loop(monkeypatch):
+    import asyncio
+    import threading
+
+    from maajun.chat.tools import commands as module
+
+    started = threading.Event()
+
+    def slow_cli(argv):
+        started.wait(2)
+        return 0, "finished"
+
+    monkeypatch.setattr(module, "run_cli", slow_cli)
+    run = tool(module.command_tools(), "run_maajun_command")
+
+    task = asyncio.create_task(run("status"))
+    await asyncio.sleep(0)
+    started.set()
+    assert "finished" in await task
+
+
+# ---------------------------------------------------------------------------
+# Output the model can read
+# ---------------------------------------------------------------------------
+
+
+def test_box_drawing_is_redrawn_in_ascii():
+    from maajun.chat.tools.commands import plain
+
+    table = "┏━━━━━┓\n┃ hi  ┃\n┗━━━━━┛"
+    assert plain(table) == "| hi  |"
+
+
+def test_plain_keeps_ordinary_output_intact():
+    from maajun.chat.tools.commands import plain
+
+    assert plain("  ✓ API key for deepseek\n") == "✓ API key for deepseek"
+
+
+def test_output_is_captured_wider_than_a_default_terminal(monkeypatch):
+    """80 columns breaks repo names and URLs across lines mid-word."""
+    import os
+
+    from maajun.chat.tools.commands import CAPTURE_WIDTH
+
+    monkeypatch.delenv("COLUMNS", raising=False)
+    seen = {}
+
+    def record(argv):
+        seen["columns"] = os.environ.get("COLUMNS")
+        return 0, ""
+
+    monkeypatch.setattr("maajun.chat.tools.commands.cli_command", lambda: Recorder(record))
+    run_cli(["status"])
+    assert seen["columns"] == CAPTURE_WIDTH
+    assert "COLUMNS" not in os.environ
+
+
+class Recorder:
+    def __init__(self, record):
+        self.record = record
+
+    def main(self, args, **kwargs):
+        self.record(args)
+        return 0
+
+
+# ---------------------------------------------------------------------------
+# Seeing the change before approving it
+# ---------------------------------------------------------------------------
+
+
+def test_an_edit_is_described_by_its_diff():
+    text = describe(
+        "edit_file",
+        {"path": "/tmp/app.py", "old_string": "x = 1", "new_string": "x = 2"},
+    )
+    assert "/tmp/app.py" in text
+    assert "-x = 1" in text
+    assert "+x = 2" in text
+
+
+def test_a_new_file_is_described_by_its_size():
+    text = describe("write_file", {"path": "/tmp/does-not-exist.py", "content": "hi"})
+    assert "new file, 2 bytes" in text
+
+
+def test_an_overwrite_is_described_by_its_diff(tmp_path):
+    target = tmp_path / "app.py"
+    target.write_text("old line\n")
+
+    text = describe("write_file", {"path": str(target), "content": "new line\n"})
+    assert "-old line" in text
+    assert "+new line" in text
+
+
+def test_a_long_diff_is_cut_short():
+    from maajun.chat.permissions import DIFF_LINES
+
+    text = describe(
+        "edit_file",
+        {
+            "path": "/tmp/app.py",
+            "old_string": "\n".join(f"old {n}" for n in range(200)),
+            "new_string": "\n".join(f"new {n}" for n in range(200)),
+        },
+    )
+    assert "more diff lines" in text
+    assert len(text.splitlines()) < DIFF_LINES + 5
+
+
+def test_the_description_names_the_absolute_path(tmp_path):
+    """Whether the path is allowed at all is the sandbox's call, not this one."""
+    text = describe("write_file", {"path": str(tmp_path / "app.py"), "content": "x"})
+    assert str(tmp_path / "app.py") in text

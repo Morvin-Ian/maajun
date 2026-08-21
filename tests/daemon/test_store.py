@@ -132,11 +132,11 @@ def test_cost_since_only_counts_recent_incidents(tmp_path):
             fingerprint=fingerprint,
         ))
         store.mark_processed(fingerprint, branch="", pr_url="x", cost_usd=cost)
-    store._conn.execute(
+    store.conn.execute(
         "UPDATE incidents SET last_seen = ? WHERE fingerprint = ?",
         ("2020-01-01T00:00:00+00:00", "old"),
     )
-    store._conn.commit()
+    store.conn.commit()
 
     assert store.cost_since(utc_day_start_iso()) == 0.25
     assert store.total_cost() == 5.25
@@ -147,7 +147,7 @@ def test_cost_since_only_counts_recent_incidents(tmp_path):
 # ---------------------------------------------------------------------------
 
 
-def _event(fingerprint="fp1"):
+def fingerprinted_event(fingerprint="fp1"):
     return ErrorEvent(
         source="t", message="boom", details="boom", fingerprint=fingerprint,
     )
@@ -156,39 +156,39 @@ def _event(fingerprint="fp1"):
 def test_failed_incident_is_retried(tmp_path):
     """Regression: a transient GitHub 502 permanently blacklisted the error."""
     store = IncidentStore(tmp_path / "i.db")
-    assert store.record(_event()) is True
+    assert store.record(fingerprinted_event()) is True
     store.mark_failed("fp1")
 
-    assert store.record(_event()) is True  # retried, not skipped
+    assert store.record(fingerprinted_event()) is True  # retried, not skipped
 
 
 def test_retries_stop_after_max_attempts(tmp_path):
     from maajun.daemon.store import MAX_ATTEMPTS
 
     store = IncidentStore(tmp_path / "i.db")
-    store.record(_event())
+    store.record(fingerprinted_event())
     for _ in range(MAX_ATTEMPTS):
         store.mark_failed("fp1")
-        store.record(_event())
+        store.record(fingerprinted_event())
 
-    assert store.record(_event()) is False
+    assert store.record(fingerprinted_event()) is False
     assert store.get("fp1")["attempts"] == MAX_ATTEMPTS
 
 
 def test_processed_incident_is_never_retried(tmp_path):
     store = IncidentStore(tmp_path / "i.db")
-    store.record(_event())
+    store.record(fingerprinted_event())
     store.mark_processed("fp1", branch="", pr_url="u")
 
-    assert store.record(_event()) is False
+    assert store.record(fingerprinted_event()) is False
 
 
 def test_repeat_sighting_still_bumps_the_counter(tmp_path):
     store = IncidentStore(tmp_path / "i.db")
-    store.record(_event())
+    store.record(fingerprinted_event())
     store.mark_processed("fp1", branch="", pr_url="u")
-    store.record(_event())
-    store.record(_event())
+    store.record(fingerprinted_event())
+    store.record(fingerprinted_event())
 
     assert store.get("fp1")["count"] == 3
 
@@ -197,10 +197,10 @@ def test_exhausted_lists_permanently_failed_incidents(tmp_path):
     from maajun.daemon.store import MAX_ATTEMPTS
 
     store = IncidentStore(tmp_path / "i.db")
-    store.record(_event("gone"))
+    store.record(fingerprinted_event("gone"))
     for _ in range(MAX_ATTEMPTS):
         store.mark_failed("gone")
-    store.record(_event("fine"))
+    store.record(fingerprinted_event("fine"))
     store.mark_processed("fine", branch="", pr_url="u")
 
     assert [row["fingerprint"] for row in store.exhausted()] == ["gone"]
@@ -211,7 +211,7 @@ def test_exhausted_lists_permanently_failed_incidents(tmp_path):
 # ---------------------------------------------------------------------------
 
 
-def _in_repo(repo, details="ValueError: boom", fingerprint=""):
+def in_repo(repo, details="ValueError: boom", fingerprint=""):
     return ErrorEvent(
         source="test", message="boom", details=details, repo=repo,
         fingerprint=fingerprint,
@@ -225,21 +225,21 @@ def test_the_same_error_in_two_repos_is_two_incidents(store):
     repo's copy was silently dropped as already known — so it never got an
     issue.
     """
-    assert store.record(_in_repo("acme/api")) is True
-    assert store.record(_in_repo("acme/web")) is True
+    assert store.record(in_repo("acme/api")) is True
+    assert store.record(in_repo("acme/web")) is True
     assert sorted(row["repo"] for row in store.all()) == ["acme/api", "acme/web"]
 
 
 def test_a_repeat_in_one_repo_is_still_a_repeat(store):
-    event = _in_repo("acme/api")
+    event = in_repo("acme/api")
     assert store.record(event) is True
     store.mark_processed(event.fingerprint, "acme/api", branch="", pr_url="u")
 
-    assert store.record(_in_repo("acme/api")) is False
+    assert store.record(in_repo("acme/api")) is False
 
 
 def test_marking_one_repo_processed_leaves_the_other_new(store):
-    api, web = _in_repo("acme/api"), _in_repo("acme/web")
+    api, web = in_repo("acme/api"), in_repo("acme/web")
     store.record(api)
     store.record(web)
     store.mark_processed(api.fingerprint, "acme/api", branch="", pr_url="u")
@@ -249,7 +249,7 @@ def test_marking_one_repo_processed_leaves_the_other_new(store):
 
 
 def test_failing_in_one_repo_does_not_burn_the_others_retries(store):
-    api, web = _in_repo("acme/api"), _in_repo("acme/web")
+    api, web = in_repo("acme/api"), in_repo("acme/web")
     store.record(api)
     store.record(web)
     store.mark_failed(api.fingerprint, "acme/api")
@@ -259,7 +259,7 @@ def test_failing_in_one_repo_does_not_burn_the_others_retries(store):
 
 
 def test_forget_only_drops_the_named_repos_copy(store):
-    api, web = _in_repo("acme/api"), _in_repo("acme/web")
+    api, web = in_repo("acme/api"), in_repo("acme/web")
     store.record(api)
     store.record(web)
     store.forget(api.fingerprint, "acme/api")
@@ -269,9 +269,9 @@ def test_forget_only_drops_the_named_repos_copy(store):
 
 
 def test_all_can_be_filtered_to_one_repo(store):
-    store.record(_in_repo("acme/api", "ValueError: a"))
-    store.record(_in_repo("acme/web", "KeyError: b"))
-    store.record(_in_repo("acme/web", "TypeError: c"))
+    store.record(in_repo("acme/api", "ValueError: a"))
+    store.record(in_repo("acme/web", "KeyError: b"))
+    store.record(in_repo("acme/web", "TypeError: c"))
 
     assert len(store.all()) == 3
     assert len(store.all("acme/web")) == 2
@@ -279,8 +279,8 @@ def test_all_can_be_filtered_to_one_repo(store):
 
 
 def test_repos_lists_what_has_incidents(store):
-    store.record(_in_repo("acme/web", "ValueError: a"))
-    store.record(_in_repo("acme/api", "KeyError: b"))
+    store.record(in_repo("acme/web", "ValueError: a"))
+    store.record(in_repo("acme/api", "KeyError: b"))
 
     assert store.repos() == ["acme/api", "acme/web"]
 
@@ -293,7 +293,7 @@ def test_local_mode_incidents_record_an_empty_repo(store):
     assert store.get(event.fingerprint) is not None
 
 
-def _legacy_single_repo_db(path):
+def legacy_single_repo_db(path):
     """A database from before multi-repo support: no repo, no attempts."""
     import sqlite3
 
@@ -318,7 +318,7 @@ def _legacy_single_repo_db(path):
 def test_an_older_database_is_migrated_not_rejected(tmp_path):
     """History survives the upgrade — it used to have to be deleted."""
     path = tmp_path / "old.db"
-    _legacy_single_repo_db(path)
+    legacy_single_repo_db(path)
 
     store = IncidentStore(path)
     rows = store.all()
@@ -336,11 +336,11 @@ def test_an_older_database_is_migrated_not_rejected(tmp_path):
 def test_a_migrated_database_is_fully_usable(tmp_path):
     """The rebuilt table carries the new primary key, not just the columns."""
     path = tmp_path / "old.db"
-    _legacy_single_repo_db(path)
+    legacy_single_repo_db(path)
 
     store = IncidentStore(path)
     # Same fingerprint, different repo: only possible with PK (fingerprint, repo).
-    assert store.record(_in_repo("acme/api", fingerprint="abc123")) is True
+    assert store.record(in_repo("acme/api", fingerprint="abc123")) is True
     assert store.get("abc123", "acme/api") is not None
     assert store.get("abc123", "") is not None
     store.mark_failed("abc123", "acme/api")
@@ -350,10 +350,10 @@ def test_a_migrated_database_is_fully_usable(tmp_path):
 
 def test_migration_is_not_reapplied_on_reopen(tmp_path):
     path = tmp_path / "old.db"
-    _legacy_single_repo_db(path)
+    legacy_single_repo_db(path)
 
     first = IncidentStore(path)
-    first.record(_in_repo("acme/api"))
+    first.record(in_repo("acme/api"))
     first.close()
 
     second = IncidentStore(path)
@@ -380,7 +380,7 @@ def test_a_database_missing_only_one_column_is_upgraded_in_place(tmp_path):
     conn.close()
 
     store = IncidentStore(path)
-    store.record(_in_repo("acme/api"))
+    store.record(in_repo("acme/api"))
     assert store.all()[0]["attempts"] == 0
     store.close()
 
@@ -406,14 +406,14 @@ def test_a_database_from_a_newer_maajun_is_refused(tmp_path):
 def test_a_fresh_database_reopens_cleanly(tmp_path):
     path = tmp_path / "i.db"
     first = IncidentStore(path)
-    event = _in_repo("acme/api")
+    event = in_repo("acme/api")
     first.record(event)
     first.mark_processed(event.fingerprint, "acme/api", branch="", pr_url="u")
     first.close()
 
     second = IncidentStore(path)
     assert [row["repo"] for row in second.all()] == ["acme/api"]
-    assert second.record(_in_repo("acme/api")) is False
+    assert second.record(in_repo("acme/api")) is False
     second.close()
 
 
@@ -423,7 +423,7 @@ def test_a_fresh_database_reopens_cleanly(tmp_path):
 
 
 def test_mark_processed_keeps_the_report_and_what_it_produced(store):
-    store.record(_in_repo("acme/api", fingerprint="fp1"))
+    store.record(in_repo("acme/api", fingerprint="fp1"))
     store.mark_processed(
         "fp1", "acme/api",
         branch="maajun/incident-fp1",
@@ -438,7 +438,7 @@ def test_mark_processed_keeps_the_report_and_what_it_produced(store):
 
 def test_report_text_defaults_to_empty_rather_than_null(store):
     """Recall joins on this column; NULL would need handling at every reader."""
-    store.record(_in_repo("acme/api", fingerprint="fp1"))
+    store.record(in_repo("acme/api", fingerprint="fp1"))
     row = store.get("fp1", "acme/api")
     assert row["report_text"] == ""
     assert row["artifact_kind"] == ""
@@ -449,7 +449,7 @@ def test_migration_backfills_artifact_kind_from_the_old_columns(tmp_path):
     import sqlite3
 
     path = tmp_path / "old.db"
-    _legacy_single_repo_db(path)
+    legacy_single_repo_db(path)
     conn = sqlite3.connect(path)
     conn.execute(
         "INSERT INTO incidents (fingerprint, source, message, first_seen,"
@@ -478,9 +478,9 @@ def test_migration_backfills_artifact_kind_from_the_old_columns(tmp_path):
 def test_backfill_leaves_unprocessed_rows_without_a_kind(tmp_path):
     """A 'new' incident has produced nothing yet — don't invent an artifact."""
     path = tmp_path / "old.db"
-    _legacy_single_repo_db(path)
+    legacy_single_repo_db(path)
     store = IncidentStore(path)
-    store.record(_in_repo("acme/api", fingerprint="pending"))
+    store.record(in_repo("acme/api", fingerprint="pending"))
     assert store.get("pending", "acme/api")["artifact_kind"] == ""
     store.close()
 
@@ -492,31 +492,185 @@ def test_backfill_leaves_unprocessed_rows_without_a_kind(tmp_path):
 
 def test_an_unhandled_incident_is_picked_up_again(store):
     """'new' means recorded, not published — deferred or interrupted."""
-    assert store.record(_event()) is True
-    assert store.record(_event()) is True  # still unhandled
+    assert store.record(fingerprinted_event()) is True
+    assert store.record(fingerprinted_event()) is True  # still unhandled
 
 
 def test_an_unhandled_incident_keeps_accumulating_sightings(store):
     """Regression: the deferral path deleted the row, so count reset each poll."""
     for _ in range(4):
-        store.record(_event())
+        store.record(fingerprinted_event())
 
     assert store.get("fp1")["count"] == 4
 
 
 def test_first_seen_survives_repeated_deferral(store):
     """It used to become whenever the cap lifted, not when the error started."""
-    store.record(_event())
+    store.record(fingerprinted_event())
     started = store.get("fp1")["first_seen"]
     for _ in range(3):
-        store.record(_event())
+        store.record(fingerprinted_event())
 
     assert store.get("fp1")["first_seen"] == started
 
 
 def test_an_incident_processed_after_deferral_settles(store):
-    store.record(_event())
-    store.record(_event())
+    store.record(fingerprinted_event())
+    store.record(fingerprinted_event())
     store.mark_processed("fp1", branch="", pr_url="u")
 
-    assert store.record(_event()) is False
+    assert store.record(fingerprinted_event()) is False
+
+
+def test_chat_messages_written_before_the_index_are_still_searchable(tmp_path):
+    """The index has to be backfilled, or every old conversation goes missing."""
+    import sqlite3
+
+    from maajun.chat.memory import ChatMemory
+    from maajun.daemon.store import CHAT_SCHEMA, SCHEMA, has_fts
+
+    path = tmp_path / "pre-fts.db"
+    conn = sqlite3.connect(path)
+    conn.execute(SCHEMA)
+    for statement in CHAT_SCHEMA:
+        conn.execute(statement)
+    conn.execute(
+        "INSERT INTO chat_sessions (started_at, updated_at, title)"
+        " VALUES ('t0', 't0', 'checkout')"
+    )
+    conn.execute(
+        "INSERT INTO chat_messages (session_id, role, content, created_at)"
+        " VALUES (1, 'assistant', 'the checkout 500 was a KeyError', 't0')"
+    )
+    conn.execute("PRAGMA user_version = 3")
+    conn.commit()
+    conn.close()
+
+    memory = ChatMemory(path)
+    assert has_fts(memory.conn)
+    assert len(memory.search("checkout KeyError")) == 1
+    memory.close()
+
+
+def test_the_index_follows_new_and_deleted_messages(tmp_path):
+    from maajun.chat.memory import ChatMemory
+
+    memory = ChatMemory(tmp_path / "incidents.db")
+    session = memory.start_session()
+    memory.add_message(session, "user", "a timeout on payments")
+    assert len(memory.search("timeout payments")) == 1
+
+    memory.delete_session(session)
+    assert memory.search("timeout payments") == []
+    memory.close()
+
+
+# ---------------------------------------------------------------------------
+# Spend banked by an attempt that never finished
+# ---------------------------------------------------------------------------
+
+
+def test_add_spend_accumulates_rather_than_overwriting(store):
+    """mark_processed sets the totals for a finished incident; a failed
+    attempt adds to them, so three failed retries cost three times."""
+    event = make_event()
+    store.record(event)
+    store.add_spend(
+        event.fingerprint, prompt_tokens=1000, completion_tokens=200, cost_usd=0.004
+    )
+    store.add_spend(
+        event.fingerprint, prompt_tokens=500, completion_tokens=100, cost_usd=0.002
+    )
+    row = store.get(event.fingerprint)
+    assert row["prompt_tokens"] == 1500
+    assert row["completion_tokens"] == 300
+    assert row["cost_usd"] == pytest.approx(0.006)
+
+
+def test_spend_from_a_failed_attempt_counts_toward_the_cap(store):
+    """The whole point: cost_since backs daemon.max_usd_per_day, and an
+    analysis that died on its thirtieth tool round still cost thirty calls."""
+    event = make_event()
+    store.record(event)
+    store.mark_failed(event.fingerprint)
+    store.add_spend(event.fingerprint, prompt_tokens=9000, cost_usd=1.25)
+    assert store.cost_since("1970-01-01T00:00:00Z") == pytest.approx(1.25)
+
+
+def test_add_spend_of_nothing_is_a_no_op(store):
+    """A turn that failed before the first response reported no usage."""
+    event = make_event()
+    store.record(event)
+    store.add_spend(event.fingerprint, prompt_tokens=1, cost_usd=0.5)
+    store.add_spend(event.fingerprint)
+    assert store.get(event.fingerprint)["cost_usd"] == pytest.approx(0.5)
+
+
+def test_add_spend_for_an_unrecorded_incident_is_harmless(store):
+    """A manual report has no row; the update matches nothing, as with
+    mark_processed on that path."""
+    store.add_spend("never-seen", cost_usd=1.0)
+    assert store.total_cost() == 0
+
+
+# ---------------------------------------------------------------------------
+# Full-text index repair
+# ---------------------------------------------------------------------------
+
+
+def test_a_database_upgraded_without_fts5_is_indexed_on_a_later_open(tmp_path):
+    """migrate_to_4 tolerates a SQLite with no FTS5, and bumping user_version
+    would otherwise mark the file done with no index — permanently."""
+    from maajun.chat.memory import ChatMemory
+    from maajun.daemon.store import connect, has_fts
+
+    path = tmp_path / "incidents.db"
+    conn = connect(path)
+    for trigger in ("chat_messages_ai", "chat_messages_ad", "chat_messages_au"):
+        conn.execute(f"DROP TRIGGER {trigger}")
+    conn.execute("DROP TABLE chat_messages_fts")
+    conn.commit()
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 4
+    assert not has_fts(conn)
+    conn.close()
+
+    memory = ChatMemory(path)
+    assert memory.fts, "the index should be rebuilt on open, not skipped forever"
+
+    session = memory.start_session()
+    memory.add_message(session, "user", "the checkout flow raised a KeyError")
+    # Words in any order is the thing LIKE could not do.
+    assert memory.search("KeyError checkout", exclude_session=0)
+    memory.close()
+
+
+def test_messages_written_while_unindexed_are_searchable_after_repair(tmp_path):
+    """The repair rebuilds from chat_messages, so nothing written in the
+    meantime is lost to search."""
+    from maajun.chat.memory import ChatMemory
+    from maajun.daemon.store import connect
+
+    path = tmp_path / "incidents.db"
+    conn = connect(path)
+    for trigger in ("chat_messages_ai", "chat_messages_ad", "chat_messages_au"):
+        conn.execute(f"DROP TRIGGER {trigger}")
+    conn.execute("DROP TABLE chat_messages_fts")
+    conn.commit()
+    conn.close()
+
+    unindexed = ChatMemory(path)
+    # Undo the repair this open just performed, to stand in for a machine
+    # whose SQLite has no FTS5 at all: no index, and no triggers feeding it.
+    for trigger in ("chat_messages_ai", "chat_messages_ad", "chat_messages_au"):
+        unindexed.conn.execute(f"DROP TRIGGER {trigger}")
+    unindexed.conn.execute("DROP TABLE chat_messages_fts")
+    unindexed.conn.commit()
+    unindexed.fts = False
+    session = unindexed.start_session()
+    unindexed.add_message(session, "user", "a TimeoutError in the payments worker")
+    unindexed.close()
+
+    repaired = ChatMemory(path)
+    assert repaired.fts
+    assert repaired.search("payments TimeoutError", exclude_session=0)
+    repaired.close()

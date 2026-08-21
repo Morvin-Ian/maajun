@@ -83,7 +83,9 @@ line-length = 100
 src = ["src"]
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "UP", "B"]
+# W catches trailing whitespace and blank-line issues that reviews kept
+# picking up by hand.
+select = ["E", "F", "I", "UP", "B", "W"]
 
 [tool.ruff.lint.flake8-bugbear]
 extend-immutable-calls = ["typer.Option", "typer.Argument"]

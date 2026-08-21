@@ -1,9 +1,3 @@
-"""Animated terminal status indicator for multi-phase background tasks.
-
-A Rich live spinner used by `report` and `watch` to show the current phase
-and how long it has been running.
-"""
-
 from __future__ import annotations
 
 import time
@@ -24,28 +18,38 @@ class WorkingStatus:
     """
 
     def __init__(self, phase: str):
-        self._phase = phase
-        self._started = time.monotonic()
-        self._spinner = Spinner("dots", style="cyan")
+        self.phase = phase
+        self.started = time.monotonic()
+        self.spinner = Spinner("dots", style="cyan")
+        self.live: Live | None = None
 
     def set(self, phase: str) -> None:
-        if phase != self._phase:
-            self._phase = phase
-            self._started = time.monotonic()
+        if phase != self.phase:
+            self.phase = phase
+            self.started = time.monotonic()
+
+    @contextmanager
+    def paused(self) -> Generator[None, None, None]:
+        """Take the spinner off the screen while something else reads input. """
+        if self.live is None:
+            yield
+            return
+        self.live.stop()
+        try:
+            yield
+        finally:
+            self.live.start()
 
     def __rich_console__(self, console, options):
-        elapsed = int(time.monotonic() - self._started)
-        self._spinner.update(text=Text(f"{self._phase}… ({elapsed}s)", style="cyan"))
-        yield self._spinner
+        elapsed = int(time.monotonic() - self.started)
+        self.spinner.update(text=Text(f"{self.phase}… ({elapsed}s)", style="cyan"))
+        yield self.spinner
 
 
 @contextmanager
 def working(console: Console, phase: str) -> Generator[WorkingStatus, None, None]:
-    """Show a transient 'working' spinner until the block exits.
-
-    Yields the status so the caller can advance the phase label. The spinner
-    clears on exit so the final result prints cleanly beneath it.
-    """
+    """Show a transient 'working' spinner until the block exits. """
     status = WorkingStatus(phase)
-    with Live(status, console=console, refresh_per_second=8, transient=True):
+    with Live(status, console=console, refresh_per_second=8, transient=True) as live:
+        status.live = live
         yield status

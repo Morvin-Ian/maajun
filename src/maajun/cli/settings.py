@@ -8,7 +8,7 @@ import typer
 from rich.panel import Panel
 
 from maajun.auth import AuthManager
-from maajun.cli._shared import (
+from maajun.cli.shared import (
     app,
     configured_providers,
     console,
@@ -48,12 +48,12 @@ def main(ctx: typer.Context):
             border_style="green",
         ))
         console.print("\n[bold]Commands:[/bold]\n")
-        for name, help_text in _command_summaries(ctx):
+        for name, help_text in command_summaries(ctx):
             console.print(f"  [cyan]{name:<18}[/cyan]{help_text}")
         console.print("\n  Run [bold]maajun <command> --help[/bold] for details.\n")
 
 
-def _command_summaries(ctx: typer.Context) -> list[tuple[str, str]]:
+def command_summaries(ctx: typer.Context) -> list[tuple[str, str]]:
     """(name, one-line help) for every registered command.
 
     Generated from the Typer app rather than hand-maintained: the previous

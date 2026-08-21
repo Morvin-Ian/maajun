@@ -1,4 +1,5 @@
 import asyncio
+import inspect
 import logging
 import random
 from collections.abc import AsyncIterator
@@ -28,7 +29,8 @@ MAX_DELAY = 30.0
 
 NON_RETRYABLE = (AuthenticationError,)
 
-class ChatCompletionsProvider(AIProvider): 
+
+class ChatCompletionsProvider(AIProvider):
     name: str = ""
     base_url: str | None = None
     default_model: str = ""
@@ -46,8 +48,9 @@ class ChatCompletionsProvider(AIProvider):
         else:
             self.model = self.default_model
         self.client: AsyncOpenAI | None = None
+        self.stream_usage = True
 
-    def _prepared_tools(self, tools: list[ToolDefinition] | None) -> list[dict[str, Any]] | None:
+    def prepared_tools(self, tools: list[ToolDefinition] | None) -> list[dict[str, Any]] | None:
         # Deliberately uncached. This was memoized on id(tools), which never
         # hit — ToolRegistry.definitions() returns a fresh list every call —
         # and was unsound besides: CPython reuses the address of a freed list,
@@ -69,7 +72,7 @@ class ChatCompletionsProvider(AIProvider):
             await self.client.close()
             self.client = None
 
-    async def _retryable(self, coro_func, *args, **kwargs):
+    async def retryable(self, coro_func, *args, **kwargs):
         """Call coro_func with retries on transient errors (429, 500, 502, 503, connection)."""
         last_exc = None
         for attempt in range(MAX_RETRIES):
@@ -83,16 +86,20 @@ class ChatCompletionsProvider(AIProvider):
                 transient = isinstance(e, APIConnectionError) or (
                     isinstance(e, APIError) and status in (429, 500, 502, 503)
                 )
-                if transient:
-                    delay = min(MAX_DELAY, BASE_DELAY * (2 ** attempt) * (1 + random.random()))
-                    log.warning(
-                        "API error (attempt %d/%d): %s — retrying in %.1fs",
-                        attempt + 1, MAX_RETRIES, e, delay,
-                    )
-                    await asyncio.sleep(delay)
-                else:
+                # Nothing follows the last attempt, so sleeping before giving
+                # up just made the caller wait up to MAX_DELAY for an error it
+                # was always going to get.
+                if not transient or attempt == MAX_RETRIES - 1:
                     break
-        raise _wrap_error(last_exc)
+                delay = min(MAX_DELAY, BASE_DELAY * (2 ** attempt) * (1 + random.random()))
+                log.warning(
+                    "API error (attempt %d/%d): %s — retrying in %.1fs",
+                    attempt + 1, MAX_RETRIES, e, delay,
+                )
+                await asyncio.sleep(delay)
+        # `from last_exc`: the raise is outside the except block, so without
+        # it the provider's own traceback is dropped from the chain.
+        raise wrap_error(last_exc) from last_exc
 
     async def chat_completion(
         self,
@@ -105,9 +112,9 @@ class ChatCompletionsProvider(AIProvider):
         if not self.client:
             await self.initialize()
 
-        tool_defs = self._prepared_tools(tools)
+        tool_defs = self.prepared_tools(tools)
 
-        response = await self._retryable(
+        response = await self.retryable(
             self.client.chat.completions.create,
             model=self.model,
             messages=messages,
@@ -127,16 +134,17 @@ class ChatCompletionsProvider(AIProvider):
         max_tokens: int = 4096,
         **kwargs,
     ) -> AsyncIterator[StreamChunk]:
-        """Stream text deltas; emit accumulated tool_calls once at stream end."""
+        """Stream text deltas; emit tool_calls and usage once at stream end."""
         if not self.client:
             await self.initialize()
 
-        tool_defs = self._prepared_tools(tools)
-        tool_calls = _ToolCallAccumulator()
+        tool_defs = self.prepared_tools(tools)
+        tool_calls = ToolCallAccumulator()
+        usage: dict[str, int] | None = None
 
+        stream = None
         try:
-            stream = await self._retryable(
-                self.client.chat.completions.create,
+            stream = await self.open_stream(
                 model=self.model,
                 messages=messages,
                 tools=tool_defs,
@@ -147,6 +155,8 @@ class ChatCompletionsProvider(AIProvider):
             )
 
             async for chunk in stream:
+                if getattr(chunk, "usage", None):
+                    usage = usage_of(chunk.usage)
                 if not chunk.choices:
                     continue
                 delta = chunk.choices[0].delta
@@ -160,10 +170,40 @@ class ChatCompletionsProvider(AIProvider):
         except ProviderError:
             raise
         except APIError as e:
-            raise _wrap_error(e) from e
+            raise wrap_error(e) from e
+        finally:
+            # An abandoned stream — the caller stopped iterating, or a round
+            # raised — holds its connection out of the pool until the object
+            # is collected. A watch run makes one of these per tool round.
+            if stream is not None:
+                await close_quietly(stream)
 
         if tool_calls:
             yield "tool_calls", tool_calls.result()
+        if usage:
+            yield "usage", usage
+
+    async def open_stream(self, **kwargs):
+        """Start a stream, asking for token usage where the endpoint allows it.
+
+        Without stream_options a streamed turn reports no usage at all, so it
+        would cost real money and show as free. A gateway that doesn't
+        implement the option rejects the request naming it; that one is
+        retried plainly and the option is not offered again.
+        """
+        if self.stream_usage:
+            try:
+                return await self.retryable(
+                    self.client.chat.completions.create,
+                    stream_options={"include_usage": True},
+                    **kwargs,
+                )
+            except ProviderError as e:
+                if "stream_options" not in str(e):
+                    raise
+                log.info("endpoint rejected stream_options; usage will not be reported")
+                self.stream_usage = False
+        return await self.retryable(self.client.chat.completions.create, **kwargs)
 
     async def validate_credentials(self) -> bool:
         """Validate the credentials with a minimal request.
@@ -177,7 +217,7 @@ class ChatCompletionsProvider(AIProvider):
             if not self.client:
                 await self.initialize()
 
-            response = await self._retryable(
+            response = await self.retryable(
                 self.client.chat.completions.create,
                 model=self.model,
                 messages=[{"role": "user", "content": "Hello"}],
@@ -216,13 +256,7 @@ class ChatCompletionsProvider(AIProvider):
 
         content = self.clean_content(message.content or "")
 
-        usage = None
-        if response.usage:
-            usage = {
-                "prompt_tokens": response.usage.prompt_tokens,
-                "completion_tokens": response.usage.completion_tokens,
-                "total_tokens": response.usage.total_tokens,
-            }
+        usage = usage_of(response.usage) if response.usage else None
 
         return CompletionResponse(
             content=content,
@@ -235,7 +269,28 @@ class ChatCompletionsProvider(AIProvider):
         )
 
 
-class _ToolCallAccumulator:
+async def close_quietly(stream: Any) -> None:
+    """Release a stream, tolerating one that is finished, sync, or has none."""
+    closer = getattr(stream, "close", None)
+    if closer is None:
+        return
+    try:
+        result = closer()
+        if inspect.isawaitable(result):
+            await result
+    except Exception:
+        log.debug("could not close the response stream", exc_info=True)
+
+
+def usage_of(usage: Any) -> dict[str, int]:
+    return {
+        "prompt_tokens": usage.prompt_tokens,
+        "completion_tokens": usage.completion_tokens,
+        "total_tokens": usage.total_tokens,
+    }
+
+
+class ToolCallAccumulator:
     """Reassembles tool calls from stream deltas.
 
     The API sends each tool call fragmented across chunks: id and name arrive
@@ -244,14 +299,14 @@ class _ToolCallAccumulator:
     """
 
     def __init__(self) -> None:
-        self._calls: dict[int, dict[str, Any]] = {}
+        self.calls: dict[int, dict[str, Any]] = {}
 
     def __bool__(self) -> bool:
-        return bool(self._calls)
+        return bool(self.calls)
 
     def add(self, deltas: list[Any]) -> None:
         for delta in deltas:
-            call = self._calls.setdefault(delta.index, {
+            call = self.calls.setdefault(delta.index, {
                 "id": "",
                 "type": "function",
                 "function": {"name": "", "arguments": ""},
@@ -265,10 +320,10 @@ class _ToolCallAccumulator:
                     call["function"]["arguments"] += delta.function.arguments
 
     def result(self) -> list[dict[str, Any]]:
-        return [self._calls[i] for i in sorted(self._calls)]
+        return [self.calls[i] for i in sorted(self.calls)]
 
 
-def _wrap_error(e: APIError) -> ProviderError:
+def wrap_error(e: APIError) -> ProviderError:
     if isinstance(e, AuthenticationError):
         return ProviderError(
             "API key is invalid. Run `maajun setup` to update it."

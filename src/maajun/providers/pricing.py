@@ -30,31 +30,44 @@ DEFAULT_PRICING: dict[str, float] = {
     "output": max(rates["output"] for rates in PRICING.values()),
 }
 
-FALLBACK_MODEL = "deepseek-v4-flash"
-
 # Models already warned about, so an unpriced model is reported once and not
 # on every incident.
-_warned: set[str] = set()
+warned: set[str] = set()
 
 
-def pricing_for(model: str) -> dict[str, float]:
-    """Rates for a model, longest prefix first so families resolve correctly."""
+def pricing_for(model: str | None) -> dict[str, float]:
+    """Rates for a model, longest prefix first so families resolve correctly.
+
+    An unrecognised model — or none at all, from a gateway that does not name
+    what it ran — is costed at DEFAULT_PRICING, the dearest thing in the
+    table. Naming a cheap model as the fallback here is the tempting mistake:
+    it makes the unknown case *under*-report, which is the one direction a
+    spend cap must never fail in.
+    """
+    if not model:
+        warn_once("(unnamed)")
+        return DEFAULT_PRICING
     for name in sorted(PRICING, key=len, reverse=True):
         if model.startswith(name):
             return PRICING[name]
-    if model not in _warned:
-        _warned.add(model)
-        log.warning(
-            "No pricing entry for model %r — costing it at $%.2f/$%.2f per 1M "
-            "tokens. Reported spend and the daily cap will be approximate; add "
-            "it to providers/pricing.py to fix.",
-            model, DEFAULT_PRICING["input"], DEFAULT_PRICING["output"],
-        )
+    warn_once(model)
     return DEFAULT_PRICING
 
 
+def warn_once(model: str) -> None:
+    if model in warned:
+        return
+    warned.add(model)
+    log.warning(
+        "No pricing entry for model %r — costing it at $%.2f/$%.2f per 1M "
+        "tokens, the dearest maajun knows. Reported spend and the daily cap "
+        "will be approximate; add it to providers/pricing.py to fix.",
+        model, DEFAULT_PRICING["input"], DEFAULT_PRICING["output"],
+    )
+
+
 def compute_cost(
-    prompt_tokens: int, completion_tokens: int, model: str = FALLBACK_MODEL,
+    prompt_tokens: int, completion_tokens: int, model: str | None = None,
 ) -> float:
     """Cost in USD from token counts."""
     pricing = pricing_for(model)
@@ -74,4 +87,4 @@ def extract_usage(
         return 0, 0, 0.0
     prompt = usage.get("prompt_tokens", 0)
     completion = usage.get("completion_tokens", 0)
-    return prompt, completion, compute_cost(prompt, completion, model or FALLBACK_MODEL)
+    return prompt, completion, compute_cost(prompt, completion, model)

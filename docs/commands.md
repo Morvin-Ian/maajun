@@ -184,16 +184,22 @@ you, and remembers what maajun has already done.
 ```bash
 maajun chat
 maajun chat --thinking            # use the provider's reasoning model
-maajun chat --session 12          # carry an earlier session's context in
+maajun chat --session 12          # carry an earlier session on
+maajun chat -p "am I ready to watch?"   # one answer, no REPL
 ```
 
 | Flag | Meaning |
 |------|---------|
 | `--provider NAME` | Override the configured AI provider for this session |
 | `--thinking` | Use the provider's reasoning model |
-| `-s, --session ID` | Replay an earlier session's recent messages as context |
+| `-s, --session ID` | Carry an earlier session on: its transcript, cost and context |
+| `-p, --prompt TEXT` | Answer one question and exit |
 | `--verbose` | Debug logging |
 | `-c, --config PATH` | Config file location |
+
+Answers stream as they are written, and each tool call is shown as it runs.
+With `-p` there is nobody to approve anything, so a command or edit that
+would need a `y` is declined and reported rather than assumed.
 
 **It knows the commands.** The command list is read from the CLI itself at
 start-up, so it is never out of date — a command added to maajun is one
@@ -209,8 +215,14 @@ waits for a `y`:
 > put acme/api into fix mode and give it pytest as the test command
 
 ▸ Run: maajun config github.mode fix -r acme/api
+  y = yes · a = always, for this tool · n = no · anything else = what to do instead
   Run it? (y/N): y
 ```
+
+`a` stops asking for that tool for the rest of the session. Anything that
+is not a yes, a no, or `a` is passed to the model as an instruction, so a
+declined command can be redirected — *"use acme/web instead"* — rather than
+just stopped.
 
 `watch`, `reset`, and `sign-out` are never run from chat — the first would
 hang the session, and the other two are too destructive to infer from a
@@ -218,8 +230,16 @@ sentence. Chat gives you the command to type instead. `setup` needs
 `--non-interactive` (it cannot store a new API key that way).
 
 It can also read your code (`read_file`, `grep`, `glob`, `list_dir`,
-`git_status`) and edit files, which asks permission per file. There is no
-shell tool in any mode.
+`git_status`) and edit files. An edit asks permission per file and shows you
+the diff first.
+
+Those tools reach three places and no others: the directory you ran `maajun
+chat` in, `daemon.workdir`, and the log files listed in your config. A path
+outside them is refused outright rather than approved with a warning — and
+credential files (`.env`, `id_rsa`, `*.pem`, `.netrc`, `.git-credentials`),
+anything under `.git/`, and maajun's own `incidents.db` are refused wherever
+they sit. Ask it to read your `.env` and it will tell you it cannot. There is
+no shell tool in any mode.
 
 **It remembers.** Every incident maajun has handled — the error, the
 analysis, the issue or PR it opened, what it cost — is searchable, as are
@@ -227,9 +247,12 @@ your past chat sessions:
 
 ```
 > what did that checkout KeyError turn out to be?
-> which PRs have you opened against acme/api?
-> what have I spent this month?
+> which PRs have you opened against acme/api this month?
+> what did we decide about fix mode last week?
 ```
+
+Both searches match on words in any order rather than on one exact phrase,
+and both take a date range, so half-remembered references land.
 
 Incidents analyzed before you upgraded are still listed, but only ones
 handled from this version on carry their report text — older rows predate
@@ -245,14 +268,24 @@ the column and show the issue or PR link alone.
 | `/history` | This session so far |
 | `/cost` | What this session and all chats have cost |
 | `/clear` | Forget this session's context; the record is kept and stays searchable |
+| `/new` | Start a fresh session |
+| `/resume <id>` | Carry an earlier session on, in place |
+| `/model [name]` | Show or switch the model |
+| `/provider [name]` | Show or switch the AI provider (a key must already be stored) |
+| `/forget <id\|all>` | Delete a stored conversation, or all of them |
 | `/exit` | Leave |
+
+The prompt keeps a history across sessions (up-arrow) and completes slash
+commands on Tab. A message that merely starts with a path — *"/var/log/app.log
+is full of errors"* — is a message, not a command.
 
 #### Cost
 
-Chat spend is recorded per session and shown by `/cost`, but it is **not**
-capped: `daemon.max_usd_per_day` pauses the daemon only. Cutting an
-interactive answer off mid-sentence is a worse trade than going slightly
-over, so the ceiling is yours to watch.
+Chat spend is recorded per session and shown by `/cost`, including the
+tokens a turn spent before it failed. `chat.max_usd_per_day` caps it —
+$5.00 by default, separate from `daemon.max_usd_per_day`. Past the cap a
+new question is refused with the command to raise it; a turn already
+running is never cut off mid-sentence. Set it to `0` for no ceiling.
 
 Sessions and messages live in the same database as the incidents
 (`<daemon.workdir>/incidents.db`), which is what lets a single question

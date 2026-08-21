@@ -38,7 +38,7 @@ async def test_poll_returns_events(monitor, monkeypatch):
 
         return FakeResp()
 
-    monkeypatch.setattr(monitor._client, "get", mock_get)
+    monkeypatch.setattr(monitor.client, "get", mock_get)
 
     events = await monitor.poll()
     assert len(events) == 1
@@ -64,7 +64,7 @@ async def test_poll_deduplicates(monitor, monkeypatch):
 
         return FakeResp()
 
-    monkeypatch.setattr(monitor._client, "get", mock_get)
+    monkeypatch.setattr(monitor.client, "get", mock_get)
 
     events1 = await monitor.poll()
     events2 = await monitor.poll()
@@ -85,7 +85,7 @@ async def test_poll_empty_response(monitor, monkeypatch):
 
         return FakeResp()
 
-    monkeypatch.setattr(monitor._client, "get", mock_get)
+    monkeypatch.setattr(monitor.client, "get", mock_get)
 
     events = await monitor.poll()
     assert events == []
@@ -96,7 +96,7 @@ async def test_poll_api_error_returns_empty(monitor, monkeypatch):
     async def mock_get(url, params=None):
         raise httpx.HTTPStatusError("403", request=None, response=httpx.Response(403))
 
-    monkeypatch.setattr(monitor._client, "get", mock_get)
+    monkeypatch.setattr(monitor.client, "get", mock_get)
 
     events = await monitor.poll()
     assert events == []
@@ -120,7 +120,7 @@ async def test_poll_multiple_runs(monitor, monkeypatch):
 
         return FakeResp()
 
-    monkeypatch.setattr(monitor._client, "get", mock_get)
+    monkeypatch.setattr(monitor.client, "get", mock_get)
 
     events = await monitor.poll()
     assert len(events) == 3
@@ -141,7 +141,7 @@ def test_run_to_event_minimal(monitor):
         "html_url": "",
         "head_sha": "",
     }
-    event = monitor._to_event(minimal)
+    event = monitor.to_event(minimal)
     assert "CI" in event.message
     # No head_sha to key on; the run id keeps it distinct.
     assert len(event.fingerprint) == 16
@@ -168,13 +168,13 @@ async def test_seen_ids_are_bounded(monkeypatch):
 
         return FakeResp()
 
-    monkeypatch.setattr(monitor._client, "get", mock_get)
+    monkeypatch.setattr(monitor.client, "get", mock_get)
     await monitor.poll()
 
-    assert len(monitor._seen) == 3
+    assert len(monitor.seen) == 3
     # Oldest ids evicted, newest kept.
-    assert "0" not in monitor._seen
-    assert "4" in monitor._seen
+    assert "0" not in monitor.seen
+    assert "4" in monitor.seen
 
 
 # ---------------------------------------------------------------------------
@@ -182,7 +182,7 @@ async def test_seen_ids_are_bounded(monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def _run(**overrides):
+def run(**overrides):
     run = {
         "id": 1, "name": "CI", "workflow_id": 100, "run_number": 1,
         "head_branch": "main", "event": "push", "conclusion": "failure",
@@ -198,33 +198,33 @@ def test_two_workflows_failing_on_one_commit_are_two_incidents(monitor):
     A commit that breaks the linter and the tests produced a single incident;
     every other workflow's failure was dropped as a duplicate.
     """
-    lint = monitor._to_event(_run(workflow_id=100, name="Lint"))
-    tests = monitor._to_event(_run(workflow_id=200, name="Tests"))
+    lint = monitor.to_event(run(workflow_id=100, name="Lint"))
+    tests = monitor.to_event(run(workflow_id=200, name="Tests"))
 
     assert lint.fingerprint != tests.fingerprint
 
 
 def test_the_same_workflow_and_commit_is_one_incident(monitor):
     """A re-run of the same failure must not be reported again."""
-    first = monitor._to_event(_run(id=1, run_number=1))
-    rerun = monitor._to_event(_run(id=2, run_number=2))
+    first = monitor.to_event(run(id=1, run_number=1))
+    rerun = monitor.to_event(run(id=2, run_number=2))
 
     assert first.fingerprint == rerun.fingerprint
 
 
 def test_the_same_workflow_on_two_commits_are_two_incidents(monitor):
-    a = monitor._to_event(_run(head_sha="aaa111"))
-    b = monitor._to_event(_run(head_sha="bbb222"))
+    a = monitor.to_event(run(head_sha="aaa111"))
+    b = monitor.to_event(run(head_sha="bbb222"))
 
     assert a.fingerprint != b.fingerprint
 
 
 def test_workflow_name_distinguishes_runs_without_a_workflow_id(monitor):
-    lint = monitor._to_event(_run(workflow_id=None, name="Lint"))
-    tests = monitor._to_event(_run(workflow_id=None, name="Tests"))
+    lint = monitor.to_event(run(workflow_id=None, name="Lint"))
+    tests = monitor.to_event(run(workflow_id=None, name="Tests"))
 
     assert lint.fingerprint != tests.fingerprint
 
 
 def test_the_fingerprint_matches_the_width_used_everywhere_else(monitor):
-    assert len(monitor._to_event(_run()).fingerprint) == 16
+    assert len(monitor.to_event(run()).fingerprint) == 16

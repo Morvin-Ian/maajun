@@ -63,6 +63,9 @@ workdir = "~/.local/share/maajun"   # clones, incident DB, state
 # repo_path = "/srv/myapp"          # local checkout to analyze in local mode
 # max_usd_per_day = 5.0             # stop analyzing past this daily spend (0 = no cap)
 # max_incidents_per_cycle = 10      # bound one poll's burst (0 = unlimited)
+
+[chat]
+# max_usd_per_day = 5.0             # `maajun chat`'s own daily budget (0 = no cap)
 ```
 
 At least one error source must be configured — log files or GitHub
@@ -435,6 +438,12 @@ Change or remove the ceiling:
 maajun config daemon.max_usd_per_day 20   # raise it
 maajun config daemon.max_usd_per_day 0    # 0 = no cap
 ```
+
+`maajun chat` is budgeted separately, by `chat.max_usd_per_day` (also
+`5.0`): it sums what today's chat sessions cost before each question and
+refuses a new one past the cap. An answer in progress is never truncated,
+and the tokens a failed turn spent are counted too — they were billed.
+
 
 Before each incident the daemon sums today's `cost_usd` (UTC day) and, if
 the cap is reached, stops analyzing, warns once, and keeps polling. Errors
