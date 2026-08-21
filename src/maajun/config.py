@@ -14,9 +14,9 @@ from maajun.monitors.defaults import (
 from maajun.providers.base import ProviderType
 from maajun.utils import PLACEHOLDER_REPO, is_valid_repo
 
-_LIST_SEP = ","
+LIST_SEP = ","
 LEGACY_GITHUB_SCALARS = ("repo", "base_branch", "mode", "test_command")
-_PER_REPO_FIELDS = ("base_branch", "mode", "log_files", "test_command")
+PER_REPO_FIELDS = ("base_branch", "mode", "log_files", "test_command")
 
 
 class ConfigError(ValueError):
@@ -70,10 +70,15 @@ poll_interval = 30
 # max_usd_per_day = 5.0            # default: 5.0
 # Most incidents analyzed per poll cycle (0 = unlimited).
 # max_incidents_per_cycle = 10
+
+[chat]
+# Stop answering in `maajun chat` once this much has been spent in a UTC day
+# (0 = no cap). Separate from the daemon's budget.
+# max_usd_per_day = 5.0
 """
 
 
-class _Base(BaseModel):
+class Base(BaseModel):
     """Base model that re-validates on assignment so `config.set(...)` and
     direct attribute writes are checked against the field validators."""
 
@@ -90,7 +95,7 @@ def default_data_dir() -> Path:
     return Path(base).expanduser() / "maajun"
 
 
-class AIProviderConfig(_Base):
+class AIProviderConfig(Base):
     provider: str = ProviderType.DEEPSEEK.value
     model: str | None = None  
     api_key: str | None = None
@@ -108,7 +113,7 @@ class AIProviderConfig(_Base):
         return value
 
 
-class RepoConfig(_Base):
+class RepoConfig(Base):
     repo: str = ""  # "owner/name"
     base_branch: str = "main"
     mode: str = "suggest"
@@ -130,13 +135,8 @@ class RepoConfig(_Base):
         return value
 
 
-class GitHubConfig(_Base):
-    """GitHub configuration: a list of repositories, each with its own settings.
-
-    A repository is always an entry in `repos`, even when there is only one.
-    The older form — `repo`/`base_branch`/`mode` as scalars directly under
-    [github] — is not read at all; reject_legacy_github refuses it at load.
-    """
+class GitHubConfig(Base):
+    """GitHub configuration: a list of repositories, each with its own settings. """
 
     repos: list[RepoConfig] = Field(default_factory=list)
 
@@ -144,7 +144,7 @@ class GitHubConfig(_Base):
         return self.repos
 
 
-class MonitorConfig(_Base):
+class MonitorConfig(Base):
     log_files: list[str] = Field(default_factory=list)
     error_pattern: str = DEFAULT_ERROR_PATTERN
     poll_interval: float = 30.0
@@ -169,7 +169,7 @@ class MonitorConfig(_Base):
         """
         return frozenset(
             value.strip().lower()
-            for value in self.json_level_values.split(_LIST_SEP)
+            for value in self.json_level_values.split(LIST_SEP)
             if value.strip()
         )
 
@@ -184,19 +184,27 @@ class MonitorConfig(_Base):
         )
 
 
-class DaemonConfig(_Base):
+class DaemonConfig(Base):
     workdir: str = str(default_data_dir())
     repo_path: str = ""
     max_usd_per_day: float = 5.0
     max_incidents_per_cycle: int = 10
 
 
-class Config(_Base):
+class ChatConfig(Base):
+    max_usd_per_day: float = 5.0
+
+
+class Config(Base):
     ai: AIProviderConfig = Field(default_factory=AIProviderConfig)
     github: GitHubConfig = Field(default_factory=GitHubConfig)
     monitor: MonitorConfig = Field(default_factory=MonitorConfig)
     daemon: DaemonConfig = Field(default_factory=DaemonConfig)
+    chat: ChatConfig = Field(default_factory=ChatConfig)
 
+    # Where this config was read from, so save() can write it back. The
+    # leading underscore is pydantic's: without it this is a model *field*,
+    # validated on load, written to the TOML, and listed by `maajun config`.
     _path: Path | None = None
 
     @classmethod
@@ -230,15 +238,15 @@ class Config(_Base):
             doc = tomlkit.document()
             doc.add(tomlkit.comment("Maajun daemon configuration."))
 
-        ai = _table(doc, "ai")
+        ai = table(doc, "ai")
         ai["provider"] = self.ai.provider
-        _set_or_del(ai, "model", self.ai.model)
-        _set_or_del(ai, "base_url", self.ai.base_url)
+        set_or_del(ai, "model", self.ai.model)
+        set_or_del(ai, "base_url", self.ai.base_url)
         ai["temperature"] = self.ai.temperature
         ai["max_tokens"] = self.ai.max_tokens
         ai["thinking_mode"] = self.ai.thinking_mode
 
-        github = _table(doc, "github")
+        github = table(doc, "github")
         for legacy in LEGACY_GITHUB_SCALARS:
             github.pop(legacy, None)
         if self.github.repos:
@@ -261,7 +269,7 @@ class Config(_Base):
             # Local mode: no repos at all, rather than a repo spelled "".
             github.pop("repos", None)
 
-        monitor = _table(doc, "monitor")
+        monitor = table(doc, "monitor")
         monitor["log_files"] = self.monitor.log_files
         monitor["error_pattern"] = self.monitor.error_pattern
         monitor["poll_interval"] = self.monitor.poll_interval
@@ -274,17 +282,22 @@ class Config(_Base):
             "burst_threshold",
             "burst_window_seconds",
         ):
-            _set_if_customized(monitor, self.monitor, name)
+            set_if_customized(monitor, self.monitor, name)
         if self.monitor.github_actions_repos:
             monitor["github_actions_repos"] = self.monitor.github_actions_repos
         else:
             monitor.pop("github_actions_repos", None)
 
-        daemon = _table(doc, "daemon")
+        daemon = table(doc, "daemon")
         daemon["workdir"] = self.daemon.workdir
-        _set_or_del(daemon, "repo_path", self.daemon.repo_path or None)
-        _set_if_customized(daemon, self.daemon, "max_usd_per_day")
-        _set_if_customized(daemon, self.daemon, "max_incidents_per_cycle")
+        set_or_del(daemon, "repo_path", self.daemon.repo_path or None)
+        set_if_customized(daemon, self.daemon, "max_usd_per_day")
+        set_if_customized(daemon, self.daemon, "max_incidents_per_cycle")
+
+        chat = table(doc, "chat")
+        set_if_customized(chat, self.chat, "max_usd_per_day")
+        if not chat:
+            doc.pop("chat", None)
 
         path.write_text(tomlkit.dumps(doc))
         self._path = path
@@ -299,7 +312,7 @@ class Config(_Base):
         self.github.repos = [*self.github.repos, repo]
 
 
-    def _resolve(self, key: str) -> tuple[BaseModel, str]:
+    def resolve(self, key: str) -> tuple[BaseModel, str]:
         """Map a dotted key to (owning model, field name). Raises ValueError
         for unknown sections/fields."""
         parts = key.split(".")
@@ -317,10 +330,12 @@ class Config(_Base):
             obj = self.monitor
         elif section == "daemon":
             obj = self.daemon
+        elif section == "chat":
+            obj = self.chat
         else:
             raise ValueError(
                 f"Unknown config section: {section}. "
-                "Expected one of: ai, github, monitor, daemon."
+                "Expected one of: ai, github, monitor, daemon, chat."
             )
 
         field_name = rest[0]
@@ -328,7 +343,7 @@ class Config(_Base):
             raise ValueError(f"Unknown field: {key}")
         return obj, field_name
 
-    def _resolve_repo_field(self, key: str) -> str:
+    def resolve_repo_field(self, key: str) -> str:
         """Validate a dotted key as a per-repo field and return the field name."""
         section, _, field_name = key.partition(".")
         if section != "github" or not field_name:
@@ -341,7 +356,7 @@ class Config(_Base):
             )
         return field_name
 
-    def _repo_entry(self, repo: str) -> "RepoConfig":
+    def repo_entry(self, repo: str) -> "RepoConfig":
         """The RepoConfig for `repo`, or a ValueError naming how to add it."""
         entry = next((rc for rc in self.github.repos if rc.repo == repo), None)
         if entry is None:
@@ -351,17 +366,17 @@ class Config(_Base):
             )
         return entry
 
-    def _per_repo_key(self, key: str) -> str | None:
+    def per_repo_key(self, key: str) -> str | None:
         """The RepoConfig field a bare `github.<field>` key refers to, if any.
 
         `github.mode` and friends have no top-level scalar to write any more —
         they name a field that exists once per repository — so they are handled
-        before _resolve, which would otherwise reject them as unknown.
+        before resolve, which would otherwise reject them as unknown.
         """
         section, _, field_name = key.partition(".")
         if section != "github":
             return None
-        return field_name if field_name in _PER_REPO_FIELDS else None
+        return field_name if field_name in PER_REPO_FIELDS else None
 
     def set(self, key: str, value: str, repo: str | None = None) -> None:
         """Set a config value using dot notation (e.g. 'github.mode' = 'fix').
@@ -374,11 +389,11 @@ class Config(_Base):
         an invalid value raises ValueError.
         """
         if repo is not None:
-            field_name = self._resolve_repo_field(key)
-            _set_field(self._repo_entry(repo), field_name, value)
+            field_name = self.resolve_repo_field(key)
+            set_field(self.repo_entry(repo), field_name, value)
             return
 
-        field_name = self._per_repo_key(key)
+        field_name = self.per_repo_key(key)
         if field_name is not None:
             if not self.github.repos:
                 raise ValueError(
@@ -386,39 +401,39 @@ class Config(_Base):
                     "apply to. Add one with 'maajun add-repo <owner/name>'."
                 )
             for repo_config in self.github.repos:
-                _set_field(repo_config, field_name, value)
+                set_field(repo_config, field_name, value)
             return
 
-        obj, field_name = self._resolve(key)
+        obj, field_name = self.resolve(key)
         if obj is self.github and field_name == "repos":
             raise ValueError(
                 "github.repos is a list of repositories, not a single value. "
                 "Use 'maajun add-repo <owner/name>' to add one."
             )
-        _set_field(obj, field_name, value)
+        set_field(obj, field_name, value)
 
     def get(self, key: str, repo: str | None = None) -> str:
         """Get a config value using dot notation. Secrets are masked."""
         if repo is not None:
-            field_name = self._resolve_repo_field(key)
-            return _render_value(getattr(self._repo_entry(repo), field_name))
+            field_name = self.resolve_repo_field(key)
+            return render_value(getattr(self.repo_entry(repo), field_name))
 
-        field_name = self._per_repo_key(key)
+        field_name = self.per_repo_key(key)
         if field_name is not None:
             repos = self.github.repos
             if not repos:
                 return ""
             if len(repos) == 1:
-                return _render_value(getattr(repos[0], field_name))
+                return render_value(getattr(repos[0], field_name))
             # Several repos can disagree, so name which value belongs to which.
             return ", ".join(
-                f"{rc.repo}={_render_value(getattr(rc, field_name))}" for rc in repos
+                f"{rc.repo}={render_value(getattr(rc, field_name))}" for rc in repos
             )
 
-        obj, field_name = self._resolve(key)
+        obj, field_name = self.resolve(key)
         if field_name == "api_key" and getattr(obj, field_name):
             return "***"
-        return _render_value(getattr(obj, field_name))
+        return render_value(getattr(obj, field_name))
 
 
 def reject_legacy_github(data: dict, path: Path) -> None:
@@ -452,7 +467,7 @@ def reject_legacy_github(data: dict, path: Path) -> None:
     )
 
 
-def _render_value(val) -> str:
+def render_value(val) -> str:
     """A config value as the CLI shows it: lists joined, None as empty."""
     if isinstance(val, list):
         if val and isinstance(val[0], RepoConfig):
@@ -461,7 +476,7 @@ def _render_value(val) -> str:
     return "" if val is None else str(val)
 
 
-def _table(parent, name: str):
+def table(parent, name: str):
     """Get an existing tomlkit table or create and attach a new one."""
     node = parent.get(name)
     if node is None:
@@ -470,7 +485,7 @@ def _table(parent, name: str):
     return node
 
 
-def _set_or_del(table, name: str, value) -> None:
+def set_or_del(table, name: str, value) -> None:
     """Set a key when value is truthy, otherwise remove it from the table."""
     if value:
         table[name] = value
@@ -478,7 +493,7 @@ def _set_or_del(table, name: str, value) -> None:
         table.pop(name, None)
 
 
-def _set_if_customized(table, model: BaseModel, name: str) -> None:
+def set_if_customized(table, model: BaseModel, name: str) -> None:
     """Write a field only when it differs from its default.
 
     Keeps generated configs free of a dozen tuning keys nobody touched, while
@@ -492,7 +507,7 @@ def _set_if_customized(table, model: BaseModel, name: str) -> None:
         table[name] = value
 
 
-def _set_field(obj: BaseModel, field_name: str, value: str) -> None:
+def set_field(obj: BaseModel, field_name: str, value: str) -> None:
     """Coerce a string to a Pydantic field's type and assign it.
 
     validate_assignment on the model runs the field validators, so an
@@ -510,7 +525,7 @@ def _set_field(obj: BaseModel, field_name: str, value: str) -> None:
     try:
         if get_origin(annotation) is list or annotation is list:
             coerced: object = [
-                item.strip() for item in value.split(_LIST_SEP) if item.strip()
+                item.strip() for item in value.split(LIST_SEP) if item.strip()
             ]
         elif field_type is bool:
             coerced = value.strip().lower() in ("true", "1", "yes", "on")
@@ -522,10 +537,10 @@ def _set_field(obj: BaseModel, field_name: str, value: str) -> None:
             coerced = value
         setattr(obj, field_name, coerced)
     except (ValueError, ValidationError) as e:
-        raise ValueError(_first_error(e)) from e
+        raise ValueError(first_error(e)) from e
 
 
-def _first_error(exc: Exception) -> str:
+def first_error(exc: Exception) -> str:
     """Render a Pydantic ValidationError as a single readable line."""
     if isinstance(exc, ValidationError):
         errors = exc.errors()

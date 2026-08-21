@@ -30,7 +30,7 @@ class StreamsFromChatMixin:
 
 
 @pytest.fixture(autouse=True)
-def _isolate_cwd(monkeypatch, tmp_path):
+def isolate_cwd(monkeypatch, tmp_path):
     """Any tool that writes a relative path must land in tmp, never the repo.
 
     write_file is a real executor here, so without this a fake tool call with
@@ -177,7 +177,7 @@ def config():
     return Config(ai=AIProviderConfig(provider="deepseek", api_key="x"))
 
 
-def _make_agent(config, provider):
+def make_agent(config, provider):
     """Create an agent with a custom provider and empty registry."""
     agent = Agent(config)
     agent.provider = provider
@@ -192,7 +192,7 @@ def _make_agent(config, provider):
 
 async def test_agent_executes_tool_and_returns_final_answer(config):
     provider = ToolCallingProvider()
-    agent = _make_agent(config, provider)
+    agent = make_agent(config, provider)
 
     response = await agent.chat("do something")
 
@@ -204,7 +204,7 @@ async def test_agent_executes_tool_and_returns_final_answer(config):
 
 async def test_agent_passes_tool_results_in_messages(config):
     provider = ToolCallingProvider()
-    agent = _make_agent(config, provider)
+    agent = make_agent(config, provider)
 
     await agent.chat("do something")
 
@@ -219,19 +219,22 @@ async def test_agent_passes_tool_results_in_messages(config):
 
 async def test_agent_multiple_tool_calls_per_round(config):
     provider = MultiToolProvider()
-    agent = _make_agent(config, provider)
+    agent = make_agent(config, provider)
 
     response = await agent.chat("multi")
 
     assert response.content == "done"
     assert provider.call_count == 3
-    # History should have user + assistant
-    assert len(agent.history) == 2
+    # The turn's tool calls and results stay in history, bracketed by the
+    # question and the answer.
+    assert agent.history[0] == {"role": "user", "content": "multi"}
+    assert agent.history[-1] == {"role": "assistant", "content": "done"}
+    assert any(entry["role"] == "tool" for entry in agent.history)
 
 
 async def test_agent_rolls_back_on_error(config):
     provider = ToolCallingProvider()
-    agent = _make_agent(config, provider)
+    agent = make_agent(config, provider)
 
     # Replace with a provider that always fails
     agent.provider = type(provider)()
@@ -251,7 +254,7 @@ async def test_agent_rolls_back_on_error(config):
 async def test_agent_tool_error_does_not_crash(config):
     """Tool returns error string but agent continues."""
     provider = FailToolProvider()
-    agent = _make_agent(config, provider)
+    agent = make_agent(config, provider)
 
     response = await agent.chat("try reading missing file")
 
@@ -265,32 +268,56 @@ async def test_agent_tool_error_does_not_crash(config):
 
 async def test_agent_clear_history(config):
     provider = ToolCallingProvider()
-    agent = _make_agent(config, provider)
+    agent = make_agent(config, provider)
     await agent.chat("hello")
-    assert len(agent.history) == 2
+    assert agent.history
     agent.clear_history()
     assert agent.history == []
 
 
-def _tool_messages(provider):
+async def test_the_next_turn_still_sees_the_last_turn_s_tool_results(config):
+    """Otherwise a follow-up question re-reads everything the first one read."""
+    provider = ToolCallingProvider()
+    agent = make_agent(config, provider)
+    await agent.chat("read something")
+
+    provider.call_count = 0
+    await agent.chat("and now?")
+
+    sent = provider.last_messages
+    assert any(m["role"] == "tool" for m in sent)
+
+
+async def test_only_the_newest_turn_keeps_its_tool_results(config):
+    """Older rounds collapse back to the conversation, so context stays bounded."""
+    provider = ToolCallingProvider()
+    agent = make_agent(config, provider)
+    for _ in range(3):
+        provider.call_count = 0
+        await agent.chat("again")
+
+    assert sum(1 for entry in agent.history if entry["role"] == "tool") == 1
+
+
+def tool_messages(provider):
     return [m for m in provider.last_messages if m["role"] == "tool"]
 
 
 async def test_dangerous_tool_denied_without_callback(config):
     provider = ToolCallingProvider()
-    agent = _make_agent(config, provider)
+    agent = make_agent(config, provider)
     agent.registry = ToolRegistry([WRITE_FILE])
 
     response = await agent.chat("run something")
 
     assert response.content == "final answer"
-    assert _tool_messages(provider)[0]["content"] == PERMISSION_DENIED
+    assert tool_messages(provider)[0]["content"] == PERMISSION_DENIED
 
 
 async def test_dangerous_tool_runs_when_approved(config, tmp_path):
     target = tmp_path / "x.txt"
     provider = ToolCallingProvider(path=str(target))
-    agent = _make_agent(config, provider)
+    agent = make_agent(config, provider)
     agent.registry = ToolRegistry([WRITE_FILE])
 
     approvals = []
@@ -303,13 +330,13 @@ async def test_dangerous_tool_runs_when_approved(config, tmp_path):
     await agent.chat("run something")
 
     assert approvals == [("write_file", {"path": str(target), "content": "hi"})]
-    assert "Wrote" in _tool_messages(provider)[0]["content"]
+    assert "Wrote" in tool_messages(provider)[0]["content"]
     assert target.read_text() == "hi"
 
 
 async def test_dangerous_tool_denied_by_callback(config):
     provider = ToolCallingProvider()
-    agent = _make_agent(config, provider)
+    agent = make_agent(config, provider)
     agent.registry = ToolRegistry([WRITE_FILE])
 
     async def deny(name, args):
@@ -318,12 +345,12 @@ async def test_dangerous_tool_denied_by_callback(config):
     agent.approve = deny
     await agent.chat("run something")
 
-    assert _tool_messages(provider)[0]["content"] == PERMISSION_DENIED
+    assert tool_messages(provider)[0]["content"] == PERMISSION_DENIED
 
 
 async def test_safe_tool_skips_approval(config):
     provider = FailToolProvider()  # calls read_file
-    agent = _make_agent(config, provider)
+    agent = make_agent(config, provider)
     agent.registry = default_registry()
 
     async def approve(name, args):
@@ -333,24 +360,24 @@ async def test_safe_tool_skips_approval(config):
     response = await agent.chat("read a file")
 
     assert response.content == "recovered"
-    assert "Error" in _tool_messages(provider)[0]["content"]
+    assert "Error" in tool_messages(provider)[0]["content"]
 
 
 async def test_chat_stream_denies_dangerous_tool_without_callback(config):
     provider = ToolCallingProvider(reply="adjusted")
-    agent = _make_agent(config, provider)
+    agent = make_agent(config, provider)
     agent.registry = ToolRegistry([WRITE_FILE])
 
     async for _ in agent.chat_stream("run something"):
         pass
 
-    assert _tool_messages(provider)[0]["content"] == PERMISSION_DENIED
+    assert tool_messages(provider)[0]["content"] == PERMISSION_DENIED
     assert agent.history[-1]["content"] == "adjusted"
 
 
 async def test_chat_stream_executes_tools(config):
     provider = ToolCallingProvider(reply="streamed answer")
-    agent = _make_agent(config, provider)
+    agent = make_agent(config, provider)
 
     chunks = [chunk async for chunk in agent.chat_stream("do something")]
 
@@ -396,7 +423,7 @@ class TwoReadToolProvider(StreamsFromChatMixin):
         return "fake"
 
 
-def _readonly_tool(name, executor):
+def readonly_tool(name, executor):
     return Tool(ToolDefinition(name, "", json_schema({})), executor)
 
 
@@ -414,10 +441,10 @@ async def test_read_only_tools_run_concurrently(config):
         return "b-done"
 
     provider = TwoReadToolProvider()
-    agent = _make_agent(config, provider)
+    agent = make_agent(config, provider)
     agent.registry = ToolRegistry([
-        _readonly_tool("read_a", read_a),
-        _readonly_tool("read_b", read_b),
+        readonly_tool("read_a", read_a),
+        readonly_tool("read_b", read_b),
     ])
 
     response = await agent.chat("read both")
@@ -430,7 +457,7 @@ async def test_read_only_tools_run_concurrently(config):
 
 async def test_chat_stream_multiple_tool_rounds(config):
     provider = MultiToolProvider()
-    agent = _make_agent(config, provider)
+    agent = make_agent(config, provider)
 
     chunks = [chunk async for chunk in agent.chat_stream("multi")]
 
@@ -484,7 +511,7 @@ class UsagePerRoundProvider(StreamsFromChatMixin):
 async def test_usage_sums_every_round_not_just_the_last(config):
     """Each tool round is a billed request; the spend cap reads these numbers."""
     provider = UsagePerRoundProvider(rounds=3)
-    agent = _make_agent(config, provider)
+    agent = make_agent(config, provider)
 
     response = await agent.chat("investigate")
 
@@ -494,7 +521,7 @@ async def test_usage_sums_every_round_not_just_the_last(config):
 
 async def test_usage_is_none_when_the_provider_reports_none(config):
     provider = ToolCallingProvider()
-    agent = _make_agent(config, provider)
+    agent = make_agent(config, provider)
 
     response = await agent.chat("do something")
 

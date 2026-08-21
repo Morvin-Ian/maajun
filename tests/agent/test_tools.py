@@ -216,7 +216,7 @@ async def test_grep_skips_oversized_files(tmp_path, monkeypatch):
     monkeypatch.setattr(search, "MAX_FILE_SIZE", 16)
     (tmp_path / "small.py").write_text("target\n")
     (tmp_path / "big.py").write_text("target " * 100 + "\n")
-    result = await search._grep(pattern="target", path=str(tmp_path))
+    result = await search.grep(pattern="target", path=str(tmp_path))
     assert "small.py" in result
     assert "big.py" not in result
 

@@ -34,7 +34,7 @@ FALLBACK_MODEL = "deepseek-v4-flash"
 
 # Models already warned about, so an unpriced model is reported once and not
 # on every incident.
-_warned: set[str] = set()
+warned: set[str] = set()
 
 
 def pricing_for(model: str) -> dict[str, float]:
@@ -42,8 +42,8 @@ def pricing_for(model: str) -> dict[str, float]:
     for name in sorted(PRICING, key=len, reverse=True):
         if model.startswith(name):
             return PRICING[name]
-    if model not in _warned:
-        _warned.add(model)
+    if model not in warned:
+        warned.add(model)
         log.warning(
             "No pricing entry for model %r — costing it at $%.2f/$%.2f per 1M "
             "tokens. Reported spend and the daily cap will be approximate; add "

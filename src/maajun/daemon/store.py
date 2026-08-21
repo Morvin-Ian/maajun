@@ -42,7 +42,7 @@ INCIDENT_COLUMNS: tuple[str, ...] = (
 # Bumped whenever a migration is appended to MIGRATIONS. Stored in the file's
 # PRAGMA user_version, which starts at 0 on databases written before any of
 # this existed.
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 # What an incident produced. Recorded explicitly because it used to be
 # inferred from `branch != ""`, which cannot tell a suggest-mode issue from a
@@ -59,11 +59,11 @@ class StoreError(RuntimeError):
     """An incident database that cannot be used as it stands."""
 
 
-def _columns_of(conn: sqlite3.Connection, table: str) -> list[str]:
+def columns_of(conn: sqlite3.Connection, table: str) -> list[str]:
     return [row["name"] for row in conn.execute(f"PRAGMA table_info({table})")]
 
 
-def _migrate_to_1(conn: sqlite3.Connection) -> None:
+def migrate_to_1(conn: sqlite3.Connection) -> None:
     """Create the incidents table, rebuilding an outdated one in place.
 
     Databases written before maajun tracked a schema version sit at 0 and may
@@ -75,7 +75,7 @@ def _migrate_to_1(conn: sqlite3.Connection) -> None:
     The alternative was what this replaces: refusing to open and telling the
     user to delete their incident history.
     """
-    existing = _columns_of(conn, "incidents")
+    existing = columns_of(conn, "incidents")
     if not existing:
         conn.execute(SCHEMA)
         return
@@ -97,7 +97,7 @@ def _migrate_to_1(conn: sqlite3.Connection) -> None:
     conn.execute("DROP TABLE incidents_outdated")
 
 
-def _add_column_if_missing(
+def add_column_if_missing(
     conn: sqlite3.Connection, table: str, name: str, ddl: str
 ) -> None:
     """ALTER in a column, tolerating a table that already has it.
@@ -106,12 +106,12 @@ def _add_column_if_missing(
     is created with every column present, so a later migration must be a
     no-op there while still upgrading an existing file.
     """
-    if name in _columns_of(conn, table):
+    if name in columns_of(conn, table):
         return
     conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {ddl}")
 
 
-def _migrate_to_2(conn: sqlite3.Connection) -> None:
+def migrate_to_2(conn: sqlite3.Connection) -> None:
     """Keep the analysis text and say what the incident produced.
 
     Only local mode ever wrote the report anywhere maajun could read it back;
@@ -119,8 +119,8 @@ def _migrate_to_2(conn: sqlite3.Connection) -> None:
     it makes an incident answerable offline — which is what `maajun chat`
     recalls when asked about a past error.
     """
-    _add_column_if_missing(conn, "incidents", "report_text", "TEXT NOT NULL DEFAULT ''")
-    _add_column_if_missing(
+    add_column_if_missing(conn, "incidents", "report_text", "TEXT NOT NULL DEFAULT ''")
+    add_column_if_missing(
         conn, "incidents", "artifact_kind", "TEXT NOT NULL DEFAULT ''"
     )
     # Backfill what the old rows can tell us: a branch means fix mode opened a
@@ -163,7 +163,7 @@ CHAT_SCHEMA = (
 )
 
 
-def _migrate_to_3(conn: sqlite3.Connection) -> None:
+def migrate_to_3(conn: sqlite3.Connection) -> None:
     """Add chat memory: what was discussed, and what it cost.
 
     In the same file as the incidents so a recall query can join the two —
@@ -173,8 +173,95 @@ def _migrate_to_3(conn: sqlite3.Connection) -> None:
         conn.execute(statement)
 
 
+FTS_SCHEMA = (
+    """
+    CREATE VIRTUAL TABLE IF NOT EXISTS chat_messages_fts USING fts5(
+        content,
+        content='chat_messages',
+        content_rowid='id',
+        tokenize='unicode61'
+    )
+    """,
+    """
+    CREATE TRIGGER IF NOT EXISTS chat_messages_ai AFTER INSERT ON chat_messages
+    BEGIN
+        INSERT INTO chat_messages_fts (rowid, content)
+        VALUES (new.id, new.content);
+    END
+    """,
+    """
+    CREATE TRIGGER IF NOT EXISTS chat_messages_ad AFTER DELETE ON chat_messages
+    BEGIN
+        INSERT INTO chat_messages_fts (chat_messages_fts, rowid, content)
+        VALUES ('delete', old.id, old.content);
+    END
+    """,
+    """
+    CREATE TRIGGER IF NOT EXISTS chat_messages_au AFTER UPDATE ON chat_messages
+    BEGIN
+        INSERT INTO chat_messages_fts (chat_messages_fts, rowid, content)
+        VALUES ('delete', old.id, old.content);
+        INSERT INTO chat_messages_fts (rowid, content)
+        VALUES (new.id, new.content);
+    END
+    """,
+    "INSERT INTO chat_messages_fts (chat_messages_fts) VALUES ('rebuild')",
+)
+
+
+def has_fts(conn: sqlite3.Connection) -> bool:
+    """Whether the full-text index exists in this file."""
+    row = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+        ("chat_messages_fts",),
+    ).fetchone()
+    return row is not None
+
+
+def ensure_fts(conn: sqlite3.Connection) -> bool:
+    """Create the full-text index if this file has none. Says whether it does.
+
+    Deliberately not left to the migration ladder alone. migrate_to_4 has to
+    tolerate a SQLite built without FTS5 — the alternative is refusing to open
+    the database at all — but swallowing the failure and bumping user_version
+    marked the file current with no index, and no later run would ever build
+    one. So the index is probed on every open instead: one sqlite_master
+    lookup, and it repairs itself the first time maajun runs on a build that
+    does have FTS5.
+
+    Runs no transaction of its own — migrate() already holds one when it calls
+    through, and a nested `with conn` would commit that early.
+    """
+    if has_fts(conn):
+        return True
+    try:
+        for statement in FTS_SCHEMA:
+            conn.execute(statement)
+    except sqlite3.OperationalError as e:
+        log.debug("full-text search is unavailable (%s); searches will use LIKE", e)
+        return False
+    return True
+
+
+def migrate_to_4(conn: sqlite3.Connection) -> None:
+    """Index chat messages for full-text search.
+
+    LIKE '%…%' only ever matched a query that appeared verbatim and
+    contiguously, so 'checkout KeyError' found nothing — which is exactly how
+    someone refers to a past conversation. Skipped without failing the upgrade
+    when SQLite was built without FTS5; the searches fall back to LIKE, and
+    ensure_fts picks the index up on a later open if that ever changes.
+    """
+    if not ensure_fts(conn):
+        log.warning(
+            "SQLite has no FTS5 here, so chat search will use LIKE. It will "
+            "be indexed automatically if maajun later runs on a build that "
+            "supports it."
+        )
+
+
 # Index i applies to a database at user_version i, taking it to i + 1.
-MIGRATIONS = (_migrate_to_1, _migrate_to_2, _migrate_to_3)
+MIGRATIONS = (migrate_to_1, migrate_to_2, migrate_to_3, migrate_to_4)
 
 # Incident lifecycle: new -> processed, or new -> failed -> new (retried) ->
 # ... -> failed permanently once MAX_ATTEMPTS is reached.
@@ -197,11 +284,15 @@ def connect(path: str | Path) -> sqlite3.Connection:
     # ungraceful kill more cleanly.
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA synchronous=NORMAL")
-    _migrate(conn, path)
+    migrate(conn, path)
+    # After migrate, which is what creates chat_messages for the index to
+    # shadow. Repairs a database that was upgraded on a build without FTS5.
+    ensure_fts(conn)
+    conn.commit()
     return conn
 
 
-def _migrate(conn: sqlite3.Connection, path: Path) -> None:
+def migrate(conn: sqlite3.Connection, path: Path) -> None:
     """Bring the database up to SCHEMA_VERSION, or explain why it can't be.
 
     Each migration runs in its own transaction and bumps user_version, so an
@@ -233,7 +324,7 @@ def _migrate(conn: sqlite3.Connection, path: Path) -> None:
 class IncidentStore:
     def __init__(self, path: str | Path):
         self.path = Path(path).expanduser()
-        self._conn = connect(self.path)
+        self.conn = connect(self.path)
 
     def record(self, event: ErrorEvent) -> bool:
         """Record a sighting. Returns True if this error should be handled.
@@ -254,28 +345,28 @@ class IncidentStore:
         error and the others were silently dropped as already known.
         """
         now = utcnow_iso()
-        existing = self._conn.execute(
+        existing = self.conn.execute(
             "SELECT status, attempts FROM incidents"
             " WHERE fingerprint = ? AND repo = ?",
             (event.fingerprint, event.repo),
         ).fetchone()
 
         if existing is None:
-            self._conn.execute(
+            self.conn.execute(
                 "INSERT INTO incidents"
                 " (fingerprint, repo, source, message, first_seen, last_seen)"
                 " VALUES (?, ?, ?, ?, ?, ?)",
                 (event.fingerprint, event.repo, event.source, event.message, now, now),
             )
-            self._conn.commit()
+            self.conn.commit()
             return True
 
-        self._conn.execute(
+        self.conn.execute(
             "UPDATE incidents SET last_seen = ?, count = count + 1"
             " WHERE fingerprint = ? AND repo = ?",
             (now, event.fingerprint, event.repo),
         )
-        self._conn.commit()
+        self.conn.commit()
         if existing["status"] == "new":
             # Recorded but never published: deferred by the spend cap, or
             # interrupted before it could be marked processed or failed.
@@ -309,7 +400,7 @@ class IncidentStore:
         report_text: str = "",
         artifact_kind: str = "",
     ) -> None:
-        self._conn.execute(
+        self.conn.execute(
             "UPDATE incidents SET status = 'processed', branch = ?, pr_url = ?,"
             " cost_usd = ?, prompt_tokens = ?, completion_tokens = ?,"
             " report_text = ?, artifact_kind = ?"
@@ -319,10 +410,38 @@ class IncidentStore:
                 report_text, artifact_kind, fp, repo,
             ),
         )
-        self._conn.commit()
+        self.conn.commit()
+
+    def add_spend(
+        self,
+        fp: str,
+        repo: str = NO_REPO,
+        *,
+        prompt_tokens: int = 0,
+        completion_tokens: int = 0,
+        cost_usd: float = 0.0,
+    ) -> None:
+        """Accumulate what an abandoned attempt already cost.
+
+        mark_processed *sets* the totals for an incident that finished. This
+        adds to them instead, for the analysis that died partway: every tool
+        round was a billed request, and the daily cap reads these numbers, so
+        a turn that failed on round thirty must not look free.
+        """
+        if not (prompt_tokens or completion_tokens or cost_usd):
+            return
+        self.conn.execute(
+            "UPDATE incidents SET"
+            " cost_usd = COALESCE(cost_usd, 0) + ?,"
+            " prompt_tokens = COALESCE(prompt_tokens, 0) + ?,"
+            " completion_tokens = COALESCE(completion_tokens, 0) + ?"
+            " WHERE fingerprint = ? AND repo = ?",
+            (cost_usd, prompt_tokens, completion_tokens, fp, repo),
+        )
+        self.conn.commit()
 
     def total_cost(self) -> float:
-        row = self._conn.execute(
+        row = self.conn.execute(
             "SELECT COALESCE(SUM(cost_usd), 0) as total FROM incidents"
         ).fetchone()
         return row["total"]
@@ -334,7 +453,7 @@ class IncidentStore:
         cost was actually incurred — an old incident re-analyzed today should
         count against today.
         """
-        row = self._conn.execute(
+        row = self.conn.execute(
             "SELECT COALESCE(SUM(cost_usd), 0) as total FROM incidents"
             " WHERE last_seen >= ?",
             (since,),
@@ -342,7 +461,7 @@ class IncidentStore:
         return row["total"]
 
     def total_tokens(self) -> dict[str, int]:
-        row = self._conn.execute(
+        row = self.conn.execute(
             "SELECT COALESCE(SUM(prompt_tokens), 0) as prompt,"
             " COALESCE(SUM(completion_tokens), 0) as completion"
             " FROM incidents"
@@ -351,23 +470,23 @@ class IncidentStore:
 
     def forget(self, fp: str, repo: str = NO_REPO) -> None:
         """Drop one repo's incident so a future poll treats the error as new."""
-        self._conn.execute(
+        self.conn.execute(
             "DELETE FROM incidents WHERE fingerprint = ? AND repo = ?", (fp, repo)
         )
-        self._conn.commit()
+        self.conn.commit()
 
     def mark_failed(self, fp: str, repo: str = NO_REPO) -> None:
         """Mark an attempt as failed and count it toward the retry limit."""
-        self._conn.execute(
+        self.conn.execute(
             "UPDATE incidents SET status = 'failed', attempts = attempts + 1"
             " WHERE fingerprint = ? AND repo = ?",
             (fp, repo),
         )
-        self._conn.commit()
+        self.conn.commit()
 
     def exhausted(self) -> list[dict]:
         """Incidents that failed MAX_ATTEMPTS times and are no longer retried."""
-        rows = self._conn.execute(
+        rows = self.conn.execute(
             "SELECT * FROM incidents WHERE status = 'failed' AND attempts >= ?"
             " ORDER BY last_seen DESC",
             (MAX_ATTEMPTS,),
@@ -375,7 +494,7 @@ class IncidentStore:
         return [dict(row) for row in rows]
 
     def get(self, fp: str, repo: str = NO_REPO) -> dict | None:
-        row = self._conn.execute(
+        row = self.conn.execute(
             "SELECT * FROM incidents WHERE fingerprint = ? AND repo = ?", (fp, repo)
         ).fetchone()
         return dict(row) if row else None
@@ -383,11 +502,11 @@ class IncidentStore:
     def all(self, repo: str | None = None) -> list[dict]:
         """Every incident, newest sighting first; one repo's when `repo` is given."""
         if repo is None:
-            rows = self._conn.execute(
+            rows = self.conn.execute(
                 "SELECT * FROM incidents ORDER BY last_seen DESC"
             ).fetchall()
         else:
-            rows = self._conn.execute(
+            rows = self.conn.execute(
                 "SELECT * FROM incidents WHERE repo = ? ORDER BY last_seen DESC",
                 (repo,),
             ).fetchall()
@@ -395,10 +514,10 @@ class IncidentStore:
 
     def repos(self) -> list[str]:
         """Distinct repos that have incidents, so a caller can offer a filter."""
-        rows = self._conn.execute(
+        rows = self.conn.execute(
             "SELECT DISTINCT repo FROM incidents ORDER BY repo"
         ).fetchall()
         return [row["repo"] for row in rows]
 
     def close(self) -> None:
-        self._conn.close()
+        self.conn.close()

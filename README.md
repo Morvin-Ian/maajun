@@ -163,6 +163,10 @@ it changes anything:
   Run it? (y/N): y
 ```
 
+Answers stream as they are written, and each command or file edit is shown
+as it runs. `maajun chat -p "..."` answers one question and exits, for a
+script or a keybinding.
+
 Read-only commands run straight away. `watch`, `reset`, and `sign-out` are
 never run from chat — it hands you the command instead. And because every
 incident, pull request, and issue is already in the database, so is the
@@ -173,8 +177,9 @@ history:
 > which PRs have you opened against acme/api this month?
 ```
 
-Past chat sessions are searchable too, and chat spend is recorded (`/cost`)
-though never capped — `daemon.max_usd_per_day` governs the daemon alone.
+Past chat sessions are searchable too — by words in any order, over any
+date range — and chat spend is recorded (`/cost`) and capped by
+`chat.max_usd_per_day`, separately from the daemon's budget.
 See the [command reference](https://github.com/Morvin-Ian/maajun/blob/main/docs/commands.md#maajun-chat)
 for the slash commands and the full permission model.
 
@@ -254,6 +259,9 @@ poll_interval = 30
 [daemon]
 workdir = "~/.local/share/maajun"   # clones, incident DB, state
 # max_usd_per_day = 5.0             # 0 = no cap
+
+[chat]
+# max_usd_per_day = 5.0             # `maajun chat`'s own budget; 0 = no cap
 ```
 
 At least one error source — log files or GitHub Actions — must be configured;
@@ -298,7 +306,12 @@ picked up later, not dropped.
 
 ```bash
 maajun config daemon.max_usd_per_day 20   # raise the cap; 0 disables it
+maajun config chat.max_usd_per_day 20     # the same, for `maajun chat`
 ```
+
+`maajun chat` has its own $5 daily cap. Past it a new question is refused
+with the command to raise it; an answer already being written is never cut
+off part-way.
 
 Every incident's exact token count and cost is recorded and shown by
 `maajun incidents`, and `--dry-run` prints what an analysis *would* have cost.
@@ -329,15 +342,27 @@ somewhat more than it actually spends.
 
 - **No shell access.** The agent has no bash tool in any mode; there is nothing
   to grant.
-- **Scoped writes.** `suggest` mode is strictly read-only. `fix` mode may edit
-  files only inside maajun's own clone under `daemon.workdir`, never your
-  running application.
+- **Scoped reads and writes.** Every file tool is confined to an explicit
+  set of directories, enforced by the tool layer rather than asked for in a
+  prompt. The daemon's agent sees only the clone it is analyzing; `maajun
+  chat` sees the directory you launched it in, `daemon.workdir`, and the log
+  files named in your config. `suggest` mode is read-only on top of that;
+  `fix` mode may edit inside the clone, never your running application.
+
+- **Secrets are refused, not merely unrequested.** `.env` files, SSH and TLS
+  keys, `.netrc`, `.git-credentials`, anything under `.git/`, and maajun's own
+  incident database cannot be opened by any tool, even when they sit inside an
+  allowed directory. What a tool reads goes to your AI provider — and, from the
+  daemon, into an issue or pull request.
 - **Verification you control.** `test_command` comes from your config, not from
   the model, so a fix cannot redirect its own verification.
 - **Chat proposes, you approve.** `maajun chat` runs read-only commands freely,
   but anything that writes config or opens a pull request shows the exact
-  command line and waits for a yes. `reset` and `sign-out` it will not run at
-  all. `run_maajun_command` reaches maajun's own subcommands and nothing else —
+  command line and waits for a yes — or for a reason not to, which is passed
+  on as an instruction rather than a bare refusal. A file edit shows its diff and the
+  absolute path, flagged when it falls outside the project directory and
+  `daemon.workdir`. `reset` and `sign-out` it will not run at all.
+  `run_maajun_command` reaches maajun's own subcommands and nothing else —
   it is not a shell.
 - **Token hygiene.** The GitHub token is passed to git via `GIT_ASKPASS`; it
   never lands in a remote URL, `.git/config`, or the process list.

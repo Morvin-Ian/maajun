@@ -14,9 +14,15 @@ MESSAGE_PREVIEW = 600
 def recall_tools(memory: ChatMemory, current_session: int) -> list[Tool]:
     """Build the recall tools bound to the session currently running."""
 
-    async def search_conversations(query: str, limit: int = 10) -> str:
+    async def search_conversations(
+        query: str, limit: int = 10, since: str = "", until: str = ""
+    ) -> str:
         hits = memory.search(
-            query, limit=max(1, limit), exclude_session=current_session
+            query,
+            limit=max(1, limit),
+            exclude_session=current_session,
+            since=since,
+            until=until,
         )
         if not hits:
             return f"No earlier conversation mentions {query!r}."
@@ -67,11 +73,25 @@ def recall_tools(memory: ChatMemory, current_session: int) -> list[Tool]:
                     {
                         "query": {
                             "type": "string",
-                            "description": "Text to look for in past messages",
+                            "description": (
+                                "Words to look for; a message matching all of "
+                                "them, in any order, is a hit"
+                            ),
                         },
                         "limit": {
                             "type": "integer",
                             "description": "Max matches to return (default 10)",
+                        },
+                        "since": {
+                            "type": "string",
+                            "description": (
+                                "Only messages from this UTC date onwards, "
+                                "e.g. '2026-08-01'"
+                            ),
+                        },
+                        "until": {
+                            "type": "string",
+                            "description": "Only messages up to this date",
                         },
                     },
                     required=["query"],

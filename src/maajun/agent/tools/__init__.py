@@ -8,6 +8,7 @@ from maajun.agent.tools.base import (
     resolve_path,
 )
 from maajun.agent.tools.files import EDIT_FILE, READ_FILE, WRITE_FILE
+from maajun.agent.tools.sandbox import Sandbox
 from maajun.agent.tools.search import GLOB, GREP, LIST_DIR
 from maajun.agent.tools.vcs_status import GIT_STATUS
 
@@ -22,8 +23,8 @@ BUILTIN_TOOLS: list[Tool] = [
 ]
 
 
-def default_registry() -> ToolRegistry:
-    return ToolRegistry(BUILTIN_TOOLS)
+def default_registry(sandbox: Sandbox | None = None) -> ToolRegistry:
+    return ToolRegistry(BUILTIN_TOOLS, sandbox)
 
 
 __all__ = [
@@ -36,6 +37,7 @@ __all__ = [
     "MAX_TOOL_RESULT_CHARS",
     "READ_FILE",
     "WRITE_FILE",
+    "Sandbox",
     "Tool",
     "ToolExecutor",
     "ToolRegistry",

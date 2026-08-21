@@ -13,7 +13,7 @@ from maajun.providers.factory import ProviderFactory
 
 
 @pytest.fixture(autouse=True)
-def _getpass_reads_stdin(monkeypatch):
+def getpass_reads_stdin(monkeypatch):
     """In a real terminal getpass reads /dev/tty, bypassing the test
     runner's scripted stdin — tests would block waiting for the keyboard
     (and capture whatever the developer types). Force plain stdin."""
@@ -21,7 +21,7 @@ def _getpass_reads_stdin(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
-def _cli_output_is_uncolored(monkeypatch):
+def cli_output_is_uncolored(monkeypatch):
     """Rich calls itself a terminal when it sees GITHUB_ACTIONS, so that build
     logs come out colored. That styles each option name in two spans, turning
     "--once" into "-\x1b[0m\x1b[1;36m-once" — a substring assertion on any
@@ -67,13 +67,13 @@ class FakeProvider:
         self.last_messages = None
 
     async def chat_completion(self, messages, **kwargs):
-        self.last_messages = messages
+        self.last_messages = list(messages)
         if self.fail:
             raise ProviderError("boom")
         return CompletionResponse(content=self.reply, thinking="hmm ")
 
     async def stream_completion(self, messages, **kwargs):
-        self.last_messages = messages
+        self.last_messages = list(messages)
         if self.fail:
             raise ProviderError("boom")
         yield "thinking", "hmm "

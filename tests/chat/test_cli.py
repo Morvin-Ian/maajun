@@ -105,3 +105,81 @@ def test_a_bad_provider_name_is_rejected_with_a_readable_message(
     assert result.exception is None or isinstance(result.exception, SystemExit)
     assert "Unknown provider 'gemini'" in flat(result.output)
     assert "deepseek, openai" in flat(result.output)
+
+
+# ---------------------------------------------------------------------------
+# Resuming and one-shot answers
+# ---------------------------------------------------------------------------
+
+
+def test_resuming_carries_the_same_session_on(config, deepseek_key, tmp_path):
+    """A resumed session must not fork: one transcript, one cost, one title."""
+    from maajun.chat.memory import ChatMemory
+
+    runner.invoke(app, ["chat", "-c", str(config)], input="/exit\n")
+    memory = ChatMemory(tmp_path / "data" / "incidents.db")
+    first = memory.recent_sessions()[0]["id"]
+    memory.close()
+
+    runner.invoke(
+        app, ["chat", "-c", str(config), "--session", str(first)], input="/exit\n"
+    )
+
+    memory = ChatMemory(tmp_path / "data" / "incidents.db")
+    assert [s["id"] for s in memory.recent_sessions()] == [first]
+    memory.close()
+
+
+def test_one_shot_answers_without_opening_the_repl(config, deepseek_key, monkeypatch):
+    answered = []
+
+    class Agent:
+        model = "deepseek-v4-flash"
+        history = []
+
+        async def chat_stream(self, message):
+            answered.append(message)
+            yield "content", "two repos"
+
+        def take_usage(self):
+            return {}
+
+        async def aclose(self):
+            pass
+
+    monkeypatch.setattr(
+        "maajun.chat.session.ChatSession.build_agent", lambda self: Agent()
+    )
+    result = runner.invoke(app, ["chat", "-c", str(config), "-p", "how many repos?"])
+
+    assert result.exit_code == 0
+    assert answered == ["how many repos?"]
+    assert "two repos" in flat(result.output)
+    assert "Slash commands" not in result.output
+
+
+def test_one_shot_does_not_run_anything_that_needs_a_yes(tmp_path):
+    """Nobody is at the keyboard, so a gated tool is declined, not assumed."""
+    from rich.console import Console
+
+    from maajun.chat.memory import ChatMemory
+    from maajun.chat.session import ChatSession
+    from maajun.config import AIProviderConfig
+    from maajun.config import Config as AppConfig
+    from maajun.daemon.store import IncidentStore
+
+    database = tmp_path / "incidents.db"
+    store, memory = IncidentStore(database), ChatMemory(database)
+    with open(tmp_path / "out.txt", "w") as out:
+        session = ChatSession(
+            AppConfig(ai=AIProviderConfig(provider="deepseek", api_key="x")),
+            console=Console(file=out, width=100),
+            store=store,
+            memory=memory,
+            session_id=memory.start_session(),
+            interactive=False,
+        )
+        assert session.confirm("maajun add-repo acme/api") is False
+        session.close()
+
+    assert "Not run" in (tmp_path / "out.txt").read_text()

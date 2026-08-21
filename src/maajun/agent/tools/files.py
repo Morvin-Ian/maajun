@@ -8,7 +8,7 @@ from maajun.agent.tools.base import Tool, json_schema, resolve_path
 from maajun.providers.base import ToolDefinition
 
 
-async def _read_file(path: str, offset: int = 0, limit: int = 2000) -> str:
+async def read_file(path: str, offset: int = 0, limit: int = 2000) -> str:
     p = resolve_path(path)
     if not p.exists():
         return f"Error: {p} does not exist"
@@ -50,11 +50,11 @@ READ_FILE: Tool = Tool(
             required=["path"],
         ),
     ),
-    _read_file,
+    read_file,
 )
 
 
-async def _edit_file(path: str, old_string: str, new_string: str) -> str:
+async def edit_file(path: str, old_string: str, new_string: str) -> str:
     p = resolve_path(path)
     if not p.exists():
         return f"Error: {p} does not exist"
@@ -97,19 +97,19 @@ EDIT_FILE: Tool = Tool(
             required=["path", "old_string", "new_string"],
         ),
     ),
-    _edit_file,
+    edit_file,
     requires_permission=True,
 )
 
 
-def _write_file_sync(p, content: str) -> None:
+def write_file_sync(p, content: str) -> None:
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(content)
 
 
-async def _write_file(path: str, content: str) -> str:
+async def write_file(path: str, content: str) -> str:
     p = resolve_path(path)
-    await asyncio.to_thread(_write_file_sync, p, content)
+    await asyncio.to_thread(write_file_sync, p, content)
     return f"Wrote {len(content)} bytes to {p}"
 
 
@@ -128,6 +128,6 @@ WRITE_FILE: Tool = Tool(
             required=["path", "content"],
         ),
     ),
-    _write_file,
+    write_file,
     requires_permission=True,
 )

@@ -36,6 +36,7 @@ class CompletionResponse:
 #   ("thinking", str)      — reasoning text delta
 #   ("content", str)       — answer text delta
 #   ("tool_calls", list)   — accumulated tool calls, emitted once at stream end
+#   ("usage", dict)        — token counts, emitted once at stream end
 # Agent.chat_stream consumes "tool_calls" and instead yields:
 #   ("tool", str)          — one-line preview of an executed tool's result
 StreamChunk = tuple[str, Any]

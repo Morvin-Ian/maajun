@@ -105,7 +105,7 @@ def test_unknown_model_warns_once(caplog):
 
     from maajun.providers import pricing
 
-    pricing._warned.discard("some-new-model")
+    pricing.warned.discard("some-new-model")
     with caplog.at_level(logging.WARNING):
         for _ in range(3):
             assert pricing.pricing_for("some-new-model") is pricing.DEFAULT_PRICING
@@ -119,7 +119,7 @@ def test_every_supported_provider_has_priced_defaults():
     from maajun.providers.pricing import DEFAULT_PRICING, pricing_for
 
     for provider_type in ProviderFactory.get_supported_providers():
-        provider_class = ProviderFactory._providers[provider_type]
+        provider_class = ProviderFactory.providers[provider_type]
         for model in (provider_class.default_model, provider_class.thinking_model):
             assert pricing_for(model) is not DEFAULT_PRICING, model
 

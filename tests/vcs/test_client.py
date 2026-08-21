@@ -93,16 +93,16 @@ async def test_client_is_reused_across_requests():
 
     client = make_client(handler)
     await client.validate_token()
-    first = client._client
+    first = client.client
     await client.validate_token()
 
-    assert client._client is first  # same pooled client, not a fresh one
+    assert client.client is first  # same pooled client, not a fresh one
     assert calls["n"] == 2
 
 
 async def test_aclose_releases_client():
     client = make_client(lambda request: httpx.Response(200, json={"login": "x"}))
     await client.validate_token()
-    assert client._client is not None
+    assert client.client is not None
     await client.aclose()
-    assert client._client is None
+    assert client.client is None

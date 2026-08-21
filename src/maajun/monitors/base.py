@@ -23,7 +23,7 @@ NUM_RE = re.compile(r"\d+")
 FINGERPRINT_LENGTH = 16
 
 # Cap on remembered item ids. The APIs return only the most recent items
-# per poll, so a bounded window is enough to dedup — and it stops _seen from
+# per poll, so a bounded window is enough to dedup — and it stops seen from
 # growing without limit over a long-running daemon.
 MAX_SEEN_IDS = 5000
 
@@ -59,9 +59,9 @@ class Monitor(ABC):
             an error that is actually repeating.
         burst_window_seconds: how long a held event stays eligible.
         """
-        self._burst_threshold = max(1, burst_threshold)
-        self._burst_window_seconds = burst_window_seconds
-        self._burst_buffer: deque[tuple[float, ErrorEvent]] = deque()
+        self.burst_threshold = max(1, burst_threshold)
+        self.burst_window_seconds = burst_window_seconds
+        self.burst_buffer: deque[tuple[float, ErrorEvent]] = deque()
 
     @abstractmethod
     async def poll(self) -> list[ErrorEvent]:
@@ -74,9 +74,9 @@ class Monitor(ABC):
         pending errors are lost — including a burst that never reached
         its threshold.
         """
-        return self._drain_burst_buffer()
+        return self.drain_burst_buffer()
 
-    def _apply_burst_threshold(self, events: list[ErrorEvent]) -> list[ErrorEvent]:
+    def apply_burst_threshold(self, events: list[ErrorEvent]) -> list[ErrorEvent]:
         """Return the events to emit now, holding back an incomplete burst.
 
         With thresholding off this is the identity. Otherwise events are
@@ -84,28 +84,28 @@ class Monitor(ABC):
         point the *whole* buffered burst is emitted — not just the batch that
         happened to cross the line.
         """
-        if self._burst_threshold <= 1:
+        if self.burst_threshold <= 1:
             return events
-        self._hold_for_burst(events)
-        if len(self._burst_buffer) < self._burst_threshold:
+        self.hold_for_burst(events)
+        if len(self.burst_buffer) < self.burst_threshold:
             return []
-        return self._drain_burst_buffer()
+        return self.drain_burst_buffer()
 
-    def _hold_for_burst(self, events: list[ErrorEvent]) -> None:
+    def hold_for_burst(self, events: list[ErrorEvent]) -> None:
         """Buffer events and drop any that have aged out of the window.
 
         Timed on the monotonic clock: an NTP step should not retroactively
         expire a window on a long-running daemon.
         """
         now = time.monotonic()
-        self._burst_buffer.extend((now, event) for event in events)
-        cutoff = now - self._burst_window_seconds
-        while self._burst_buffer and self._burst_buffer[0][0] < cutoff:
-            self._burst_buffer.popleft()
+        self.burst_buffer.extend((now, event) for event in events)
+        cutoff = now - self.burst_window_seconds
+        while self.burst_buffer and self.burst_buffer[0][0] < cutoff:
+            self.burst_buffer.popleft()
 
-    def _drain_burst_buffer(self) -> list[ErrorEvent]:
-        events = [event for _, event in self._burst_buffer]
-        self._burst_buffer.clear()
+    def drain_burst_buffer(self) -> list[ErrorEvent]:
+        events = [event for _, event in self.burst_buffer]
+        self.burst_buffer.clear()
         return events
 
     @property
@@ -117,7 +117,7 @@ class Monitor(ABC):
 class HTTPPollMonitor(Monitor):
     """Base for monitors that poll an HTTP API and dedup items by id.
 
-    Subclasses implement _fetch/_item_id/_to_event; poll() handles the
+    Subclasses implement fetch/item_id/to_event; poll() handles the
     fetch-failure logging and seen-id bookkeeping.
     """
 
@@ -132,42 +132,42 @@ class HTTPPollMonitor(Monitor):
             burst_threshold=burst_threshold,
             burst_window_seconds=burst_window_seconds,
         )
-        self._client = client
+        self.client = client
         # OrderedDict as an insertion-ordered set, so the oldest ids can be
         # evicted once the window is full.
-        self._seen: OrderedDict[str, None] = OrderedDict()
+        self.seen: OrderedDict[str, None] = OrderedDict()
 
     async def poll(self) -> list[ErrorEvent]:
         try:
-            items = await self._fetch()
+            items = await self.fetch()
         except Exception:
             log.exception("%s: failed to fetch", self.name)
             return []
 
         events: list[ErrorEvent] = []
         for item in items:
-            item_id = self._item_id(item)
-            if item_id in self._seen:
+            item_id = self.item_id(item)
+            if item_id in self.seen:
                 continue
-            self._seen[item_id] = None
-            events.append(self._to_event(item))
+            self.seen[item_id] = None
+            events.append(self.to_event(item))
 
-        while len(self._seen) > MAX_SEEN_IDS:
-            self._seen.popitem(last=False)
+        while len(self.seen) > MAX_SEEN_IDS:
+            self.seen.popitem(last=False)
 
-        return self._apply_burst_threshold(events)
+        return self.apply_burst_threshold(events)
 
     async def aclose(self) -> None:
-        await self._client.aclose()
+        await self.client.aclose()
 
     @abstractmethod
-    async def _fetch(self) -> list[dict[str, Any]]:
+    async def fetch(self) -> list[dict[str, Any]]:
         """Return the raw items from the API."""
 
     @abstractmethod
-    def _item_id(self, item: dict[str, Any]) -> str:
+    def item_id(self, item: dict[str, Any]) -> str:
         """Stable id used to skip already-seen items across polls."""
 
     @abstractmethod
-    def _to_event(self, item: dict[str, Any]) -> ErrorEvent:
+    def to_event(self, item: dict[str, Any]) -> ErrorEvent:
         """Convert one raw item into an ErrorEvent."""
