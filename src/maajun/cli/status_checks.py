@@ -14,8 +14,7 @@ class Check:
     ok: bool
     detail: str = ""
     warn: bool = False
-    # Whether a failure should fail the overall status. Informational lines
-    # (missing log files, "reachability not checked") are shown but don't fail.
+    # Informational lines are shown but do not fail the overall status.
     counts: bool = True
 
 
@@ -85,9 +84,8 @@ def build_status(
         Check(f"API key for {provider}", has_key, "" if has_key else "run 'maajun setup'"),
     ])
 
-    # GitHub is optional: without a repo, maajun still analyzes errors and
-    # writes reports to disk, so an absent repo is a note rather than a failure.
-    # Once a repo *is* configured, a working token becomes required.
+    # No repo is a note, not a failure — reports go to disk. Once one is
+    # configured, a working token becomes required.
     github = Section("GitHub", [])
     if not repos:
         github.checks.append(Check(
@@ -96,7 +94,7 @@ def build_status(
             warn=True, counts=False,
         ))
     else:
-        # "stored" is exact again now the keyring is the only source.
+        # Exact now the keyring is the only source.
         github.checks.append(Check(
             "GitHub token stored", has_token,
             "" if has_token else "run 'maajun setup' to store one",

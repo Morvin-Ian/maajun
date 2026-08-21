@@ -15,8 +15,7 @@ WORD = re.compile(r"\w+", re.UNICODE)
 # How much of the first user message becomes the session's title.
 TITLE_LENGTH = 60
 
-# Characters of surrounding message shown per search hit. Long enough to judge
-# relevance, short enough that twenty hits still fit in a tool result.
+# Enough to judge relevance, short enough that twenty hits still fit.
 SNIPPET_LENGTH = 300
 
 
@@ -185,9 +184,8 @@ class ChatMemory:
         try:
             rows = self.conn.execute(sql, params).fetchall()
         except sqlite3.OperationalError:
-            # An unanswerable query is "no results" to the user, but a missing
-            # table and a malformed FTS expression look identical from here —
-            # so say which one it was somewhere.
+            # No results to the user, but a missing table and a bad FTS
+            # expression look identical from here — say which somewhere.
             log.debug("chat search failed for %r", query, exc_info=True)
             rows = []
 

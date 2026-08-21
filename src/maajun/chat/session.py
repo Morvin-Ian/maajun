@@ -32,11 +32,10 @@ log = logging.getLogger(__name__)
 
 EXIT_WORDS = frozenset({"/exit", "/quit", "exit", "quit"})
 
-# A slash command is one bare word. "/var/log/app.log is full of errors" is a
-# sentence about a path, and belongs to the model.
+# One bare word. "/var/log/app.log is full of errors" is a sentence.
 SLASH = re.compile(r"^/[a-z]+$")
 
-# How many past messages of a resumed session are replayed into the agent's context.
+# Tail of a resumed session replayed into the agent's context.
 RESUME_MESSAGES = 20
 
 COMMANDS = (
@@ -80,8 +79,7 @@ class TurnView:
         self.opened = False
 
     def waiting(self, phase: str = "Thinking") -> None:
-        # The status is held here, not read back off the Live: Live.renderable
-        # hands back whatever it wrapped ours in, which is not ours to call.
+        # Held here: Live.renderable hands back its own wrapper, not ours.
         if self.live is None:
             self.status = WorkingStatus(phase)
             self.live = Live(
@@ -151,10 +149,8 @@ class ChatSession:
     def quiet(self) -> Iterator[None]:
         """Stop drawing while a tool captures the process's stdout.
 
-        The spinner is a Live region on this thread and Rich writes to
-        whatever sys.stdout is at the time, so leaving it running while
-        run_cli holds the redirect paints the animation into the captured
-        output. stream_reply starts it again on the next chunk.
+        Rich writes to whatever sys.stdout is at the time, so a running
+        spinner paints into the capture. stream_reply restarts it.
         """
         view = self.view
         if view is not None:
@@ -175,9 +171,7 @@ class ChatSession:
         """Rebuild the agent around new settings or a new session.
 
         /model and /provider are the same conversation on a different model,
-        so they carry the context over. /new, /resume and /forget all are
-        not — they used to carry it and then immediately clear it, which read
-        as though the old context might survive.
+        so they keep the context. /new, /resume and /forget do not.
         """
         previous = self.agent
         history = previous.history if keep_history else []
@@ -313,13 +307,11 @@ class ChatSession:
         try:
             answer = self.runner.run(self.stream_reply(message))
         except ProviderError as e:
-            # Already a user-facing message; the turn is not recorded as an
-            # answer because there wasn't one.
+            # Already user-facing, and there was no answer to record.
             self.console.print(f"[red]✗ {escape(str(e))}[/red]")
         except Exception as e:
-            # escaped: an error quoting the model back can carry a closing
-            # tag ("[/INST]" and friends), which Rich rejects as markup —
-            # turning a reported failure into a crash of the chat loop.
+            # Escaped: a stray "[/INST]" is a MarkupError, which would crash
+            # the loop that is reporting the failure.
             log.debug("chat turn failed", exc_info=True)
             self.console.print(f"[red]✗ {type(e).__name__}: {escape(str(e))}[/red]")
         else:
@@ -394,9 +386,8 @@ class ChatSession:
     def slash_handlers(self) -> dict[str, Callable[[str], None]]:
         """Command name -> handler, every one taking the argument string.
 
-        A dict rather than a chain of elifs: COMMANDS, HELP and this were
-        three parallel lists to keep in sync, and test_every_slash_command_is
-        _handled can now check two of them against each other.
+        A dict, not a chain of elifs, so the tests can check it against
+        COMMANDS and HELP instead of the three drifting apart.
         """
         return {
             "/help": lambda _: self.console.print(HELP),
@@ -519,8 +510,7 @@ class ChatSession:
         previous = self.config.ai.provider
         self.config.ai.provider = name
         self.config.ai.api_key = api_key
-        # The model was chosen for the provider being left behind; clearing it
-        # falls back to the new provider's default.
+        # Chosen for the old provider; clearing falls back to the new default.
         self.config.ai.model = None
         self.replace_agent()
         self.console.print(
@@ -609,8 +599,7 @@ def run_chat_session(
         store.close()
         raise ValueError(f"No chat session {resume}.")
 
-    # A resumed session is carried on, not copied: its cost, its title and its
-    # transcript stay in one place instead of fragmenting across rows.
+    # Carried on, not copied, so its cost and transcript stay in one row.
     session_id = resume if resume is not None else memory.start_session()
     chat = ChatSession(
         config,

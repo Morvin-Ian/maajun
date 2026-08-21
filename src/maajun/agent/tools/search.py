@@ -18,8 +18,7 @@ SKIP_DIRS = {
     "dist", "build", ".next", ".nuxt",
 }
 
-# grep skips files bigger than this — a lockfile or a bundled asset is
-# rarely what a code search wants, and reading it wastes time and memory.
+# grep skips anything bigger; a lockfile is rarely what a code search wants.
 MAX_FILE_SIZE = 5 * 1024 * 1024
 
 
@@ -41,8 +40,7 @@ async def glob(pattern: str, path: str = ".") -> str:
     root = resolve_path(path)
     if not root.exists():
         return f"Error: {path} does not exist"
-    # The root is checked before the call; '..' in the pattern would walk out
-    # of it afterwards.
+    # The root was checked before the call; '..' would escape it afterwards.
     if ".." in Path(pattern).parts:
         return "Error: '..' is not allowed in a glob pattern. Search from a path instead."
     results = await asyncio.to_thread(glob_sync, root, pattern)
@@ -146,8 +144,7 @@ async def grep(
         grep_sync, root, regex, include, max_results, sandbox
     )
 
-    # Said out loud so the model knows the search was not exhaustive, and
-    # does not go looking for another way into the files it skipped.
+    # Said out loud, or the model reads an empty result as "nothing there".
     skipped = (
         f", {files_refused} off-limits files skipped"
         if files_refused

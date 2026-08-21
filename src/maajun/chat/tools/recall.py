@@ -10,9 +10,8 @@ from maajun.utils import truncate
 # Messages are replayed for context, not verbatim transcription.
 MESSAGE_PREVIEW = 600
 
-# Ceiling on what one recall call may ask the database for. cap_result already
-# bounds what reaches the model, but a limit of 100000 still makes the query
-# and builds every row first.
+# cap_result bounds what reaches the model, but a limit of 100000 still
+# runs the query and builds every row.
 MAX_LIMIT = 100
 
 

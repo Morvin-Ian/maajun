@@ -18,20 +18,17 @@ from maajun.agent.tools.base import Tool, json_schema
 from maajun.providers.base import ToolDefinition
 
 try:
-    # Typer >= 0.20 vendors click, so there is no importable top-level `click`
-    # and its exception classes are not the ones the CLI actually raises.
+    # Typer >= 0.20 vendors click; the top-level one raises different classes.
     from typer._click import ClickException
 except ImportError:  # pragma: no cover - typer built against the real click
     from click import ClickException
 
 PROG_NAME = "maajun"
 
-# Width the captured output is rendered at. Rich wraps to 80 when it cannot
-# see a terminal, which breaks repo names and URLs across lines.
+# Rich wraps to 80 with no terminal, breaking repo names and URLs.
 CAPTURE_WIDTH = "120"
 
-# Rich draws tables and panels in box-drawing characters. The model reads the
-# capture as text, so the border is redrawn in ASCII and rules are dropped.
+# The model reads the capture as text, so borders are redrawn in ASCII.
 BOX = str.maketrans({
     "│": "|", "┃": "|", "║": "|",
     "─": "-", "━": "-", "═": "-",
@@ -61,9 +58,8 @@ class Gate(Enum):
     BLOCKED = "blocked"
 
 
-# Commands chat will not run at all, and why. Two kinds: ones that never
-# return (so the session would hang), and ones whose blast radius is too
-# large to delegate to a model reading intent from a sentence.
+# Commands chat will not run: ones that never return, and ones too
+# destructive to infer from a sentence.
 BLOCKED: dict[str, str] = {
     "watch": (
         "it runs until interrupted, which would hang this session. "
@@ -79,8 +75,7 @@ BLOCKED: dict[str, str] = {
     ),
 }
 
-# Commands that only read. Everything else that is not blocked is treated as
-# mutating and asks first — the safe default when a new command appears.
+# Everything else that is not blocked is mutating, so a new command asks.
 READ_ONLY: frozenset[str] = frozenset({"status", "incidents", "provider-list"})
 
 
@@ -91,8 +86,7 @@ class CommandInfo(NamedTuple):
 
 
 def cli_command() -> TyperGroup:
-    # Imported here, not at module scope: maajun.cli imports the chat command,
-    # which imports this module. A top-level import would close the loop.
+    # Imported here: maajun.cli imports the chat command, which imports this.
     from maajun.cli import app
 
     return typer.main.get_command(app)
@@ -178,8 +172,7 @@ def command_help(name: str) -> str:
             known = ", ".join(info.name for info in command_index())
             return f"No such command: {name}. Available: {known}"
         buffer = io.StringIO()
-        # info_name is the bare command: the parent context already supplies
-        # "maajun", and passing it again renders "Usage: maajun maajun ...".
+        # The parent supplies "maajun"; passing it again renders it twice.
         with context(sub, info_name=name, parent=ctx) as sub_ctx:
             with contextlib.redirect_stdout(buffer):
                 returned = sub.get_help(sub_ctx)
@@ -210,28 +203,20 @@ def capture_width():
             os.environ["COLUMNS"] = original
 
 
-# run_cli swaps sys.stdout, sys.stderr, sys.stdin and $COLUMNS — process-wide
-# state, from whichever thread asyncio.to_thread happens to pick. Held for the
-# duration so two captures can never interleave and hand each other's output
-# back to the model.
+# run_cli swaps stdout, stderr, stdin and $COLUMNS — process-wide state, from
+# a worker thread. Held so two captures cannot interleave.
 CAPTURE_LOCK = threading.Lock()
 
 
 def run_cli(argv: list[str]) -> tuple[int, str]:
     """Run a maajun command in-process. Returns (exit code, combined output).
 
-    In-process rather than a `maajun ...` subprocess: the CLI may not be on
-    PATH (`uv run`, a venv that is not active), and this way the config and
-    keyring state the session already loaded is the state the command sees.
+    In-process, not a subprocess: the CLI may not be on PATH, and this way it
+    sees the config and keyring state the session already loaded. stdin is
+    emptied so a command that would prompt fails instead of hanging.
 
-    stdin is replaced with an empty stream so a command that would prompt
-    fails immediately instead of hanging a session that has no one at the
-    keyboard — prompt_line falls back to console.input() once isatty() is
-    False, and that raises EOFError on an empty stream.
-
-    The capture is process-wide, so nothing else may be writing to the
-    terminal while it runs; callers hand in a `quiet` scope that takes the
-    session's spinner down first. See run_maajun_command.
+    The capture is process-wide, so nothing else may write to the terminal
+    while it runs — see the `quiet` scope in command_tools.
     """
     command = cli_command()
     buffer = io.StringIO()
@@ -243,9 +228,8 @@ def run_cli(argv: list[str]) -> tuple[int, str]:
             empty_stdin(),
             capture_width(),
         ):
-            # With standalone_mode=False click *returns* the exit code of a
-            # typer.Exit rather than raising it, so a command that failed
-            # cleanly looks like a success unless the value is read back.
+            # standalone_mode=False makes click *return* a typer.Exit code,
+            # so a clean failure looks like success unless it is read back.
             returned = command.main(
                 args=argv, prog_name=PROG_NAME, standalone_mode=False
             )
@@ -285,12 +269,9 @@ QuietScope = Callable[[], contextlib.AbstractContextManager[None]]
 def command_tools(quiet: QuietScope = unquieted) -> list[Tool]:
     """The three tools that let chat see and drive the CLI.
 
-    `quiet` wraps the one tool that captures the process's stdout. Rich
-    resolves sys.stdout on every write, so a live spinner on the main thread
-    paints straight into the capture buffer while run_cli holds the redirect
-    in a worker thread: the animation vanishes from the terminal and its
-    escape codes are handed to the model as part of the command's output.
-    Taking the spinner down for the duration is what keeps the two apart.
+    `quiet` wraps the tool that captures stdout. Rich resolves sys.stdout on
+    every write, so a spinner left running paints into the capture buffer
+    instead of the terminal.
     """
 
     async def list_commands() -> str:
@@ -322,8 +303,7 @@ def command_tools(quiet: QuietScope = unquieted) -> list[Tool]:
                 "Tell the user the command to run rather than running it."
             )
         if command == "setup" and "--non-interactive" not in argv:
-            # setup's whole purpose is prompting; unattended it can still
-            # configure a machine that already has a key in the keyring.
+            # setup exists to prompt, but can still run against a stored key.
             return (
                 "'setup' prompts for input, which is not available here. Add "
                 "--non-interactive with the flags you want (it cannot store a "
@@ -331,10 +311,8 @@ def command_tools(quiet: QuietScope = unquieted) -> list[Tool]:
                 "in their terminal."
             )
 
-        # In a worker thread, not inline: several commands run an event loop
-        # of their own, and asyncio.run() refuses to nest inside the one the
-        # tool call is already running on. It also keeps a long `report` from
-        # blocking every other await in the session.
+        # In a thread: some commands call asyncio.run(), which cannot nest
+        # inside the loop this tool call is already on.
         with quiet():
             exit_code, output = await asyncio.to_thread(run_cli, [command, *argv])
         rendered = plain(output) or "(no output)"

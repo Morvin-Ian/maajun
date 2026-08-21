@@ -30,9 +30,7 @@ class DaemonDeps:
         workdir = Path(config.daemon.workdir).expanduser()
         self.store = IncidentStore(workdir / "incidents.db")
         self.report_dir = workdir / "reports"
-        # From here on a failure has a database to close. `maajun status`
-        # builds deps speculatively, so leaking a handle per attempt is a
-        # long-running process holding WAL files open for nothing.
+        # From here a failure has a database to close.
         try:
             self.wire(config, auth, workdir, api_key)
         except Exception:
@@ -44,8 +42,7 @@ class DaemonDeps:
     ) -> None:
         """Everything that can fail after the database is already open."""
         repos = config.github.get_all_repos()
-        # GitHub is optional. With no repo configured, errors are still
-        # detected and analyzed — the report lands on disk instead of in a PR.
+        # GitHub is optional: with no repo, reports land on disk.
         self.local_mode = not repos
         if self.local_mode:
             self.token = None
@@ -120,9 +117,8 @@ def build_monitors(
         if repo_config is not None:
             monitor_to_repo[id(monitor)] = repo_config
 
-    # (log path, repo) pairs already watched. The same path can feed two
-    # different repos, but watching it twice *for one repo* just reads the
-    # file twice and throws the second copy away at the dedup step.
+    # One path can feed two repos, but watching it twice for one repo just
+    # reads the file twice and discards the second copy.
     watched: set[tuple[str, str]] = set()
 
     def attach_logfile(path: str, repo_config: RepoConfig | None) -> None:
@@ -133,17 +129,15 @@ def build_monitors(
         watched.add(key)
         attach(LogFileMonitor(path, **monitor_cfg.logfile_kwargs()), repo_config)
 
-    # Global log_files attach to the first repo.
     for path in monitor_cfg.log_files:
         attach_logfile(path, default_repo)
 
-    # Per-repo log_files attach to their own repo, in addition to the above.
     for repo_config in repos:
         for path in repo_config.log_files:
             attach_logfile(path, repo_config)
 
-    # GitHub Actions. Silently skipped without a token: `status` reports it,
-    # and one unusable monitor should not stop the log monitors from running.
+    # Skipped without a token; `status` reports it. One unusable monitor
+    # should not stop the log monitors.
     actions_token = auth.get_github_token() if monitor_cfg.github_actions_repos else None
     if monitor_cfg.github_actions_repos and not actions_token:
         log.warning(
@@ -155,10 +149,9 @@ def build_monitors(
             matched = next((rc for rc in repos if rc.repo == repo), None)
             if matched is None:
                 matched = default_repo
-                # Without a [[github.repos]] entry there is no clone to analyze
-                # and no repo to file against, so the failures land on the first
-                # configured repo. Say so — this used to happen silently, and a
-                # typo in the slug quietly misfiled every CI failure.
+                # No entry means no clone and no repo to file against, so
+                # these land on the first one. Said out loud: a typo in the
+                # slug used to misfile every CI failure silently.
                 log.warning(
                     "monitor.github_actions_repos includes %s, which is not a "
                     "configured repo; its failed runs will be filed against %s. "
@@ -187,8 +180,7 @@ def build_daemon(config: Config, auth: AuthManager | None = None) -> Daemon:
                 "or GitHub Actions settings."
             )
     except Exception:
-        # deps owns an open database by now; a config the CLI is about to
-        # reject should not leave it behind.
+        # deps owns an open database by now.
         deps.store.close()
         raise
 

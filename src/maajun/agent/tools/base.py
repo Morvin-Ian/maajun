@@ -25,19 +25,15 @@ ToolExecutor = Callable[..., Coroutine[Any, Any, str]]
 class Tool(NamedTuple):
     definition: ToolDefinition
     executor: ToolExecutor
-    # Tools that modify files or run commands need user approval before
-    # each call; the agent denies them when no approval handler is set.
+    # Denied outright when no approval handler is set.
     requires_permission: bool = False
-    # Tools that open files they found themselves rather than files they were
-    # handed. The registry passes them the sandbox as a `sandbox` keyword so
-    # they can gate each one; it is never part of the schema the model sees.
+    # Opens files it finds rather than files it is handed, so the registry
+    # passes it the sandbox to gate each one. Not in the model's schema.
     walks_files: bool = False
 
 
-# Ceiling on a single tool result. read_file defaults to 2000 lines and grep
-# to 50 matches, either of which can run to hundreds of kilobytes — and every
-# result stays in the request for the rest of the tool loop. Truncating here
-# rather than in each executor means a tool added later cannot forget to.
+# Every result stays in the request for the rest of the tool loop. Capped
+# here rather than per-executor so a new tool cannot forget to.
 MAX_TOOL_RESULT_CHARS = 30_000
 
 
@@ -84,15 +80,12 @@ class ToolRegistry:
     def off_limits(self, tool: Tool, arguments: dict[str, Any]) -> str:
         """Why the sandbox refuses this call, or "" if it does not.
 
-        Checked here rather than in each executor: every file tool names its
-        target `path`, and one gate cannot be forgotten by the next tool
-        somebody adds. The tool's schema decides whether it takes a path, not
-        the arguments — grep and list_dir default to the working directory,
-        which is a way out of the sandbox when the model simply omits it.
+        Checked here, not per-executor, so the next tool cannot forget it. The
+        *schema* decides whether a tool takes a path: grep and list_dir default
+        to the cwd, which is a way out when the model omits it.
 
-        This gates the path the call names. A tool that then walks that path
-        and opens what it finds needs Sandbox.readable per file as well; see
-        Tool.walks_files.
+        This gates the path the call names; a tool that then walks it needs
+        Sandbox.readable per file too. See Tool.walks_files.
         """
         if self.sandbox is None:
             return ""

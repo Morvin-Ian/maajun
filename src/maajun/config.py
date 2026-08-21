@@ -158,7 +158,6 @@ class MonitorConfig(Base):
     # Emit nothing until burst_threshold events land within the window.
     burst_threshold: int = 1
     burst_window_seconds: float = 60.0
-    # Repos to poll for failed workflow runs.
     github_actions_repos: list[str] = Field(default_factory=list)
 
     @property

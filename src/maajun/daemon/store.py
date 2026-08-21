@@ -39,20 +39,16 @@ INCIDENT_COLUMNS: tuple[str, ...] = (
     "completion_tokens", "attempts", "report_text", "artifact_kind",
 )
 
-# Bumped whenever a migration is appended to MIGRATIONS. Stored in the file's
-# PRAGMA user_version, which starts at 0 on databases written before any of
-# this existed.
+# Bumped with every MIGRATIONS entry. Databases predating this sit at 0.
 SCHEMA_VERSION = 4
 
-# What an incident produced. Recorded explicitly because it used to be
-# inferred from `branch != ""`, which cannot tell a suggest-mode issue from a
-# local-mode report, and breaks the moment either grows a branch.
+# What an incident produced. Recorded, not inferred from `branch != ""`,
+# which cannot tell a suggest-mode issue from a local-mode report.
 ARTIFACT_PR = "pr"
 ARTIFACT_ISSUE = "issue"
 ARTIFACT_REPORT = "report"
 
-# local mode.
-NO_REPO = ""
+NO_REPO = ""  # local mode
 
 
 class StoreError(RuntimeError):
@@ -123,9 +119,7 @@ def migrate_to_2(conn: sqlite3.Connection) -> None:
     add_column_if_missing(
         conn, "incidents", "artifact_kind", "TEXT NOT NULL DEFAULT ''"
     )
-    # Backfill what the old rows can tell us: a branch means fix mode opened a
-    # PR, an http(s) URL without one means an issue, anything else is a report
-    # path written locally.
+    # Backfill: a branch means a PR, an http URL an issue, else a report.
     conn.execute(
         "UPDATE incidents SET artifact_kind = CASE"
         "  WHEN COALESCE(branch, '') != '' THEN ?"
@@ -221,16 +215,11 @@ def has_fts(conn: sqlite3.Connection) -> bool:
 def ensure_fts(conn: sqlite3.Connection) -> bool:
     """Create the full-text index if this file has none. Says whether it does.
 
-    Deliberately not left to the migration ladder alone. migrate_to_4 has to
-    tolerate a SQLite built without FTS5 — the alternative is refusing to open
-    the database at all — but swallowing the failure and bumping user_version
-    marked the file current with no index, and no later run would ever build
-    one. So the index is probed on every open instead: one sqlite_master
-    lookup, and it repairs itself the first time maajun runs on a build that
-    does have FTS5.
+    Probed on every open, not just during migration: migrate_to_4 tolerates a
+    SQLite without FTS5, and bumping user_version past it would mark the file
+    current with no index and no way back.
 
-    Runs no transaction of its own — migrate() already holds one when it calls
-    through, and a nested `with conn` would commit that early.
+    Runs no transaction of its own — migrate() already holds one.
     """
     if has_fts(conn):
         return True
@@ -279,14 +268,12 @@ def connect(path: str | Path) -> sqlite3.Connection:
     path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(path)
     conn.row_factory = sqlite3.Row
-    # WAL lets a reader (e.g. the cost-audit query, or a chat session running
-    # alongside the daemon) work without blocking writes, and survives an
-    # ungraceful kill more cleanly.
+    # WAL lets a chat session read alongside the daemon's writes.
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA synchronous=NORMAL")
     migrate(conn, path)
-    # After migrate, which is what creates chat_messages for the index to
-    # shadow. Repairs a database that was upgraded on a build without FTS5.
+    # After migrate, which creates the table the index shadows. Repairs a
+    # database upgraded on a build without FTS5.
     conn.execute("BEGIN")
     if ensure_fts(conn):
         conn.commit()
@@ -299,15 +286,11 @@ def migrate(conn: sqlite3.Connection, path: Path) -> None:
     """Bring the database up to SCHEMA_VERSION, or explain why it can't be.
 
     Each migration runs in its own transaction and bumps user_version, so an
-    interrupted upgrade resumes from the last step that committed rather than
-    half-applying.
+    interrupted upgrade resumes rather than half-applies.
 
-    The BEGIN is explicit, not `with conn`. Under sqlite3's legacy transaction
-    control — still the default — a transaction is opened implicitly before
-    DML and *not* before DDL, so CREATE/ALTER/DROP would each autocommit on
-    their own and `with conn` would commit nothing that mattered. Killed
-    between migrate_to_1's RENAME and its INSERT ... SELECT, that left an
-    empty incidents table and an orphaned incidents_outdated beside it.
+    The BEGIN is explicit, not `with conn`: sqlite3's legacy transaction
+    control opens one before DML but not before DDL, so CREATE/ALTER/DROP
+    would each autocommit and `with conn` would commit nothing that mattered.
     """
     version = conn.execute("PRAGMA user_version").fetchone()[0]
     if version > SCHEMA_VERSION:
@@ -321,8 +304,7 @@ def migrate(conn: sqlite3.Connection, path: Path) -> None:
         try:
             conn.execute("BEGIN")
             migration(conn)
-            # Not parameterizable, and `target` is a loop index over a
-            # module constant — never user input.
+            # Not parameterizable; `target` indexes a module constant.
             conn.execute(f"PRAGMA user_version = {target}")
             conn.commit()
         except sqlite3.Error as e:
@@ -380,8 +362,7 @@ class IncidentStore:
         )
         self.conn.commit()
         if existing["status"] == "new":
-            # Recorded but never published: deferred by the spend cap, or
-            # interrupted before it could be marked processed or failed.
+            # Deferred by the spend cap, or interrupted mid-analysis.
             log.debug(
                 "picking up unhandled incident fp=%s repo=%s",
                 event.fingerprint, event.repo or NO_REPO,

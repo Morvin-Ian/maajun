@@ -126,9 +126,8 @@ def setup_provider(
     if signup:
         console.print(f"  [dim]Get a key at {signup}[/dim]")
     if not ask.interactive:
-        # Keys live only in the keyring, and a key cannot be prompted for
-        # here — so an unattended run can configure repos and monitors on a
-        # machine that is already set up, but cannot bootstrap a fresh one.
+        # No prompt means no new key, so this configures an already-set-up
+        # machine but cannot bootstrap a fresh one.
         console.print(
             f"[red]✗ No API key for {provider} in the keyring. Run "
             "'maajun setup' interactively once to store one.[/red]"
@@ -159,8 +158,7 @@ def store_api_key(auth: AuthManager, provider: str, key: str) -> None:
     try:
         auth.set_api_key(provider, key)
     except RuntimeError as e:
-        # The keyring is the only store, so this is fatal rather than a
-        # fallback — say so instead of implying the key was kept.
+        # The keyring is the only store, so this is fatal, not a fallback.
         console.print(
             f"  [red]✗ Could not store the key: {e}[/red]"
         )
@@ -180,8 +178,8 @@ def setup_github(
 ) -> None:
     existing = config.github.get_all_repos()
     current = existing[0].repo if existing else ""
-    # Only ever a prefilled suggestion: silently adopting the surrounding
-    # checkout would be a surprising side effect of a --non-interactive run.
+    # A suggestion only; adopting the surrounding checkout silently would
+    # be a surprising side effect.
     detected = detect_repo_from_git() if ask.interactive else None
     if detected and not current:
         console.print(f"  [dim]Detected from git remote: {detected}[/dim]")
@@ -230,9 +228,8 @@ def setup_github(
                 "unverified.[/yellow]"
             )
 
-    # Update the entry in place when this repo is already configured, rather
-    # than replacing it — setup never asks about log_files, so rebuilding the
-    # entry from these three answers would drop the ones already set.
+    # Updated in place: setup never asks about log_files, so rebuilding the
+    # entry from these answers would drop them.
     entry = next((rc for rc in config.github.repos if rc.repo == repo), None)
     if entry is not None:
         entry.base_branch = branch
@@ -318,7 +315,7 @@ def setup_error_sources(
         if Path(path).expanduser().exists():
             console.print(f"  [green]✓[/green] {path}")
         else:
-            # Not a problem: the app may only create its error log on first use.
+            # Fine: the app may only create its error log on first use.
             console.print(f"  [yellow]⚠[/yellow] {path} [dim](not found yet)[/dim]")
 
     configured_repos = config.github.get_all_repos()
@@ -338,9 +335,7 @@ def setup_error_sources(
             console.print("  [yellow]⚠ GitHub Actions needs a GitHub token — "
                           "skipped.[/yellow]")
         else:
-            # Only the repo list is stored. The token is read from the keyring
-            # or the environment at run time — writing it here would put a
-            # secret in a plaintext config file.
+            # Repo list only: the token would be a secret in a plaintext file.
             config.monitor.github_actions_repos = repo_names
             console.print(
                 f"  [green]✓[/green] Watching Actions on {', '.join(repo_names)}"
