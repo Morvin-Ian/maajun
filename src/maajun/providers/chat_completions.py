@@ -51,11 +51,8 @@ class ChatCompletionsProvider(AIProvider):
         self.stream_usage = True
 
     def prepared_tools(self, tools: list[ToolDefinition] | None) -> list[dict[str, Any]] | None:
-        # Deliberately uncached. This was memoized on id(tools), which never
-        # hit — ToolRegistry.definitions() returns a fresh list every call —
-        # and was unsound besides: CPython reuses the address of a freed list,
-        # so a new definitions list could collide with a dead one's id and be
-        # served that entry's stale tools.
+        # Deliberately uncached: memoizing on id(tools) never hit, and
+        # CPython reuses freed addresses, so it could serve stale tools.
         if not tools:
             return None
         return self.prepare_tools(tools)
@@ -86,9 +83,8 @@ class ChatCompletionsProvider(AIProvider):
                 transient = isinstance(e, APIConnectionError) or (
                     isinstance(e, APIError) and status in (429, 500, 502, 503)
                 )
-                # Nothing follows the last attempt, so sleeping before giving
-                # up just made the caller wait up to MAX_DELAY for an error it
-                # was always going to get.
+                # Nothing follows the last attempt; sleeping after it only
+                # delays an error the caller was always going to get.
                 if not transient or attempt == MAX_RETRIES - 1:
                     break
                 delay = min(MAX_DELAY, BASE_DELAY * (2 ** attempt) * (1 + random.random()))
@@ -97,8 +93,7 @@ class ChatCompletionsProvider(AIProvider):
                     attempt + 1, MAX_RETRIES, e, delay,
                 )
                 await asyncio.sleep(delay)
-        # `from last_exc`: the raise is outside the except block, so without
-        # it the provider's own traceback is dropped from the chain.
+        # Outside the except block, so the chain needs an explicit `from`.
         raise wrap_error(last_exc) from last_exc
 
     async def chat_completion(
@@ -172,9 +167,8 @@ class ChatCompletionsProvider(AIProvider):
         except APIError as e:
             raise wrap_error(e) from e
         finally:
-            # An abandoned stream — the caller stopped iterating, or a round
-            # raised — holds its connection out of the pool until the object
-            # is collected. A watch run makes one of these per tool round.
+            # An abandoned stream holds its connection until collected, and
+            # a watch run opens one per tool round.
             if stream is not None:
                 await close_quietly(stream)
 
@@ -240,8 +234,8 @@ class ChatCompletionsProvider(AIProvider):
 
         tool_calls = None
         if message.tool_calls:
-            # Keep arguments as the raw JSON string; the agent parses them
-            # and malformed JSON becomes a tool error instead of a crash here.
+            # Left as raw JSON: the agent parses it, so malformed arguments
+            # become a tool error rather than a crash here.
             tool_calls = [
                 {
                     "id": tc.id,

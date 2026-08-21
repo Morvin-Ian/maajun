@@ -3,8 +3,7 @@ import re
 from .base import ProviderType
 from .chat_completions import ChatCompletionsProvider
 
-# DeepSeek sometimes emits its internal tool-call markup inside message
-# content. It is not part of the answer, so it never reaches the user.
+# DeepSeek leaks its tool-call markup into message content sometimes.
 DSML_RE = re.compile(r"<\|+DSML\|+>.*?</\|+DSML\|+tool_calls>", re.DOTALL)
 DSML_OPEN_RE = re.compile(r"<\|+DSML\|+[^>]*>")
 

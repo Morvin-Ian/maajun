@@ -18,13 +18,10 @@ log = logging.getLogger(__name__)
 HEX_RE = re.compile(r"0x[0-9a-fA-F]+")
 NUM_RE = re.compile(r"\d+")
 
-# Characters of the sha256 digest an incident is keyed by. Shared so a monitor
-# building its own key matches the width of every other fingerprint.
+# Shared, so every monitor's fingerprint is the same width.
 FINGERPRINT_LENGTH = 16
 
-# Cap on remembered item ids. The APIs return only the most recent items
-# per poll, so a bounded window is enough to dedup — and it stops seen from
-# growing without limit over a long-running daemon.
+# A poll only returns recent items, so a bounded window is enough to dedup.
 MAX_SEEN_IDS = 5000
 
 def fingerprint(text: str) -> str:
@@ -133,8 +130,7 @@ class HTTPPollMonitor(Monitor):
             burst_window_seconds=burst_window_seconds,
         )
         self.client = client
-        # OrderedDict as an insertion-ordered set, so the oldest ids can be
-        # evicted once the window is full.
+        # An insertion-ordered set, so the oldest ids evict first.
         self.seen: OrderedDict[str, None] = OrderedDict()
 
     async def poll(self) -> list[ErrorEvent]:

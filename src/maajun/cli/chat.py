@@ -36,10 +36,6 @@ def chat(
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Debug logging"),
 ):
     """Talk to maajun: ask what it can do, have it do it, or recall past work."""
-    # Imported here: the session reaches back into this package for its
-    # prompt helpers, and at module scope the two would deadlock whenever
-    # maajun.chat.session is the first of the pair to be imported.
-
     if verbose:
         logging.basicConfig(
             level=logging.DEBUG,
@@ -77,11 +73,8 @@ def chat(
     config.ai.api_key = api_key
 
     workdir = Path(config.daemon.workdir).expanduser()
-    # Imported here, not at module scope: maajun.chat.session reaches into
-    # maajun.cli.shared for its prompt, and importing that runs this package's
-    # __init__, which imports this module. At module scope the cycle closes
-    # and `import maajun.chat.session` fails outright unless something else
-    # happened to import the CLI first.
+    # Imported here: chat.session imports cli.shared, which runs this
+    # package's __init__, which imports this module.
     from maajun.chat.session import run_chat_session
 
     try:

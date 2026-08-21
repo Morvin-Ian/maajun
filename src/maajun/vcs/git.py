@@ -13,8 +13,7 @@ ASKPASS_SCRIPT = '#!/bin/sh\necho "$MAAJUN_GIT_TOKEN"\n'
 COMMIT_AUTHOR = "maajun"
 COMMIT_EMAIL = "maajun@localhost"
 
-# Long enough for a cold clone of a large repo, short enough that a hung
-# credential prompt or a dead remote does not stall the poll loop forever.
+# Long enough for a cold clone, short enough not to stall the poll loop.
 GIT_TIMEOUT = 120
 
 
@@ -73,10 +72,8 @@ class GitWorkspace:
     def run(self, args: tuple[str, ...], cwd: Path | None) -> str:
         """Run one git command, or raise GitError.
 
-        A timeout and a launch failure become GitError too: callers guard git
-        with `except GitError`, and a bare TimeoutExpired sailed past all of
-        them — turning a slow clone into an unhandled crash rather than a
-        failed incident that gets retried.
+        Timeouts and launch failures included: callers guard git with
+        `except GitError`, and a bare TimeoutExpired sailed past all of them.
         """
         try:
             proc = subprocess.run(

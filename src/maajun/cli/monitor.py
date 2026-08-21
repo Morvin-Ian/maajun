@@ -27,9 +27,7 @@ def watch_with_spinner(daemon, *, once: bool) -> None:
     status = WorkingStatus("Watching for errors")
 
     def notice(message: str, level: str) -> None:
-        # Escaped: a notice carries an error message or a log line, and a
-        # stray closing tag in one is a MarkupError that would take the
-        # daemon down instead of reporting the incident that produced it.
+        # Escaped: a stray closing tag in a log line is a MarkupError.
         style = NOTICE_STYLES.get(level, "dim")
         console.print(f"[{style}]{escape(message)}[/{style}]")
 
@@ -64,9 +62,7 @@ def watch(
         if mode not in ("suggest", "fix"):
             console.print(f"[red]✗ Invalid mode: {mode}. Use 'suggest' or 'fix'.[/red]")
             raise typer.Exit(1)
-        # Say so rather than appearing to accept it: local mode has no
-        # [[github.repos]] entries, so this loop had nothing to write to and
-        # -m fix was silently ignored.
+        # Local mode has no repos to write to, so -m fix does nothing.
         if not config.github.repos:
             console.print(
                 f"[yellow]⚠ --mode {mode} has no effect without a configured "
@@ -170,9 +166,7 @@ def report(
         if mode not in ("suggest", "fix"):
             console.print(f"[red]✗ Invalid mode: {mode}. Use 'suggest' or 'fix'.[/red]")
             raise typer.Exit(1)
-        # Say so rather than appearing to accept it: local mode has no
-        # [[github.repos]] entries, so this loop had nothing to write to and
-        # -m fix was silently ignored.
+        # Local mode has no repos to write to, so -m fix does nothing.
         if not config.github.repos:
             console.print(
                 f"[yellow]⚠ --mode {mode} has no effect without a configured "
@@ -252,8 +246,7 @@ def report(
         else:
             with working(console, "Preparing workspace") as status:
                 result = asyncio.run(run_report(status.set))
-            # What was published, not what the mode implies: a fix-mode run
-            # that changed no code files an issue instead.
+            # What was published: fix mode that changed nothing files an issue.
             label = daemon.artifact_label(daemon.last_artifact_kind)
             console.print(f"\n[green]✓ {label}:[/green] {result}")
     except KeyboardInterrupt:
@@ -296,9 +289,8 @@ def add_repo(
         else [path.strip() for path in log_files.split(",") if path.strip()]
     )
 
-    # Flags default to None so an omitted one means "leave it as it is" rather
-    # than "reset it to the default" — re-running add-repo to change the mode
-    # used to silently revert the base branch and drop the test command.
+    # None means "leave as is", not "reset to the default" — changing the
+    # mode used to silently revert the base branch.
     entry = next((rc for rc in config.github.repos if rc.repo == repo), None)
     updated = entry is not None
     if entry is None:

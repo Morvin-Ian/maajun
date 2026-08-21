@@ -8,9 +8,7 @@ from maajun.daemon.store import MAX_ATTEMPTS, IncidentStore
 from maajun.providers.base import ToolDefinition
 from maajun.utils import truncate
 
-# A whole report can run to several thousand characters. Listing twenty of
-# them in full would crowd out the conversation, so summaries carry a preview
-# and get_incident serves the rest.
+# Reports run long, so a listing carries a preview and get_incident the rest.
 REPORT_PREVIEW = 400
 
 LOCAL = "(local)"
@@ -93,8 +91,7 @@ def incident_tools(store: IncidentStore) -> list[Tool]:
     async def get_incident(fingerprint: str, repo: str = "") -> str:
         row = store.get(fingerprint, repo)
         if row is None:
-            # The repo argument is easy to get wrong — an incident is keyed by
-            # (fingerprint, repo), and '' is local mode rather than "any".
+            # Keyed by (fingerprint, repo), where '' is local mode, not "any".
             elsewhere = [
                 other for other in store.all()
                 if other["fingerprint"] == fingerprint
