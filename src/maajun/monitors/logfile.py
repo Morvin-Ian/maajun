@@ -82,8 +82,7 @@ class LogFileMonitor(Monitor):
         text = self.read_new()
         if not text:
             if self.carryover_text:
-                # Nothing new for a whole interval — what we held back is
-                # not still streaming; emit it.
+                # Quiet for a whole interval, so it is not still streaming.
                 events, _ = self.parse(self.carryover_text, flush=True)
                 self.carryover_text = ""
                 return self.apply_burst_threshold(events)
@@ -99,13 +98,9 @@ class LogFileMonitor(Monitor):
     def read_new(self) -> str:
         """Read whatever has been appended since the last poll.
 
-        Byte offsets, and the file is opened in binary. TextIOWrapper.tell()
-        returns an opaque cookie that packs the decoder's state alongside the
-        position, not a byte count — it happens to equal one until a read ends
-        mid-character, at which point it becomes a very large integer and the
-        `st_size < offset` test below reads as "truncated", re-reporting the
-        whole file. Decoding here instead keeps the offset comparable with
-        st_size, which is what it is being compared against.
+        Binary, so the offset is a byte count comparable with st_size, and so
+        a UTF-8 log is decoded as UTF-8 rather than as the host's locale.
+        TextIOWrapper.tell() returns an opaque cookie, not a position.
         """
         if not self.path.exists():
             return ""
@@ -123,9 +118,7 @@ class LogFileMonitor(Monitor):
             f.seek(self.offset)
             data = f.read()
             self.offset = f.tell()
-        # A read can land mid-character when the writer is still going; the
-        # replacement character is better than losing the line, and the next
-        # poll starts from the byte after it either way.
+        # A read can land mid-character while the writer is still going.
         return data.decode("utf-8", errors="replace")
 
 
@@ -197,9 +190,8 @@ class LogFileMonitor(Monitor):
                 if severe and next_index == len(lines) and not flush:
                     # A traceback may be right behind this line; wait one poll.
                     return events, "\n".join([line, tail])
-                # Severe lines get a short lookahead (the traceback often lands
-                # a line or two later); anything else must be followed
-                # immediately to count as the same failure.
+                # A severe line's traceback often lands a line or two later;
+                # anything else must follow immediately to count as the same.
                 traceback_index = self.following_traceback_index(
                     lines,
                     next_index,
@@ -233,12 +225,9 @@ class LogFileMonitor(Monitor):
         while i < len(lines):
             line = lines[i]
             if not line.strip():
-                # A blank line inside a traceback is part of it (a chained
-                # "During handling…" block), but a blank line followed by an
-                # unindented line ends it: that next line belongs to whatever
-                # the application logged next. Swallowing it used to make an
-                # unrelated INFO line the block's exception — and therefore
-                # the incident's title and its fingerprint.
+                # A blank line is part of a chained trace, but one followed
+                # by an unindented line ends it — swallowing that line made it
+                # the block's exception, and so the incident's title.
                 if self.blank_ends_block(lines, i):
                     return block, i + 1
                 block.append(line)
@@ -253,7 +242,7 @@ class LogFileMonitor(Monitor):
                 block.append(line)
                 i += 1
                 continue
-            # First other non-indented line is the exception ("ValueError: ...").
+            # The first other unindented line is the exception.
             block.append(line)
             return block, i + 1
         return block, None
@@ -270,7 +259,7 @@ class LogFileMonitor(Monitor):
             return not (
                 line.startswith((" ", "\t")) or self.is_traceback_start(line)
             )
-        # Nothing but blanks left; the caller decides whether more is coming.
+        # Only blanks left; the caller decides whether more is coming.
         return False
 
     def traceback_event(self, block: list[str], context: str | None = None) -> ErrorEvent:

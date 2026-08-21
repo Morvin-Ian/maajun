@@ -9,8 +9,7 @@ from maajun.vcs import CommandResult
 
 PROJECT_URL = "https://github.com/Morvin-Ian/maajun"
 
-# Error details are quoted verbatim; cap them so a runaway log line can't
-# produce a body GitHub rejects.
+# Quoted verbatim, so cap them or GitHub rejects the body.
 MAX_DETAILS_IN_BODY = 4000
 MAX_TEST_OUTPUT = 3000
 

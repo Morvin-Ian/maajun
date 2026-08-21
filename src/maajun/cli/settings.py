@@ -148,16 +148,15 @@ def reset(
     config_dir = default_config_path().parent
     data_dir = default_data_dir()
 
-    # Honour a custom daemon.workdir so clones/incident DB are actually
-    # removed even when they live outside the default data dir.
+    # Honour a custom daemon.workdir, which may sit outside the data dir.
     dirs = [config_dir, data_dir]
     try:
         workdir = Path(Config.load().daemon.workdir).expanduser().resolve()
         if workdir not in dirs:
             refusal = unsafe_to_delete(workdir)
             if refusal:
-                # rmtree on a mistyped or over-broad workdir is unrecoverable,
-                # and the value comes from a hand-edited TOML file.
+                # The value comes from a hand-edited TOML file, and rmtree
+                # on a mistyped one is unrecoverable.
                 console.print(
                     f"[yellow]⚠ Not deleting daemon.workdir ({workdir}): "
                     f"{refusal} Remove it yourself if that is what you "

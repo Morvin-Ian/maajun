@@ -5,12 +5,9 @@ import logging
 log = logging.getLogger(__name__)
 
 
-# USD per 1M tokens, list price, verified against the vendors' own pricing
-# pages in August 2026. DeepSeek also bills cache *hits* at roughly a fiftieth
-# of the input rate; that is not modelled here, because parse_response does not
-# carry the prompt_cache_hit_tokens split through. Everything is therefore
-# costed at the cache-miss rate, which over-reports rather than under-reports —
-# the safe direction for a spend cap.
+# USD per 1M tokens, list price, checked August 2026. Cache hits are not
+# modelled, so everything costs at the cache-miss rate — over-reporting,
+# which is the safe direction for a spend cap.
 PRICING: dict[str, dict[str, float]] = {
     # https://api-docs.deepseek.com/quick_start/pricing
     "deepseek-v4-flash": {"input": 0.14, "output": 0.28},
@@ -21,28 +18,23 @@ PRICING: dict[str, dict[str, float]] = {
 }
 
 
-# What an unpriced model is costed at. Derived from the table rather than
-# fixed, so it stays the most expensive thing maajun knows about: a flat
-# $1.00/$3.00 was described as conservative but sat *below* gpt-4o, so an
-# unrecognised premium model was under-costed and the daily cap overshot.
+# What an unpriced model costs. Derived from the table so it stays the
+# dearest thing maajun knows about, even when a pricier model is added.
 DEFAULT_PRICING: dict[str, float] = {
     "input": max(rates["input"] for rates in PRICING.values()),
     "output": max(rates["output"] for rates in PRICING.values()),
 }
 
-# Models already warned about, so an unpriced model is reported once and not
-# on every incident.
+# Warned about already, so it is reported once and not per incident.
 warned: set[str] = set()
 
 
 def pricing_for(model: str | None) -> dict[str, float]:
     """Rates for a model, longest prefix first so families resolve correctly.
 
-    An unrecognised model — or none at all, from a gateway that does not name
-    what it ran — is costed at DEFAULT_PRICING, the dearest thing in the
-    table. Naming a cheap model as the fallback here is the tempting mistake:
-    it makes the unknown case *under*-report, which is the one direction a
-    spend cap must never fail in.
+    Anything unrecognised — including no model at all — costs at
+    DEFAULT_PRICING. A cheap fallback would make the unknown case
+    under-report, the one direction a spend cap must not fail in.
     """
     if not model:
         warn_once("(unnamed)")

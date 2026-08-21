@@ -72,8 +72,7 @@ def sign_out():
     """Clear every stored credential — provider API keys and the GitHub token."""
     auth = AuthManager()
     auth.clear_all()
-    # clear_all() drops the GitHub token too; saying "API keys" left people
-    # thinking their token had survived.
+    # clear_all() drops the GitHub token too, so say so.
     console.print(
         "[green]✓ Cleared all provider API keys and the GitHub token.[/green]"
     )

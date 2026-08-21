@@ -19,29 +19,19 @@ log = logging.getLogger(__name__)
 
 MAX_TOOL_ROUNDS = 50
 
-# Cap the messages sent per request so long sessions don't blow the context
-# window. Full history is kept locally for /history.
+# Per-request cap; the full history is kept locally for /history.
 MAX_HISTORY_MESSAGES = 40
 
-# Ceiling on the characters in one request. MAX_HISTORY_MESSAGES bounds the
-# stored conversation, but a single turn's tool loop appends an assistant
-# message and a tool result per call for up to MAX_TOOL_ROUNDS rounds — none
-# of which is history yet. Left unbounded, a grep-heavy analysis walks past
-# the context window and fails the incident outright.
-#
-# ~4 chars per token puts this near 40k tokens, comfortably inside the
-# smallest context maajun targets while leaving room for max_tokens of output.
+# One turn's tool loop adds messages that are not history yet, so
+# MAX_HISTORY_MESSAGES alone does not bound a request. ~40k tokens.
 MAX_REQUEST_CHARS = 160_000
 
-# Never trim below the system prompt plus this many trailing messages, so a
-# single enormous tool result cannot erase the question it was answering.
+# Floor, so one huge tool result cannot erase the question it answered.
 MIN_REQUEST_MESSAGES = 4
 
 TOOL_RESULT_PREVIEW = 200
 
-# Called with (tool_name, arguments) before a permission-gated tool runs.
-# True approves the call; False denies it; any other string denies it and is
-# passed on as the user's reason.
+# True approves, False denies, a string denies with a reason for the model.
 PermissionCallback = Callable[[str, dict[str, Any]], Awaitable[bool | str]]
 
 PERMISSION_DENIED = (
@@ -96,10 +86,8 @@ def trim_request_messages(messages: list[dict[str, Any]]) -> None:
         total -= message_size(messages.pop(1))
         while len(messages) > MIN_REQUEST_MESSAGES and messages[1].get("role") == "tool":
             total -= message_size(messages.pop(1))
-    # The floor above can stop mid-round, having dropped an assistant message
-    # but not the tool results that answered it. The API rejects an orphaned
-    # tool result outright, so the floor yields rather than the invariant:
-    # being a few messages short beats a request that cannot be sent at all.
+    # The floor can stop having dropped an assistant message but not its tool
+    # results. The API rejects an orphan, so the floor gives way instead.
     while len(messages) > 1 and messages[1].get("role") == "tool":
         total -= message_size(messages.pop(1))
     if total > MAX_REQUEST_CHARS:
@@ -151,8 +139,7 @@ class Agent:
         self.registry = tools or default_registry()
         self.approve = approve
         self.usage: dict[str, int] = {}
-        # The daemon's incident analysis and an interactive chat want to be
-        # told different things; the tool loop underneath is identical.
+        # The daemon and chat want different instructions, same tool loop.
         self.system_prompt = system_prompt or SYSTEM_PROMPT
         self.provider = ProviderFactory.create_provider(
             ProviderType(config.ai.provider),
@@ -199,10 +186,7 @@ class Agent:
         tools = self.registry.definitions()
         thinking_parts: list[str] = []
         last_content = ""
-        # Every round is a billed request, and each one resends the whole
-        # conversation — so reporting only the final round's usage would
-        # under-count a tool-heavy analysis several times over, and the
-        # daemon's spend cap reads these numbers.
+        # Every round is billed, and the spend cap reads these numbers.
         self.usage = {}
 
         try:

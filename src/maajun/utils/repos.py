@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-# Shown as the example/unset repository throughout the CLI and starter config.
 PLACEHOLDER_REPO = "owner/name"
 
 

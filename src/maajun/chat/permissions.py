@@ -9,15 +9,13 @@ from maajun.agent.core import PermissionCallback
 from maajun.agent.tools.base import resolve_path
 from maajun.chat.tools.commands import Gate, classify, parse_args
 
-# What an approval prompt can come back with, beyond yes and no: "always"
-# stops asking for that tool, and any other text is a reason the model is
-# told about instead of a bare refusal.
+# Beyond yes and no: "always" stops asking, anything else is a reason the
+# model is told about.
 ALWAYS = "always"
 
 Confirm = Callable[[str], bool | str]
 
-# Lines of diff shown before a write is approved. Enough to see the shape of
-# the change; a wholesale rewrite is summarized instead.
+# Enough to see the shape of a change; a rewrite is summarized instead.
 DIFF_LINES = 24
 
 
@@ -75,8 +73,8 @@ def chat_permissions(confirm: Confirm) -> PermissionCallback:
             try:
                 argv = parse_args(str(args.get("args") or ""))
             except ValueError:
-                # Unparseable arguments: let the tool report the quoting error
-                # rather than asking the user to approve something malformed.
+                # Let the tool report the quoting error rather than asking
+                # the user to approve something malformed.
                 return True
             gate = classify(command, argv)
             if gate is Gate.BLOCKED:
