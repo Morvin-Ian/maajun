@@ -133,11 +133,13 @@ class Agent:
         tools: ToolRegistry | None = None,
         approve: PermissionCallback | None = None,
         system_prompt: str | None = None,
+        max_rounds: int = MAX_TOOL_ROUNDS,
     ):
         self.config = config
         self.history: list[dict[str, Any]] = []
         self.registry = tools or default_registry()
         self.approve = approve
+        self.max_rounds = max_rounds
         self.usage: dict[str, int] = {}
         # The daemon and chat want different instructions, same tool loop.
         self.system_prompt = system_prompt or SYSTEM_PROMPT
@@ -190,7 +192,7 @@ class Agent:
         self.usage = {}
 
         try:
-            for _ in range(MAX_TOOL_ROUNDS):
+            for _ in range(self.max_rounds):
                 trim_request_messages(messages)
                 response = await self.complete(messages, tools)
                 accumulate_usage(self.usage, response.usage)
@@ -249,7 +251,7 @@ class Agent:
         self.usage = {}
 
         try:
-            for _ in range(MAX_TOOL_ROUNDS):
+            for _ in range(self.max_rounds):
                 round_content: list[str] = []
                 tool_calls: list[dict] = []
 
