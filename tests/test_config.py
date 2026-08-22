@@ -290,7 +290,8 @@ def test_base_url_is_absent_when_unset(tmp_path):
     path = tmp_path / "config.toml"
     Config().save(path)
 
-    assert "base_url" not in path.read_text()
+    # The key, not the word: paths in this file can contain anything.
+    assert "base_url =" not in path.read_text()
     assert Config.load(path).ai.base_url is None
 
 
