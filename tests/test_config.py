@@ -1,7 +1,14 @@
 import pytest
 from pydantic import ValidationError
 
-from maajun.config import AIProviderConfig, Config, GitHubConfig, RepoConfig
+from maajun.config import (
+    AIProviderConfig,
+    Config,
+    DeploymentConfig,
+    GitHubConfig,
+    MonitorConfig,
+    RepoConfig,
+)
 from maajun.providers.base import ProviderType
 
 
@@ -484,3 +491,149 @@ def test_saving_strips_legacy_keys_so_the_next_load_succeeds(tmp_path):
 
     assert "[[github.repos]]" in path.read_text()
     assert [rc.repo for rc in Config.load(path).github.repos] == ["acme/api"]
+
+
+# ---------------------------------------------------------------------------
+# Per-repo deployment
+# ---------------------------------------------------------------------------
+
+
+def deployed(**kwargs) -> Config:
+    config = Config()
+    config.add_repo(RepoConfig(repo="acme/api", deployment=DeploymentConfig(**kwargs)))
+    return config
+
+
+def test_a_deployment_survives_save_and_reload(tmp_path):
+    """save() rebuilds the repos array of tables from the model, so anything
+    it does not write is silently lost."""
+    path = tmp_path / "config.toml"
+    deployed(
+        path="/srv/api", port=8000, runs="docker compose", stack="Django 5",
+        log_files=["/srv/api/error.log"], journald_units=["api.service"],
+        docker_containers=["api-web-1"], runtime="none",
+    ).save(path)
+
+    deployment = Config.load(path).github.repos[0].deployment
+
+    assert deployment.path == "/srv/api"
+    assert deployment.port == 8000
+    assert deployment.runs == "docker compose"
+    assert deployment.stack == "Django 5"
+    assert deployment.log_files == ["/srv/api/error.log"]
+    assert deployment.journald_units == ["api.service"]
+    assert deployment.docker_containers == ["api-web-1"]
+    assert deployment.runtime == "none"
+
+
+def test_a_repo_with_no_deployment_grows_no_empty_table(tmp_path):
+    path = tmp_path / "config.toml"
+    deployed().save(path)
+
+    assert "[github.repos.deployment]" not in path.read_text()
+
+
+def test_the_deployment_is_written_as_a_sub_table(tmp_path):
+    path = tmp_path / "config.toml"
+    deployed(path="/srv/api", port=8000).save(path)
+
+    text = path.read_text()
+    assert "[github.repos.deployment]" in text
+    assert 'path = "/srv/api"' in text
+    assert "port = 8000" in text  # a number, not a string
+
+
+def test_only_what_is_set_is_written(tmp_path):
+    path = tmp_path / "config.toml"
+    deployed(docker_containers=["api-web-1"]).save(path)
+
+    text = path.read_text()
+    assert "docker_containers" in text
+    assert "journald_units" not in text
+    assert "runtime" not in text
+
+
+def test_two_repos_keep_their_own_deployments(tmp_path):
+    path = tmp_path / "config.toml"
+    config = Config()
+    config.add_repo(RepoConfig(
+        repo="acme/api", deployment=DeploymentConfig(port=8000)))
+    config.add_repo(RepoConfig(
+        repo="acme/web", deployment=DeploymentConfig(port=3000)))
+    config.save(path)
+
+    reloaded = Config.load(path).github.repos
+    assert [rc.deployment.port for rc in reloaded] == [8000, 3000]
+
+
+def test_a_deployment_value_is_set_per_repo(tmp_path):
+    config = deployed()
+
+    config.set("github.deployment.port", "8000", repo="acme/api")
+
+    assert config.github.repos[0].deployment.port == 8000
+    assert config.get("github.deployment.port", repo="acme/api") == "8000"
+
+
+def test_a_deployment_value_needs_a_repo():
+    """A folder or a port describes one deployment; applying it to every repo
+    is never what was meant."""
+    with pytest.raises(ValueError, match="needs a repository"):
+        deployed().set("github.deployment.port", "8000")
+
+
+def test_the_group_itself_is_not_a_value():
+    with pytest.raises(ValueError, match="group of settings"):
+        deployed().set("github.deployment", "x", repo="acme/api")
+
+
+def test_an_unknown_deployment_field_is_rejected():
+    with pytest.raises(ValueError, match="Unknown deployment field"):
+        deployed().set("github.deployment.colour", "blue", repo="acme/api")
+
+
+@pytest.mark.parametrize("port", ["99999", "-1"])
+def test_an_impossible_port_is_rejected(port):
+    with pytest.raises(ValueError):
+        deployed().set("github.deployment.port", port, repo="acme/api")
+
+
+def test_zero_is_how_a_port_is_unset():
+    config = deployed(port=8000)
+
+    config.set("github.deployment.port", "0", repo="acme/api")
+
+    assert config.github.repos[0].deployment.port == 0
+
+
+def test_runtime_only_accepts_none():
+    with pytest.raises(ValueError, match='runtime must be "none"'):
+        DeploymentConfig(runtime="whenever")
+
+
+def test_the_older_repo_log_files_spelling_is_merged_in():
+    repo = RepoConfig(
+        repo="acme/api",
+        log_files=["/old.log"],
+        deployment=DeploymentConfig(log_files=["/old.log", "/new.log"]),
+    )
+
+    assert repo.runtime_log_files() == ["/old.log", "/new.log"]
+
+
+def test_global_log_files_belong_to_the_first_repo():
+    config = Config(monitor=MonitorConfig(log_files=["/shared.log"]))
+    config.add_repo(RepoConfig(repo="acme/api"))
+    config.add_repo(RepoConfig(
+        repo="acme/web", deployment=DeploymentConfig(docker_containers=["web"])))
+
+    grouped = config.sources_by_repo()
+
+    assert grouped[0][1] == [("file", "/shared.log")]
+    assert grouped[1][1] == [("docker", "web")]
+
+
+def test_local_mode_groups_its_sources_under_no_repo():
+    config = Config(monitor=MonitorConfig(log_files=["/shared.log"]))
+
+    assert config.sources_by_repo() == [(None, [("file", "/shared.log")])]

@@ -28,6 +28,40 @@ def load_config(path) -> Config:
         raise typer.Exit(1) from e
 
 
+class Asker:
+    """Prompts that fall back to defaults when running non-interactively."""
+
+    def __init__(self, interactive: bool):
+        self.interactive = interactive
+
+    def text(self, prompt: str, default: str = "") -> str:
+        if not self.interactive:
+            return default
+        shown = f"{prompt} [{default}]: " if default else f"{prompt}: "
+        return prompt_line(f"> {shown}").strip() or default
+
+    def secret(self, prompt: str) -> str:
+        if not self.interactive:
+            return ""
+        return prompt_secret(f"> {prompt}: ")
+
+    def confirm(self, prompt: str, default: bool = False) -> bool:
+        if not self.interactive:
+            return default
+        hint = "Y/n" if default else "y/N"
+        answer = prompt_line(f"> {prompt} ({hint}): ").strip().lower()
+        if not answer:
+            return default
+        return answer.startswith("y")
+
+
+def split_list(value: str | None) -> list[str] | None:
+    """A comma-separated flag as a list. None stays None: "leave as is"."""
+    if value is None:
+        return None
+    return [item.strip() for item in value.split(",") if item.strip()]
+
+
 def implemented_providers() -> list[str]:
     return [p.value for p in ProviderFactory.get_supported_providers()]
 
