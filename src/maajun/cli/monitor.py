@@ -15,6 +15,7 @@ from maajun.cli.shared import app, console, load_config, pick_repo, split_list
 from maajun.cli.status_checks import build_status, gather_github
 from maajun.config import RepoConfig
 from maajun.daemon import build_daemon, build_daemon_for_report
+from maajun.discovery import probe_source
 from maajun.progress import WorkingStatus, working
 from maajun.utils import is_valid_repo, truncate
 from maajun.vcs import GitHubClient
@@ -349,7 +350,8 @@ def print_check(label: str, ok: bool, detail: str = "", warn: bool = False) -> b
 def status(
     config_path: Path | None = typer.Option(None, "--config", "-c", help="Config file location"),
     no_network: bool = typer.Option(
-        False, "--no-network", help="Skip GitHub reachability checks"
+        False, "--no-network",
+        help="Skip GitHub reachability checks, and probing docker/systemd",
     ),
 ):
     """Check that credentials, repos, and log files are ready for `watch`."""
@@ -370,6 +372,7 @@ def status(
     sections, ok = build_status(
         config, provider=provider, has_key=has_key,
         has_token=has_token, repos=repos, network=network,
+        probe=None if no_network else probe_source,
     )
 
     console.print(Panel("[bold]Maajun status[/bold]", border_style="blue"))
