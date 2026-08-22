@@ -107,7 +107,11 @@ def local_repo_path(config: Config) -> Path:
 
 
 def build_monitors(
-    config: Config, repos: list[RepoConfig], auth: AuthManager | None = None
+    config: Config,
+    repos: list[RepoConfig],
+    auth: AuthManager | None = None,
+    *,
+    backfill: bool = False,
 ) -> tuple[list[Monitor], dict[int, RepoConfig]]:
     """Build monitors and map each to the repo whose PRs it should open.
 
@@ -144,11 +148,17 @@ def build_monitors(
         """
         if kind == "journald":
             return JournaldMonitor(
-                target, cursor_dir=cursor_dir, **monitor_cfg.logfile_kwargs()
+                target, cursor_dir=cursor_dir, backfill=backfill,
+                **monitor_cfg.logfile_kwargs(),
             )
         if kind == "docker":
-            return DockerLogMonitor(target, **monitor_cfg.logfile_kwargs())
-        return LogFileMonitor(target, **monitor_cfg.logfile_kwargs())
+            return DockerLogMonitor(
+                target, backfill=backfill, **monitor_cfg.logfile_kwargs()
+            )
+        return LogFileMonitor(
+            target, cursor_dir=cursor_dir, backfill=backfill,
+            **monitor_cfg.logfile_kwargs(),
+        )
 
     def attach_source(
         kind: str, target: str, repo_config: RepoConfig | None
@@ -196,12 +206,16 @@ def build_monitors(
     return monitors, monitor_to_repo
 
 
-def build_daemon(config: Config, auth: AuthManager | None = None) -> Daemon:
+def build_daemon(
+    config: Config, auth: AuthManager | None = None, *, backfill: bool = False
+) -> Daemon:
     """Wire a Daemon from config + stored credentials."""
     auth = auth or AuthManager()
     deps = DaemonDeps(config, auth)
     try:
-        monitors, monitor_to_repo = build_monitors(config, deps.repos, auth)
+        monitors, monitor_to_repo = build_monitors(
+            config, deps.repos, auth, backfill=backfill
+        )
         if not monitors:
             raise RuntimeError(
                 "No monitors configured. Add log files under [monitor] "

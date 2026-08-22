@@ -177,7 +177,9 @@ def test_a_journald_monitor_gets_a_cursor_under_the_workdir(fake_keyring, tmp_pa
     config.daemon.workdir = str(tmp_path)
     monitors, _ = build_monitors(config, config.github.get_all_repos(), AuthManager())
 
-    assert monitors[0].cursor_file == tmp_path / "cursors" / "api.service.cursor"
+    cursor = monitors[0].cursor_file
+    assert cursor.parent == tmp_path / "cursors"
+    assert cursor.name.startswith("api.service-")
 
 
 def test_local_mode_attaches_global_logs_to_its_synthetic_repo(fake_keyring):
@@ -262,3 +264,47 @@ def test_the_daemon_agent_can_only_read_its_own_workspace(fake_keyring, tmp_path
     assert sandbox.contains((tmp_path / "workspaces" / "owner-name" / "src").resolve())
     assert not sandbox.contains(Path("/etc/passwd"))
     assert not sandbox.contains(tmp_path.resolve())
+
+
+def test_backfill_reaches_every_kind_of_source(fake_keyring, tmp_path):
+    """The flag means one thing: read what is already there, whatever the
+    source is."""
+    config = multi(
+        RepoConfig(repo="acme/api", deployment=DeploymentConfig(
+            log_files=[str(tmp_path / "a.log")],
+            journald_units=["api.service"],
+            docker_containers=["api-web-1"],
+        )),
+    )
+    config.daemon.workdir = str(tmp_path)
+
+    monitors, _ = build_monitors(
+        config, config.github.get_all_repos(), AuthManager(), backfill=True
+    )
+
+    assert [m.backfill for m in monitors] == [True, True, True]
+
+
+def test_without_the_flag_nothing_backfills(fake_keyring, tmp_path):
+    config = multi(
+        RepoConfig(repo="acme/api", deployment=DeploymentConfig(
+            log_files=[str(tmp_path / "a.log")])),
+    )
+    config.daemon.workdir = str(tmp_path)
+
+    monitors, _ = build_monitors(config, config.github.get_all_repos(), AuthManager())
+
+    assert monitors[0].backfill is False
+
+
+def test_a_log_monitor_keeps_its_cursor_under_the_workdir(fake_keyring, tmp_path):
+    config = multi(
+        RepoConfig(repo="acme/api", deployment=DeploymentConfig(
+            log_files=["/srv/api/error.log"])),
+    )
+    config.daemon.workdir = str(tmp_path)
+
+    monitors, _ = build_monitors(config, config.github.get_all_repos(), AuthManager())
+
+    assert monitors[0].cursor_file.parent == tmp_path / "cursors"
+    assert monitors[0].cursor_file.suffix == ".offset"

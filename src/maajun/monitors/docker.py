@@ -13,11 +13,13 @@ class DockerLogMonitor(CommandStreamMonitor):
     which costs nothing — the store dedups by fingerprint.
     """
 
-    def __init__(self, container: str, *args, **kwargs):
+    def __init__(self, container: str, *args, backfill: bool = False, **kwargs):
         super().__init__(*args, **kwargs)
         self.container = container
+        self.backfill = backfill
         self.since = time.time()
         self.pending_since = self.since
+        self.read_once = False
 
     @property
     def name(self) -> str:
@@ -25,6 +27,9 @@ class DockerLogMonitor(CommandStreamMonitor):
 
     def command(self) -> list[str]:
         self.pending_since = time.time()
+        if self.backfill and not self.read_once:
+            # Everything the container still holds — once, then windows.
+            return ["docker", "logs", self.container]
         return [
             "docker", "logs", "--since", f"{int(self.since)}", self.container
         ]
@@ -38,3 +43,4 @@ class DockerLogMonitor(CommandStreamMonitor):
 
     def on_success(self) -> None:
         self.since = self.pending_since
+        self.read_once = True

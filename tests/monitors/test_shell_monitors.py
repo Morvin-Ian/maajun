@@ -3,7 +3,7 @@ import logging
 import pytest
 
 from maajun.monitors import DockerLogMonitor, JournaldMonitor
-from maajun.monitors.journald import cursor_path
+from maajun.monitors.cursors import cursor_path
 from maajun.monitors.shell import CommandOutput, run_text
 
 TRACEBACK = """\
@@ -99,16 +99,23 @@ def test_journald_falls_back_to_a_window_when_the_cursor_dir_is_unusable(
         monitor = JournaldMonitor("kfl.service", cursor_dir=blocker / "cursors")
 
     assert monitor.cursor_file is None
-    assert "cannot use a journal cursor" in caplog.text
+    assert "cannot keep a cursor" in caplog.text
     await_poll(monitor)
     assert "--since" in calls[0]
     assert not any(arg.startswith("--cursor-file") for arg in calls[0])
 
 
 def test_a_unit_name_becomes_a_safe_cursor_filename(tmp_path):
-    path = cursor_path(tmp_path, "web@1.service")
-    assert path.name == "web@1.service.cursor"
+    assert cursor_path(tmp_path, "web@1.service").name.startswith("web@1.service-")
     assert cursor_path(tmp_path, "a/b.service").parent == tmp_path
+
+
+def test_two_sources_with_the_same_name_get_their_own_cursor(tmp_path):
+    """/srv/a/error.log and /srv/b/error.log sanitize alike."""
+    first = cursor_path(tmp_path, "/srv/a/error.log", ".offset")
+    second = cursor_path(tmp_path, "/srv/b/error.log", ".offset")
+
+    assert first != second
 
 
 def test_journald_groups_a_traceback_into_one_event(stub, tmp_path):
@@ -206,3 +213,50 @@ def await_poll(monitor):
     import asyncio
 
     return asyncio.run(monitor.poll())
+
+
+def test_backfill_reads_the_whole_journal(stub, tmp_path):
+    calls = stub()
+    monitor = JournaldMonitor("kfl.service", cursor_dir=tmp_path, backfill=True)
+
+    await_poll(monitor)
+
+    assert "--since" not in calls[0]
+
+
+def test_backfill_reads_a_containers_whole_log(stub):
+    calls = stub()
+    monitor = DockerLogMonitor("kfl-web-1", backfill=True)
+
+    await_poll(monitor)
+    assert "--since" not in calls[0]
+
+    # Only the first read: after that it is a window like any other poll.
+    await_poll(monitor)
+    assert "--since" in calls[1]
+
+
+def test_a_journal_is_not_replayed_every_poll_without_a_cursor(stub):
+    """With no writable cursor directory, backfill has to stop itself."""
+    calls = stub()
+    monitor = JournaldMonitor("kfl.service", backfill=True)
+
+    await_poll(monitor)
+    await_poll(monitor)
+
+    assert "--since" not in calls[0]
+    assert "--since" in calls[1]
+
+
+def test_backfill_forgets_a_saved_journal_cursor(stub, tmp_path):
+    """Same reason as the log file: the cursor is the end of the journal."""
+    calls = stub()
+    cursor = cursor_path(tmp_path, "kfl.service")
+    tmp_path.mkdir(exist_ok=True)
+    cursor.write_text("s=abc")
+
+    monitor = JournaldMonitor("kfl.service", cursor_dir=tmp_path, backfill=True)
+    await_poll(monitor)
+
+    assert not cursor.exists() or "--since" not in calls[0]
+    assert "--since" not in calls[0]

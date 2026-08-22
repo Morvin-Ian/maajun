@@ -51,7 +51,9 @@ async def check_it_runs(config) -> None:
         daemon.store.close()
 
 
-def start_in_background(config, config_path, mode: str | None, workdir: str) -> None:
+def start_in_background(
+    config, config_path, mode: str | None, workdir: str, *, backfill: bool = False
+) -> None:
     """Hand the terminal back, with the daemon still running behind it."""
     current = service.running(workdir)
     if current:
@@ -74,6 +76,8 @@ def start_in_background(config, config_path, mode: str | None, workdir: str) -> 
         args += ["--config", str(config_path)]
     if mode:
         args += ["--mode", mode]
+    if backfill:
+        args.append("--backfill")
     started = service.start(workdir, args)
     console.print(
         f"[green]✓ Watching in the background[/green] [dim](pid {started.pid})[/dim]\n\n"
@@ -153,6 +157,10 @@ def watch(
     show_status: bool = typer.Option(
         False, "--status", help="Say whether the daemon is running, and show recent output"
     ),
+    backfill: bool = typer.Option(
+        False, "--backfill",
+        help="Also work through the errors already in the logs, once",
+    ),
 ):
     """Watch for errors in the background, and document what turns up.
 
@@ -176,7 +184,7 @@ def watch(
 
     detach = not foreground and not once and not dry_run and not verbose
     if detach:
-        start_in_background(config, config_path, mode, workdir)
+        start_in_background(config, config_path, mode, workdir, backfill=backfill)
         return
 
     logging.basicConfig(
@@ -199,13 +207,18 @@ def watch(
             repo_config.mode = mode
 
     try:
-        daemon = build_daemon(config)
+        daemon = build_daemon(config, backfill=backfill)
     except RuntimeError as e:
         console.print(f"[red]✗ {e}[/red]")
         raise typer.Exit(1) from e
 
     repos = config.github.get_all_repos()
     dry_note = "\n[yellow]Dry run — no branches/PRs will be created[/yellow]" if dry_run else ""
+    if backfill:
+        dry_note += (
+            "\n[yellow]Backfill — errors already in the logs are analyzed "
+            "too[/yellow]"
+        )
     mode_source = " (override)" if mode else ""
     if daemon.local_mode:
         console.print(Panel(

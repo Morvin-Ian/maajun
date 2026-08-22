@@ -1,20 +1,13 @@
 from __future__ import annotations
 
 import logging
-import re
 import time
 from pathlib import Path
 
+from maajun.monitors.cursors import cursor_path, usable
 from maajun.monitors.shell import CommandStreamMonitor
 
 log = logging.getLogger(__name__)
-
-UNSAFE_IN_FILENAME = re.compile(r"[^A-Za-z0-9_.@-]")
-
-
-def cursor_path(directory: Path, unit: str) -> Path:
-    """Where a unit's journal cursor is kept. Unit names contain / and @."""
-    return directory / f"{UNSAFE_IN_FILENAME.sub('_', unit)}.cursor"
 
 
 class JournaldMonitor(CommandStreamMonitor):
@@ -23,7 +16,8 @@ class JournaldMonitor(CommandStreamMonitor):
     `-o cat` because the default format prefixes every line, which un-indents
     a traceback and makes it ungroupable. Position is journalctl's own cursor
     file, so a restart resumes exactly; until it exists a window from startup
-    stands in, rather than replaying the whole journal.
+    stands in, rather than replaying the whole journal — unless `backfill`
+    asks for exactly that.
     """
 
     def __init__(
@@ -31,36 +25,25 @@ class JournaldMonitor(CommandStreamMonitor):
         unit: str,
         *args,
         cursor_dir: str | Path | None = None,
+        backfill: bool = False,
         **kwargs,
     ):
         super().__init__(*args, **kwargs)
         self.unit = unit
+        self.backfill = backfill
         self.since = time.time()
         self.pending_since = self.since
-        self.cursor_file = self.prepare_cursor(cursor_dir)
+        self.read_once = False
+        directory = usable(cursor_dir, self.name)
+        self.cursor_file = cursor_path(directory, unit) if directory else None
+        if backfill and self.cursor_file:
+            # Otherwise the cursor — the end of the journal after one
+            # ordinary run — would win and backfill would read nothing.
+            self.cursor_file.unlink(missing_ok=True)
 
     @property
     def name(self) -> str:
         return f"journald:{self.unit}"
-
-    def prepare_cursor(self, cursor_dir: str | Path | None) -> Path | None:
-        """The cursor file, or None if its directory cannot be created.
-
-        Falling back to the time window keeps the monitor working on a host
-        where the workdir is not writable, rather than failing every poll.
-        """
-        if cursor_dir is None:
-            return None
-        directory = Path(cursor_dir).expanduser()
-        try:
-            directory.mkdir(parents=True, exist_ok=True)
-        except OSError as e:
-            log.warning(
-                "%s: cannot use a journal cursor in %s (%s); reading by time "
-                "window instead", self.name, directory, e,
-            )
-            return None
-        return cursor_path(directory, self.unit)
 
     def command(self) -> list[str]:
         cmd = ["journalctl", "-u", self.unit, "--no-pager", "-o", "cat"]
@@ -71,8 +54,14 @@ class JournaldMonitor(CommandStreamMonitor):
             # says are unread, so the window is only for the first run.
             if self.cursor_file.exists():
                 return cmd
+        if self.backfill and not self.read_once:
+            # Everything the journal still holds for this unit. Guarded by
+            # read_once as well as the cursor, since without a writable
+            # cursor directory every poll would replay the lot.
+            return cmd
         cmd += ["--since", f"@{int(self.since)}"]
         return cmd
 
     def on_success(self) -> None:
         self.since = self.pending_since
+        self.read_once = True
