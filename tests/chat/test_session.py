@@ -1,5 +1,3 @@
-"""Tests for the chat REPL: turns, slash commands, and persistence."""
-
 import pytest
 from rich.console import Console
 
@@ -706,14 +704,12 @@ def test_the_watch_notice_escapes_the_message():
     monitor_cli.console = console
 
     class FakeDaemon:
-        progress = None
         on_notice = None
 
-        async def run(self, **kwargs):
-            self.on_notice("failed on [/red] input", "error")
-
+    daemon = FakeDaemon()
     try:
-        monitor_cli.watch_with_spinner(FakeDaemon(), once=True)
+        monitor_cli.print_notices(daemon)
+        daemon.on_notice("failed on [/red] input", "error")
     finally:
         monitor_cli.console = original
 

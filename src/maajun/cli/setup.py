@@ -23,6 +23,7 @@ from maajun.cli.shared import (
 )
 from maajun.cli.status_checks import build_status
 from maajun.config import Config, RepoConfig, default_config_path
+from maajun.daemon import service
 from maajun.discovery import probe_source
 from maajun.providers.base import ProviderType
 from maajun.providers.factory import ProviderFactory
@@ -404,7 +405,23 @@ def setup(
 
     config.save(path)
     console.print(f"\n[green]✓ Wrote {path}[/green]")
-    print_summary(config, auth)
+    if not print_summary(config, auth):
+        return
+    if ask.interactive and ask.confirm("\nStart watching now?", default=True):
+        start_watching(config, path)
+
+
+def start_watching(config: Config, config_path: Path) -> None:
+    """Launch the daemon, so setup ends with maajun actually running."""
+    workdir = config.daemon.workdir
+    if service.running(workdir):
+        console.print("[dim]Already watching.[/dim]")
+        return
+    started = service.start(workdir, ["--config", str(config_path)])
+    console.print(
+        f"[green]✓ Watching in the background[/green] [dim](pid {started.pid})[/dim]\n"
+        f"  [dim]Logs: tail -f {started.log_file} · stop: maajun watch --stop[/dim]"
+    )
 
 
 def print_summary(config: Config, auth: AuthManager) -> bool:
