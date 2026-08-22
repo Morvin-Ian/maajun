@@ -362,12 +362,27 @@ def test_suggest_mode_has_no_approvals(tmp_path):
 async def test_fix_mode_allows_edits_inside_workspace_only(tmp_path):
     approve = make_permission_policy("fix", tmp_path)
 
-    assert await approve("edit_file", {"path": str(tmp_path / "src" / "a.py")})
-    assert await approve("write_file", {"path": str(tmp_path / "new.py")})
-    assert not await approve("edit_file", {"path": "/etc/passwd"})
-    assert not await approve("edit_file", {"path": str(tmp_path.parent / "outside.py")})
-    assert not await approve("edit_file", {})
-    assert not await approve("bash", {"command": "rm -rf /"})
+    assert await approve("edit_file", {"path": str(tmp_path / "src" / "a.py")}) is True
+    assert await approve("write_file", {"path": str(tmp_path / "new.py")}) is True
+    for denied in (
+        {"path": "/etc/passwd"},
+        {"path": str(tmp_path.parent / "outside.py")},
+        {},
+    ):
+        assert await approve("edit_file", denied) is not True
+    assert await approve("bash", {"command": "rm -rf /"}) is not True
+
+
+async def test_a_denial_tells_the_model_what_to_do_instead(tmp_path):
+    """A bare "denied" made the agent retry the same call and give up on the
+    fix; the refusal has to name the call that would work."""
+    approve = make_permission_policy("fix", tmp_path)
+
+    outside = await approve("edit_file", {"path": "/etc/passwd"})
+    assert str(tmp_path) in outside
+
+    other_tool = await approve("bash", {"command": "pytest"})
+    assert "edit_file" in other_tool
 
 
 # ---------------------------------------------------------------------------
