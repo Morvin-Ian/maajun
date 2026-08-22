@@ -1723,3 +1723,61 @@ async def test_a_manual_reports_cost_is_tracked(setup):
 
     assert store.total_cost() >= 0
     assert store.all()[0]["cost_usd"] is not None
+
+
+# ---------------------------------------------------------------------------
+# A bug that comes back
+# ---------------------------------------------------------------------------
+
+
+async def test_a_returning_error_is_filed_again_and_says_so(setup):
+    """The reader's first question is whether this is new; the second is what
+    was filed last time."""
+    daemon, logfile, agent, github, store, remote = setup
+
+    with open(logfile, "a") as f:
+        f.write(TRACEBACK)
+    fp = (await daemon.poll_once())[0]
+    store.conn.execute("UPDATE incidents SET last_seen = '2020-01-01T00:00:00+00:00'")
+    store.conn.commit()
+
+    with open(logfile, "a") as f:
+        f.write(TRACEBACK)
+    handled = await daemon.poll_once()
+
+    assert handled == [fp]
+    assert len(github.issues) == 2
+    body = github.issues[1]["body"]
+    assert "reported before and has come back" in body
+    assert github.issues[0]["body"].count("come back") == 0
+
+
+async def test_the_agent_is_told_the_fix_did_not_hold(setup):
+    daemon, logfile, agent, github, store, remote = setup
+
+    with open(logfile, "a") as f:
+        f.write(TRACEBACK)
+    await daemon.poll_once()
+    store.conn.execute("UPDATE incidents SET last_seen = '2020-01-01T00:00:00+00:00'")
+    store.conn.commit()
+
+    with open(logfile, "a") as f:
+        f.write(TRACEBACK)
+    await daemon.poll_once()
+
+    assert "reported before" in agent.prompts[1]
+    assert "reported before" not in agent.prompts[0]
+
+
+async def test_an_error_that_never_stopped_is_not_filed_twice(setup):
+    daemon, logfile, agent, github, store, remote = setup
+
+    with open(logfile, "a") as f:
+        f.write(TRACEBACK)
+    await daemon.poll_once()
+    with open(logfile, "a") as f:
+        f.write(TRACEBACK)
+    handled = await daemon.poll_once()
+
+    assert handled == []
+    assert len(github.issues) == 1

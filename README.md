@@ -122,6 +122,7 @@ detected and analyzed, but each report is written to
    GitHub Actions run.
 2. **Deduplicate** — each error is fingerprinted. The same error is never
    reported twice; repeat sightings bump a counter on the existing incident.
+   One that goes quiet and comes back is reported again, as a regression.
 3. **Analyze** — the agent reads the relevant source in a clone under
    `daemon.workdir` and produces a *what happened / root cause / suggested fix*
    report, including the commit that likely introduced the bug and how the app

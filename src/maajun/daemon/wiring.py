@@ -35,7 +35,10 @@ class DaemonDeps:
             )
 
         workdir = Path(config.daemon.workdir).expanduser()
-        self.store = IncidentStore(workdir / "incidents.db")
+        self.store = IncidentStore(
+            workdir / "incidents.db",
+            reopen_after_days=config.daemon.reopen_after_days,
+        )
         self.report_dir = workdir / "reports"
         # From here a failure has a database to close.
         try:

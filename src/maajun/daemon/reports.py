@@ -26,10 +26,25 @@ def provenance(event: ErrorEvent) -> str:
     )
 
 
-def issue_body(event: ErrorEvent, report: str) -> str:
+def regression_note(previous_url: str) -> str:
+    """A line saying this was reported before, or "" when it is new.
+
+    Filed at the top: whether a bug is back is the first thing a reader
+    needs, and it changes what they look at in the diff.
+    """
+    if not previous_url:
+        return ""
+    return (
+        "> ⚠️ **This was reported before and has come back.** "
+        f"The earlier report: {previous_url}\n\n"
+    )
+
+
+def issue_body(event: ErrorEvent, report: str, previous_url: str = "") -> str:
     """Suggest mode's artifact: the analysis plus the raw error."""
     return (
-        f"{report}\n\n---\n\n"
+        regression_note(previous_url)
+        + f"{report}\n\n---\n\n"
         f"## Error details\n\n```\n{event.details[:MAX_DETAILS_IN_BODY]}\n```\n\n"
         f"{provenance(event)}"
     )
@@ -42,6 +57,7 @@ def pr_body(
     verification: CommandResult | None = None,
     *,
     code_changed: bool = True,
+    previous_url: str = "",
 ) -> str:
     """Fix mode's artifact: the analysis, the test verdict, and provenance."""
     if code_changed:
@@ -57,7 +73,8 @@ def pr_body(
         )
         verdict = ""
     return (
-        f"{report}\n\n---\n"
+        regression_note(previous_url)
+        + f"{report}\n\n---\n"
         f"{summary}\n\n"
         f"{verdict}"
         f"{provenance(event)}"

@@ -608,6 +608,36 @@ Incidents handled from this version on also store their analysis text, so
 `maajun chat` can recall a root cause without going back to GitHub. Rows
 that predate the column keep their issue or PR link and show no report.
 
+### When a fixed bug comes back
+
+An error that is still happening is reported once: every sighting bumps its
+counter, and nothing new is filed. Spamming an unfixed bug helps nobody.
+
+An error that **stopped and started again** is a different thing — someone
+fixed it, and the fix did not hold — so maajun reports it again. The rule is
+a quiet gap: a published incident that goes `daemon.reopen_after_days`
+(7 by default) without being seen and then happens again is re-opened. The
+new issue or pull request says so at the top and links the earlier one, the
+incident keeps its history (`first_seen`, the total count), and the agent is
+told to check whether an earlier fix was reverted, incomplete, or papered
+over a symptom rather than explaining it as new.
+
+```toml
+[daemon]
+reopen_after_days = 7.0   # 0 reports each error once, ever
+```
+
+If you would rather not wait out the gap — you have merged the fix and want
+to hear immediately if it returns — forget the incident:
+
+```bash
+maajun incidents --forget <fingerprint>
+```
+
+That drops maajun's record of it, so the next occurrence is treated as new.
+A partial fingerprint is enough, and `--repo` settles it when two
+repositories share one.
+
 ## Cost tracking
 
 Each processed incident records the prompt/completion token counts and

@@ -628,7 +628,9 @@ def test_a_database_upgraded_without_fts5_is_indexed_on_a_later_open(tmp_path):
         conn.execute(f"DROP TRIGGER {trigger}")
     conn.execute("DROP TABLE chat_messages_fts")
     conn.commit()
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 4
+    from maajun.daemon.store import SCHEMA_VERSION
+
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
     assert not has_fts(conn)
     conn.close()
 
@@ -672,3 +674,130 @@ def test_messages_written_while_unindexed_are_searchable_after_repair(tmp_path):
     assert repaired.fts
     assert repaired.search("payments TimeoutError", exclude_session=0)
     repaired.close()
+
+
+# ---------------------------------------------------------------------------
+# An error that comes back after being fixed
+# ---------------------------------------------------------------------------
+
+
+def published(store, fingerprint="fp1", url="https://github.com/o/n/issues/1"):
+    event = ErrorEvent(
+        source="logfile:/x.log", message="KeyError: cart",
+        details="KeyError: cart", fingerprint=fingerprint,
+    )
+    store.record(event)
+    store.mark_processed(fingerprint, "", branch="", pr_url=url)
+    return event
+
+
+def went_quiet_for(store, days: float) -> None:
+    from datetime import UTC, datetime, timedelta
+
+    when = (datetime.now(UTC) - timedelta(days=days)).isoformat(timespec="seconds")
+    store.conn.execute("UPDATE incidents SET last_seen = ?", (when,))
+    store.conn.commit()
+
+
+def test_an_error_that_keeps_happening_is_not_reported_again(tmp_path):
+    """Spamming an unfixed bug helps nobody: its last_seen never goes stale."""
+    store = IncidentStore(tmp_path / "i.db")
+    event = published(store)
+
+    assert store.record(event) is False
+    assert store.record(event) is False
+
+
+def test_an_error_that_comes_back_after_a_gap_is_reported_again(tmp_path):
+    """It stopped, so someone fixed it; it started, so the fix did not hold."""
+    store = IncidentStore(tmp_path / "i.db", reopen_after_days=7)
+    event = published(store)
+    went_quiet_for(store, days=10)
+
+    assert store.record(event) is True
+    row = store.get(event.fingerprint)
+    assert row["status"] == "new"
+    assert row["previous_url"] == "https://github.com/o/n/issues/1"
+    assert row["reopened_at"]
+
+
+def test_the_history_is_kept_across_a_reopen(tmp_path):
+    """The count and first_seen are the evidence that it came back."""
+    store = IncidentStore(tmp_path / "i.db", reopen_after_days=7)
+    event = published(store)
+    first_seen = store.get(event.fingerprint)["first_seen"]
+    went_quiet_for(store, days=10)
+
+    store.record(event)
+
+    row = store.get(event.fingerprint)
+    assert row["first_seen"] == first_seen
+    assert row["count"] == 2
+    assert row["attempts"] == 0  # a fresh run, not a continued retry
+
+
+def test_a_gap_shorter_than_the_window_is_not_a_regression(tmp_path):
+    store = IncidentStore(tmp_path / "i.db", reopen_after_days=7)
+    event = published(store)
+    went_quiet_for(store, days=3)
+
+    assert store.record(event) is False
+
+
+def test_reopening_can_be_turned_off(tmp_path):
+    """0 keeps the old behaviour: each error is reported once, ever."""
+    store = IncidentStore(tmp_path / "i.db", reopen_after_days=0)
+    event = published(store)
+    went_quiet_for(store, days=400)
+
+    assert store.record(event) is False
+
+
+def test_an_unreadable_last_seen_does_not_reopen(tmp_path):
+    """A hand-edited row should not turn into a surprise issue."""
+    store = IncidentStore(tmp_path / "i.db", reopen_after_days=7)
+    event = published(store)
+    store.conn.execute("UPDATE incidents SET last_seen = 'whenever'")
+    store.conn.commit()
+
+    assert store.record(event) is False
+
+
+def test_forgetting_an_incident_makes_it_new_again(tmp_path):
+    """For a fix you trust: report it the moment it comes back, not in a week."""
+    store = IncidentStore(tmp_path / "i.db")
+    event = published(store)
+
+    assert store.forget_artifact(event.fingerprint) is True
+    assert store.record(event) is True
+    assert store.get(event.fingerprint)["status"] == "new"
+
+
+def test_forgetting_something_unknown_says_so(tmp_path):
+    store = IncidentStore(tmp_path / "i.db")
+
+    assert store.forget_artifact("nosuchfingerprint") is False
+
+
+def test_a_reopened_incident_is_scoped_to_its_repo(tmp_path):
+    """One repo's regression is not another's."""
+    store = IncidentStore(tmp_path / "i.db", reopen_after_days=7)
+    for repo in ("acme/api", "acme/web"):
+        event = ErrorEvent(
+            source="logfile:/x.log", message="KeyError", details="KeyError: cart",
+            fingerprint="shared", repo=repo,
+        )
+        store.record(event)
+        store.mark_processed("shared", repo, branch="", pr_url=f"https://x/{repo}")
+    store.conn.execute(
+        "UPDATE incidents SET last_seen = '2020-01-01T00:00:00+00:00'"
+        " WHERE repo = 'acme/api'"
+    )
+    store.conn.commit()
+
+    back = ErrorEvent(
+        source="logfile:/x.log", message="KeyError", details="KeyError: cart",
+        fingerprint="shared", repo="acme/api",
+    )
+    assert store.record(back) is True
+    assert store.get("shared", "acme/web")["status"] == "processed"

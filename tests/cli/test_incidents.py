@@ -261,3 +261,69 @@ def test_one_kind_of_source_needs_no_column(workdir):
     result = runner.invoke(app, ["incidents", "-c", str(config_path)])
 
     assert "Caught by" not in result.output
+
+
+def test_forgetting_an_incident_lets_it_be_reported_again(workdir):
+    """The manual half of regression reporting: you fixed it, so tell maajun
+    to speak up the moment it comes back."""
+    config_path, data = workdir
+    store = open_store(data)
+    add(store, "abc123def456", message="KeyError: discount", url="https://x/1")
+    store.close()
+
+    result = runner.invoke(
+        app, ["incidents", "-c", str(config_path), "--forget", "abc123"]
+    )
+
+    assert result.exit_code == 0
+    assert "Forgot abc123def456" in flat(result.output)
+    assert open_store(data).all() == []
+
+
+def test_forgetting_something_unknown_says_so(workdir):
+    config_path, data = workdir
+    store = open_store(data)
+    add(store, "fp1", message="KeyError")
+    store.close()
+
+    result = runner.invoke(
+        app, ["incidents", "-c", str(config_path), "--forget", "nope"]
+    )
+
+    assert "No incident starting with nope" in flat(result.output)
+
+
+def test_an_ambiguous_fingerprint_is_not_guessed(workdir):
+    """Forgetting the wrong repo's incident would silently re-file it."""
+    config_path, data = workdir
+    store = open_store(data)
+    add(store, "shared", message="KeyError", repo="acme/api")
+    add(store, "shared", message="KeyError", repo="acme/web")
+    store.close()
+
+    result = runner.invoke(
+        app, ["incidents", "-c", str(config_path), "--forget", "shared"]
+    )
+
+    assert "add --repo" in flat(result.output)
+    assert len(open_store(data).all()) == 2
+
+
+def test_a_repo_settles_an_ambiguous_fingerprint(workdir):
+    config_path, data = workdir
+    store = open_store(data)
+    add(store, "shared", message="KeyError", repo="acme/api")
+    add(store, "shared", message="KeyError", repo="acme/web")
+    store.close()
+
+    runner.invoke(app, [
+        "incidents", "-c", str(config_path), "--forget", "shared", "-r", "acme/api",
+    ])
+
+    assert [row["repo"] for row in open_store(data).all()] == ["acme/web"]
+
+
+def flat(text: str) -> str:
+    """Rich wraps at the console width; a long fingerprint or path can break
+    across lines. Flatten before asserting on a message."""
+    return " ".join(text.split())

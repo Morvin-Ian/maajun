@@ -6,6 +6,7 @@ from typing import get_args, get_origin
 import tomlkit
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
+from maajun.limits import DEFAULT_REOPEN_AFTER_DAYS
 from maajun.monitors.defaults import (
     DEFAULT_ERROR_PATTERN,
     DEFAULT_JSON_LEVEL_VALUES,
@@ -85,6 +86,8 @@ poll_interval = 30
 # max_usd_per_day = 5.0            # default: 5.0
 # Most incidents analyzed per poll cycle (0 = unlimited).
 # max_incidents_per_cycle = 10
+# Report an error again if it returns after this long away (0 = never).
+# reopen_after_days = 7.0
 
 [chat]
 # Stop answering in `maajun chat` once this much has been spent in a UTC day
@@ -309,6 +312,9 @@ class DaemonConfig(Base):
     repo_path: str = ""
     max_usd_per_day: float = 5.0
     max_incidents_per_cycle: int = 10
+    # A published incident that goes quiet this long and comes back is
+    # reported again, as a regression. 0 reports each error once, ever.
+    reopen_after_days: float = DEFAULT_REOPEN_AFTER_DAYS
 
 
 class ChatConfig(Base):

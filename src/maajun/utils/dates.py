@@ -16,3 +16,17 @@ def utc_day_start_iso() -> str:
     """
     midnight = datetime.now(UTC).replace(hour=0, minute=0, second=0, microsecond=0)
     return midnight.isoformat(timespec="seconds")
+
+
+def hours_between(earlier: str, later: str) -> float:
+    """Hours from one stored timestamp to another, or 0 if either is unusable.
+
+    Unparseable means a hand-edited or truncated row, and the safe reading of
+    "we cannot tell how long ago that was" is "not long".
+    """
+    try:
+        start = datetime.fromisoformat(earlier)
+        end = datetime.fromisoformat(later)
+    except (TypeError, ValueError):
+        return 0.0
+    return max(0.0, (end - start).total_seconds() / 3600)
