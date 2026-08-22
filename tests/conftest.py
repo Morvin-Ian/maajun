@@ -32,6 +32,18 @@ def cli_output_is_uncolored(monkeypatch):
     monkeypatch.setenv("NO_COLOR", "1")
 
 
+@pytest.fixture(autouse=True)
+def never_the_real_home(monkeypatch, tmp_path):
+    """No test may reach the config or data directory maajun actually uses.
+
+    `reset` deletes whatever daemon.workdir resolves to, and a test config
+    with no [daemon] section resolved to the real one — so running the suite
+    deleted the incident database, the clones, and the reports.
+    """
+    for name in ("XDG_CONFIG_HOME", "XDG_DATA_HOME"):
+        monkeypatch.setenv(name, str(tmp_path / name.lower()))
+
+
 # ---------------------------------------------------------------------------
 # Keyring mock
 # ---------------------------------------------------------------------------

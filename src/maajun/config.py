@@ -184,7 +184,10 @@ class MonitorConfig(Base):
 
 
 class DaemonConfig(Base):
-    workdir: str = str(default_data_dir())
+    # Resolved per instance, not at import: frozen at import it ignores a
+    # later XDG_DATA_HOME, and `reset` then deletes the real data directory
+    # while pointed at a temporary one.
+    workdir: str = Field(default_factory=lambda: str(default_data_dir()))
     repo_path: str = ""
     max_usd_per_day: float = 5.0
     max_incidents_per_cycle: int = 10
