@@ -10,7 +10,13 @@ from maajun.auth import AuthManager
 from maajun.config import AIProviderConfig, Config, RepoConfig
 from maajun.daemon.core import Daemon, LocalWorkspace, make_permission_policy
 from maajun.daemon.store import IncidentStore
-from maajun.monitors import GitHubActionsMonitor, LogFileMonitor, Monitor
+from maajun.monitors import (
+    DockerLogMonitor,
+    GitHubActionsMonitor,
+    JournaldMonitor,
+    LogFileMonitor,
+    Monitor,
+)
 from maajun.vcs import GitHubClient, GitWorkspace
 
 log = logging.getLogger(__name__)
@@ -61,7 +67,9 @@ class DaemonDeps:
             self.repos = repos
             self.workspaces = {
                 repo_config.repo: GitWorkspace(
-                    workdir / "workspaces", repo_config.repo, token
+                    workdir / "workspaces",
+                    repo_config.repo,
+                    token,
                 )
                 for repo_config in repos
             }
@@ -117,24 +125,39 @@ def build_monitors(
         if repo_config is not None:
             monitor_to_repo[id(monitor)] = repo_config
 
-    # One path can feed two repos, but watching it twice for one repo just
-    # reads the file twice and discards the second copy.
-    watched: set[tuple[str, str]] = set()
+    # One source can feed two repos, but watching it twice for one repo just
+    # reads it twice and discards the second copy.
+    watched: set[tuple[str, str, str]] = set()
+    cursor_dir = Path(config.daemon.workdir).expanduser() / "cursors"
 
-    def attach_logfile(path: str, repo_config: RepoConfig | None) -> None:
-        key = (path, repo_config.repo if repo_config else "")
+    def build_source(kind: str, target: str) -> Monitor:
+        """A monitor for one (kind, target), sharing the log-parsing tuning.
+
+        Every kind is a stream of the same log text — only where it is read
+        from differs — so error_pattern, the traceback headers and the burst
+        settings apply to all three.
+        """
+        if kind == "journald":
+            return JournaldMonitor(
+                target, cursor_dir=cursor_dir, **monitor_cfg.logfile_kwargs()
+            )
+        if kind == "docker":
+            return DockerLogMonitor(target, **monitor_cfg.logfile_kwargs())
+        return LogFileMonitor(target, **monitor_cfg.logfile_kwargs())
+
+    def attach_source(
+        kind: str, target: str, repo_config: RepoConfig | None
+    ) -> None:
+        key = (kind, target, repo_config.repo if repo_config else "")
         if key in watched:
-            log.debug("log file %s already watched for repo %s", *key)
+            log.debug("%s %s already watched for repo %s", *key)
             return
         watched.add(key)
-        attach(LogFileMonitor(path, **monitor_cfg.logfile_kwargs()), repo_config)
+        attach(build_source(kind, target), repo_config)
 
-    for path in monitor_cfg.log_files:
-        attach_logfile(path, default_repo)
-
-    for repo_config in repos:
-        for path in repo_config.log_files:
-            attach_logfile(path, repo_config)
+    for repo_config, sources in config.sources_by_repo(repos):
+        for kind, target in sources:
+            attach_source(kind, target, repo_config)
 
     # Skipped without a token; `status` reports it. One unusable monitor
     # should not stop the log monitors.

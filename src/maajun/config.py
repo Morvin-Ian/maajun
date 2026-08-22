@@ -45,6 +45,21 @@ provider = "deepseek"
 # Run after a fix-mode edit to verify it; the result goes in the PR body.
 # test_command = "pytest -q"
 
+# How and where this repo is deployed, and where its runtime errors land.
+# Fill it in with `maajun discover --repo owner/name --save`.
+# [github.repos.deployment]
+# path = "/srv/myapp"          # the app's folder on the server
+# port = 8000                  # what it listens on
+# runs = "docker compose"      # free text: how it is started
+# stack = "Django 5 + gunicorn"  # what it is built with, from reading the code
+# Errors reach maajun from any mix of these three, whatever the deploy
+# method: a file, a systemd unit's journal, or a container's stdout.
+# log_files = ["/srv/myapp/logs/error.log", "/var/log/nginx/error.log"]
+# journald_units = ["myapp.service"]
+# docker_containers = ["myapp-web-1"]
+# Set runtime = "none" to say a repo deliberately has no runtime source,
+# which is the only thing that silences the `maajun status` failure.
+
 [monitor]
 # Log files to watch for tracebacks and error lines.
 log_files = ["/var/log/myapp/error.log"]
@@ -113,12 +128,83 @@ class AIProviderConfig(Base):
         return value
 
 
+class DeploymentConfig(Base):
+    """Where and how a repo runs, and where its runtime errors land.
+
+    Deploy methods are not modelled; sinks are. However an app is started —
+    gunicorn under systemd, docker compose, supervisor, nginx on the host or
+    in a container — its errors end up in a file, in the journal, or on a
+    container's stdout. Those three cover every combination.
+    """
+
+    path: str = ""  # the app's folder on the server
+    port: int = 0  # what it listens on; 0 means unknown
+    runs: str = ""  # free text: "docker compose", "systemd: kfl.service"
+    stack: str = ""  # "Django 5 + gunicorn", from reading the code
+    log_files: list[str] = Field(default_factory=list)
+    journald_units: list[str] = Field(default_factory=list)
+    docker_containers: list[str] = Field(default_factory=list)
+    # "none" is an explicit "this repo has no runtime source and that is
+    # deliberate" — the one thing that silences the preflight failure.
+    runtime: str = ""
+
+    @field_validator("port")
+    @classmethod
+    def validate_port(cls, value: int) -> int:
+        if value and not (1 <= value <= 65535):
+            raise ValueError("port must be between 1 and 65535")
+        return value
+
+    @field_validator("runtime")
+    @classmethod
+    def validate_runtime(cls, value: str) -> str:
+        if value and value != "none":
+            raise ValueError('runtime must be "none" or left unset')
+        return value
+
+    def sources(self) -> list[tuple[str, str]]:
+        """Every error source as (kind, target), in the order they are read."""
+        return [
+            *(("file", path) for path in self.log_files),
+            *(("journald", unit) for unit in self.journald_units),
+            *(("docker", container) for container in self.docker_containers),
+        ]
+
+    def describes_a_deployment(self) -> bool:
+        """True once anything has been recorded — what `save` writes on."""
+        return bool(
+            self.path or self.port or self.runs or self.stack
+            or self.runtime or self.sources()
+        )
+
+
 class RepoConfig(Base):
     repo: str = ""  # "owner/name"
     base_branch: str = "main"
     mode: str = "suggest"
     log_files: list[str] = Field(default_factory=list)
     test_command: str = ""
+    deployment: DeploymentConfig = Field(default_factory=DeploymentConfig)
+
+    def runtime_log_files(self) -> list[str]:
+        """Files watched for this repo: the older spelling plus deployment.
+
+        `log_files` on the repo predates the deployment block and stays
+        supported, so a config written before this exists keeps working.
+        """
+        merged = list(self.log_files)
+        merged.extend(
+            path for path in self.deployment.log_files if path not in merged
+        )
+        return merged
+
+    def runtime_sources(self) -> list[tuple[str, str]]:
+        """Every runtime error source for this repo, as (kind, target)."""
+        return [
+            *(("file", path) for path in self.runtime_log_files()),
+            *(("journald", unit) for unit in self.deployment.journald_units),
+            *(("docker", name) for name in self.deployment.docker_containers),
+        ]
 
     @field_validator("mode")
     @classmethod
@@ -135,11 +221,32 @@ class RepoConfig(Base):
         return value
 
 
+# Per-repo fields that are a group of settings rather than one value, and so
+# are addressed as github.<group>.<leaf>.
+REPO_FIELD_GROUPS: dict[str, type[Base]] = {"deployment": DeploymentConfig}
+
+
+def require_repo_scope(key: str) -> None:
+    """Reject a group key that was given without --repo.
+
+    A folder, a port, or a container name belongs to one deployment, so
+    cascading it across every repo is never what was meant.
+    """
+    section, _, rest = key.partition(".")
+    if section != "github":
+        return
+    group, _, leaf = rest.partition(".")
+    if group in REPO_FIELD_GROUPS and leaf:
+        raise ValueError(
+            f"{key} describes one deployment, so it needs a repository: "
+            f"pass --repo owner/name."
+        )
+
+
 class GitHubConfig(Base):
     """GitHub configuration: a list of repositories, each with its own settings. """
 
     repos: list[RepoConfig] = Field(default_factory=list)
-
     def get_all_repos(self) -> list[RepoConfig]:
         return self.repos
 
@@ -262,6 +369,12 @@ class Config(Base):
                     repo_table["log_files"] = repo_config.log_files
                 if repo_config.test_command:
                     repo_table["test_command"] = repo_config.test_command
+                # Attached only once there is something to say, or every
+                # existing config grows an empty [github.repos.deployment].
+                if repo_config.deployment.describes_a_deployment():
+                    repo_table["deployment"] = deployment_table(
+                        repo_config.deployment
+                    )
                 repos_table.append(repo_table)
             # Trailing blank line, or the table that follows in the document
             # ends up butted directly against the last repo entry.
@@ -314,6 +427,28 @@ class Config(Base):
         self.github.repos = [*self.github.repos, repo]
 
 
+    def sources_by_repo(
+        self, repos: "list[RepoConfig] | None" = None
+    ) -> list[tuple["RepoConfig | None", list[tuple[str, str]]]]:
+        """Every runtime error source, grouped by the repo it files against.
+
+        One answer for both the daemon's monitors and what `status` reports,
+        so they cannot drift. Global monitor.log_files still attach to the
+        first repo. `repos` overrides the configured list for local mode,
+        which runs against one synthetic entry.
+        """
+        repos = self.github.get_all_repos() if repos is None else repos
+        shared = [("file", path) for path in self.monitor.log_files]
+        if not repos:
+            return [(None, shared)]
+        grouped: list[tuple[RepoConfig | None, list[tuple[str, str]]]] = []
+        for index, repo_config in enumerate(repos):
+            own = repo_config.runtime_sources()
+            if index == 0:
+                own = shared + [source for source in own if source not in shared]
+            grouped.append((repo_config, own))
+        return grouped
+
     def resolve(self, key: str) -> tuple[BaseModel, str]:
         """Map a dotted key to (owning model, field name). Raises ValueError
         for unknown sections/fields."""
@@ -345,18 +480,50 @@ class Config(Base):
             raise ValueError(f"Unknown field: {key}")
         return obj, field_name
 
-    def resolve_repo_field(self, key: str) -> str:
-        """Validate a dotted key as a per-repo field and return the field name."""
-        section, _, field_name = key.partition(".")
-        if section != "github" or not field_name:
+    def resolve_repo_field(self, key: str) -> tuple[str, str]:
+        """Validate a dotted key as a per-repo field.
+
+        Returns (field, subfield). subfield is "" for a plain field, and the
+        leaf name when the key descends into a group such as
+        `github.deployment.port`.
+        """
+        section, _, rest = key.partition(".")
+        if section != "github" or not rest:
             raise ValueError(f"--repo applies to github.* keys only; got '{key}'.")
+        field_name, _, subfield = rest.partition(".")
         settable = [name for name in RepoConfig.model_fields if name != "repo"]
         if field_name not in settable:
             raise ValueError(
                 f"Unknown per-repo field: {field_name}. "
                 f'Expected one of: {", ".join(settable)}.'
             )
-        return field_name
+
+        group = REPO_FIELD_GROUPS.get(field_name)
+        if group is None:
+            if subfield:
+                raise ValueError(f"Unknown per-repo field: {rest}.")
+            return field_name, ""
+
+        leaves = ", ".join(group.model_fields)
+        if not subfield:
+            raise ValueError(
+                f"{key} is a group of settings, not a single value. "
+                f"Set one of: {leaves}."
+            )
+        if subfield not in group.model_fields:
+            raise ValueError(
+                f"Unknown {field_name} field: {subfield}. "
+                f"Expected one of: {leaves}."
+            )
+        return field_name, subfield
+
+    def repo_target(self, repo: str, key: str) -> tuple[BaseModel, str]:
+        """The model and field name a per-repo key writes to."""
+        field_name, subfield = self.resolve_repo_field(key)
+        entry = self.repo_entry(repo)
+        if subfield:
+            return getattr(entry, field_name), subfield
+        return entry, field_name
 
     def repo_entry(self, repo: str) -> "RepoConfig":
         """The RepoConfig for `repo`, or a ValueError naming how to add it."""
@@ -391,10 +558,11 @@ class Config(Base):
         an invalid value raises ValueError.
         """
         if repo is not None:
-            field_name = self.resolve_repo_field(key)
-            set_field(self.repo_entry(repo), field_name, value)
+            obj, field_name = self.repo_target(repo, key)
+            set_field(obj, field_name, value)
             return
 
+        require_repo_scope(key)
         field_name = self.per_repo_key(key)
         if field_name is not None:
             if not self.github.repos:
@@ -417,9 +585,10 @@ class Config(Base):
     def get(self, key: str, repo: str | None = None) -> str:
         """Get a config value using dot notation. Secrets are masked."""
         if repo is not None:
-            field_name = self.resolve_repo_field(key)
-            return render_value(getattr(self.repo_entry(repo), field_name))
+            obj, field_name = self.repo_target(repo, key)
+            return render_value(getattr(obj, field_name))
 
+        require_repo_scope(key)
         field_name = self.per_repo_key(key)
         if field_name is not None:
             repos = self.github.repos
@@ -509,6 +678,20 @@ def set_if_customized(table, model: BaseModel, name: str) -> None:
         table[name] = value
 
 
+def deployment_table(deployment: "DeploymentConfig"):
+    """A [github.repos.deployment] sub-table holding only what is set.
+
+    Built fresh rather than round-tripped: `save` rebuilds the whole repos
+    array of tables, so anything not written here is lost.
+    """
+    node = tomlkit.table()
+    for name in ("path", "port", "runs", "stack", "runtime"):
+        set_or_del(node, name, getattr(deployment, name))
+    for name in ("log_files", "journald_units", "docker_containers"):
+        set_or_del(node, name, getattr(deployment, name))
+    return node
+
+
 def set_field(obj: BaseModel, field_name: str, value: str) -> None:
     """Coerce a string to a Pydantic field's type and assign it.
 
@@ -551,6 +734,24 @@ def first_error(exc: Exception) -> str:
     return str(exc)
 
 
+def render_deployment(deployment: "DeploymentConfig") -> list[str]:
+    """Rich-markup lines for one repo's deployment, empty when it has none."""
+    if not deployment.describes_a_deployment():
+        return []
+    lines = ["\n    [dim]\\[github.repos.deployment][/dim]"]
+    for name in ("path", "runs", "stack", "runtime"):
+        value = getattr(deployment, name)
+        if value:
+            lines.append(f'      {name} = [green]"{value}"[/green]')
+    if deployment.port:
+        lines.append(f"      port = [green]{deployment.port}[/green]")
+    for name in ("log_files", "journald_units", "docker_containers"):
+        value = getattr(deployment, name)
+        if value:
+            lines.append(f"      {name} = [green]{value}[/green]")
+    return lines
+
+
 def render_config(config: "Config") -> str:
     """Build the `maajun config` overview as a Rich-markup string.
 
@@ -581,6 +782,7 @@ def render_config(config: "Config") -> str:
                 )
             if repo_config.log_files:
                 parts.append(f"    log_files = [green]{repo_config.log_files}[/green]")
+            parts.extend(render_deployment(repo_config.deployment))
     else:
         parts.append(
             f'  [dim]no repositories — add one with[/dim] '

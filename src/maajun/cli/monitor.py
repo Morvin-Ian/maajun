@@ -11,7 +11,7 @@ from rich.markup import escape
 from rich.panel import Panel
 
 from maajun.auth import AuthManager
-from maajun.cli.shared import app, console, load_config, pick_repo
+from maajun.cli.shared import app, console, load_config, pick_repo, split_list
 from maajun.cli.status_checks import build_status, gather_github
 from maajun.config import RepoConfig
 from maajun.daemon import build_daemon, build_daemon_for_report
@@ -269,6 +269,19 @@ def add_repo(
     log_files: str | None = typer.Option(
         None, "--log-files", "-l", help="Comma-separated log paths for this repo"
     ),
+    deploy_path: str | None = typer.Option(
+        None, "--path", help="The app's folder on the server"
+    ),
+    port: int | None = typer.Option(None, "--port", help="Port the app listens on"),
+    runs: str | None = typer.Option(
+        None, "--runs", help="How it runs, e.g. 'docker compose' or 'systemd'"
+    ),
+    journald_units: str | None = typer.Option(
+        None, "--journald-units", help="Comma-separated systemd units to read"
+    ),
+    docker_containers: str | None = typer.Option(
+        None, "--docker-containers", help="Comma-separated containers to read logs from"
+    ),
     config_path: Path | None = typer.Option(None, "--config", "-c", help="Config file location"),
 ):
     """Add a repository to watch.
@@ -284,10 +297,9 @@ def add_repo(
         raise typer.Exit(1)
 
     config = load_config(config_path)
-    logs = (
-        None if log_files is None
-        else [path.strip() for path in log_files.split(",") if path.strip()]
-    )
+    logs = split_list(log_files)
+    units = split_list(journald_units)
+    containers = split_list(docker_containers)
 
     # None means "leave as is", not "reset to the default" — changing the
     # mode used to silently revert the base branch.
@@ -302,6 +314,16 @@ def add_repo(
         entry.mode = mode
     if logs is not None:
         entry.log_files = logs
+    if deploy_path is not None:
+        entry.deployment.path = deploy_path
+    if port is not None:
+        entry.deployment.port = port
+    if runs is not None:
+        entry.deployment.runs = runs
+    if units is not None:
+        entry.deployment.journald_units = units
+    if containers is not None:
+        entry.deployment.docker_containers = containers
     config.save(config_path)
 
     names = ", ".join(repo_config.repo for repo_config in config.github.repos)
