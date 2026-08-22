@@ -737,3 +737,53 @@ def test_a_bare_name_still_reaches_the_repo_flags(fake_keyring, signed_in, tmp_p
 
     entry = Config.load(config_path).github.repos[0]
     assert (entry.repo, entry.mode, entry.deployment.port) == ("morvin/myapp", "fix", 8000)
+
+
+# ---------------------------------------------------------------------------
+# Backfill
+# ---------------------------------------------------------------------------
+
+
+def fake_background(monitor_cli, monkeypatch, tmp_path) -> dict:
+    """Stop watch actually detaching; report the arguments it would pass on."""
+    launched: dict = {}
+
+    def start(workdir, args):
+        launched["args"] = args
+        return monitor_cli.service.Running(pid=1, log_file=tmp_path / "watch.log")
+
+    async def no_daemon(config):
+        return None
+
+    monkeypatch.setattr(monitor_cli.service, "running", lambda workdir: None)
+    monkeypatch.setattr(monitor_cli.service, "start", start)
+    monkeypatch.setattr(monitor_cli, "check_it_runs", no_daemon)
+    return launched
+
+
+def test_backfill_is_passed_to_the_background_daemon(fake_keyring, tmp_path, monkeypatch):
+    """It is a per-run choice, and the run happens in another process."""
+    from maajun.cli import monitor as monitor_cli
+
+    launched = fake_background(monitor_cli, monkeypatch, tmp_path)
+    config_path = tmp_path / "config.toml"
+    config_path.write_text("[ai]\nprovider = \"deepseek\"\n")
+
+    result = runner.invoke(app, ["watch", "-c", str(config_path), "--backfill"])
+
+    assert result.exit_code == 0
+    assert "--backfill" in launched["args"]
+
+
+def test_without_the_flag_the_daemon_is_not_told_to_backfill(
+    fake_keyring, tmp_path, monkeypatch
+):
+    from maajun.cli import monitor as monitor_cli
+
+    launched = fake_background(monitor_cli, monkeypatch, tmp_path)
+    config_path = tmp_path / "config.toml"
+    config_path.write_text("[ai]\nprovider = \"deepseek\"\n")
+
+    runner.invoke(app, ["watch", "-c", str(config_path)])
+
+    assert "--backfill" not in launched["args"]

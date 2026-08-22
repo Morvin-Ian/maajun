@@ -1,6 +1,9 @@
+import asyncio
+
 import pytest
 
 from maajun.monitors import ErrorEvent, LogFileMonitor, fingerprint
+from maajun.monitors.cursors import read_position
 
 TRACEBACK = """\
 Traceback (most recent call last):
@@ -493,7 +496,7 @@ import asyncio, pathlib, sys
 from maajun.monitors import LogFileMonitor
 
 path = pathlib.Path(sys.argv[1])
-events = asyncio.run(LogFileMonitor(path).poll())
+events = asyncio.run(LogFileMonitor(path, backfill=True).poll())
 sys.stdout.buffer.write(events[0].message.encode("utf-8"))
 """
 
@@ -530,8 +533,183 @@ def test_the_offset_stays_comparable_with_the_file_size(tmp_path):
     returns an opaque cookie that only usually happens to be one."""
     log = tmp_path / "app.log"
     log.write_bytes("ERROR café ☕ Ünal\n".encode())
-    monitor = LogFileMonitor(log)
+    monitor = LogFileMonitor(log, backfill=True)
 
     monitor.read_new()
 
     assert monitor.offset == log.stat().st_size
+
+
+# ---------------------------------------------------------------------------
+# Where reading starts
+# ---------------------------------------------------------------------------
+
+
+BACKLOG = (
+    'ERROR old failure\nTraceback (most recent call last):\n'
+    '  File "old.py", line 1\nKeyError: "gone"\n'
+)
+
+FRESH = (
+    'ERROR new failure\nTraceback (most recent call last):\n'
+    '  File "new.py", line 1\nValueError: here\n'
+)
+
+
+def test_what_is_already_in_the_log_is_left_alone(tmp_path):
+    """Starting a monitor is not a request to file an issue for every error
+    of the last six months."""
+    log = tmp_path / "app.log"
+    log.write_text(BACKLOG * 3)
+
+    monitor = LogFileMonitor(log)
+
+    assert asyncio.run(monitor.poll()) == []
+
+
+def test_errors_after_the_start_are_read(tmp_path):
+    log = tmp_path / "app.log"
+    log.write_text(BACKLOG)
+    monitor = LogFileMonitor(log)
+
+    with open(log, "a") as f:
+        f.write(FRESH)
+    events = asyncio.run(monitor.poll())
+
+    assert [e.message for e in events] == ['ValueError: here']
+
+
+def test_backfill_reads_the_whole_log(tmp_path):
+    log = tmp_path / "app.log"
+    log.write_text(BACKLOG * 3)
+
+    events = asyncio.run(LogFileMonitor(log, backfill=True).poll())
+
+    assert len(events) == 3
+
+
+def test_a_log_written_between_construction_and_the_first_poll_is_read(tmp_path):
+    """"From now on" is measured when maajun is asked to watch, not whenever
+    the first poll happens to land."""
+    log = tmp_path / "app.log"
+    log.write_text(BACKLOG)
+    monitor = LogFileMonitor(log)
+    with open(log, "a") as f:
+        f.write(FRESH)
+
+    assert len(asyncio.run(monitor.poll())) == 1
+
+
+def test_a_log_that_appears_later_is_read_whole(tmp_path):
+    """Nothing in it predates the watch: the app created it after we started."""
+    log = tmp_path / "app.log"
+    monitor = LogFileMonitor(log)
+
+    log.write_text(BACKLOG)
+
+    assert len(asyncio.run(monitor.poll())) == 1
+
+
+def test_a_restart_carries_on_from_the_cursor(tmp_path):
+    """Without this a restart re-reads the file — cheap for a small log, and
+    a fresh parse of gigabytes for a real one."""
+    log = tmp_path / "app.log"
+    log.write_text(BACKLOG)
+    cursors = tmp_path / "cursors"
+    first = LogFileMonitor(log, cursor_dir=cursors, backfill=True)
+    assert len(asyncio.run(first.poll())) == 1
+
+    restarted = LogFileMonitor(log, cursor_dir=cursors)
+    assert asyncio.run(restarted.poll()) == []
+
+    with open(log, "a") as f:
+        f.write(FRESH)
+    assert len(asyncio.run(restarted.poll())) == 1
+
+
+def test_a_cursor_is_written_even_when_the_log_is_quiet(tmp_path):
+    log = tmp_path / "app.log"
+    log.write_text(BACKLOG)
+    cursors = tmp_path / "cursors"
+
+    monitor = LogFileMonitor(log, cursor_dir=cursors)
+    asyncio.run(monitor.poll())
+
+    saved = read_position(monitor.cursor_file)
+    assert saved.offset == log.stat().st_size
+
+
+def test_a_log_rotated_while_the_daemon_was_down_is_read_whole(tmp_path):
+    """The cursor points into a file that no longer exists, so everything in
+    the new one is unread."""
+    log = tmp_path / "app.log"
+    log.write_text(BACKLOG)
+    cursors = tmp_path / "cursors"
+    asyncio.run(LogFileMonitor(log, cursor_dir=cursors, backfill=True).poll())
+
+    # How logrotate does it: the replacement is written elsewhere and moved
+    # into place, so the path points at a different inode.
+    replacement = tmp_path / "app.log.new"
+    replacement.write_text(FRESH * 2)
+    replacement.rename(log)
+    assert log.stat().st_ino != read_position(
+        LogFileMonitor(log, cursor_dir=cursors).cursor_file
+    ).inode
+
+    events = asyncio.run(LogFileMonitor(log, cursor_dir=cursors).poll())
+
+    assert len(events) == 2
+
+
+def test_a_cursor_past_the_end_is_ignored(tmp_path):
+    """Truncated in place while we were down: the offset says more was read
+    than the file now holds."""
+    log = tmp_path / "app.log"
+    log.write_text(BACKLOG * 4)
+    cursors = tmp_path / "cursors"
+    monitor = LogFileMonitor(log, cursor_dir=cursors, backfill=True)
+    asyncio.run(monitor.poll())
+
+    log.write_text(FRESH)  # same inode, much shorter
+
+    assert len(asyncio.run(LogFileMonitor(log, cursor_dir=cursors).poll())) == 1
+
+
+def test_a_garbled_cursor_is_ignored(tmp_path):
+    log = tmp_path / "app.log"
+    log.write_text(BACKLOG)
+    cursors = tmp_path / "cursors"
+    cursors.mkdir()
+    monitor = LogFileMonitor(log, cursor_dir=cursors)
+    monitor.cursor_file.write_text("not a position")
+
+    assert asyncio.run(monitor.poll()) == []  # falls back to the default
+
+
+def test_no_cursor_directory_still_monitors(tmp_path):
+    """A workdir that cannot be written is not a reason to stop watching."""
+    log = tmp_path / "app.log"
+    log.write_text(BACKLOG)
+    blocker = tmp_path / "not-a-dir"
+    blocker.write_text("")
+
+    monitor = LogFileMonitor(log, cursor_dir=blocker / "cursors", backfill=True)
+
+    assert monitor.cursor_file is None
+    assert len(asyncio.run(monitor.poll())) == 1
+
+
+def test_backfill_overrides_a_saved_cursor(tmp_path):
+    """After one ordinary run the saved position is the end of the file, so a
+    backfill that respected it would read nothing — which is exactly when
+    someone asks for one."""
+    log = tmp_path / "app.log"
+    log.write_text(BACKLOG * 2)
+    cursors = tmp_path / "cursors"
+    asyncio.run(LogFileMonitor(log, cursor_dir=cursors).poll())  # writes the cursor
+
+    events = asyncio.run(
+        LogFileMonitor(log, cursor_dir=cursors, backfill=True).poll()
+    )
+
+    assert len(events) == 2
