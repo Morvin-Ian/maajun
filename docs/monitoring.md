@@ -285,6 +285,32 @@ works too since `error_pattern` is a plain regex you can adapt to any
 log format. Errors that are swallowed without being logged are invisible
 — make sure unhandled exceptions actually reach a file.
 
+### Errors that are already in the log
+
+Watching starts from where each source stands when maajun starts: the end
+of a log file, and the present moment for a journal or a container. A log
+that has been collecting errors for months does not become months of issues
+the first time you run `maajun watch`.
+
+To work through what is already there:
+
+```bash
+maajun watch --backfill
+```
+
+That reads the whole log file, the unit's whole journal, and the
+container's whole log — once — and then carries on from the end as usual.
+What it costs is one analysis per distinct *error shape*, not per line:
+fingerprints ignore digits, hex and ids, so a thousand repeats of one
+traceback are a single incident. `daemon.max_incidents_per_cycle` and
+`daemon.max_usd_per_day` bound the first run if the backlog is unknown.
+
+A log file's byte offset is kept in `<workdir>/cursors`, so a restart
+resumes exactly where it stopped rather than re-reading the file — which
+also means the errors written while the daemon was down are picked up when
+it comes back. A file rotated or truncated in the meantime is read from the
+start, since nothing in it has been seen.
+
 ### The journal and container logs
 
 `journald_units` runs `journalctl -u <unit> -o cat` each poll. The position
@@ -669,10 +695,11 @@ The daemon shuts down gracefully on `SIGTERM`/`SIGINT`: it finishes the
 incident it is currently processing before exiting, so
 `systemctl stop`/`restart` never leaves a half-pushed branch.
 
-Note: after a restart the daemon re-reads watched log files from the start
-and re-fetches current CI failures; journald resumes from its cursor.
-Deduplication makes the overlap harmless — already-processed errors are
-recognized and skipped without any AI calls.
+Note: after a restart each source resumes from its own cursor — a log
+file's byte offset, journald's own cursor — so nothing is re-read and
+nothing written during the restart is lost. CI failures are re-fetched;
+deduplication makes that overlap harmless, since already-processed errors
+are recognized and skipped without any AI calls.
 
 ## Troubleshooting
 
