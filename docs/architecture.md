@@ -102,24 +102,42 @@ and treats their output identically. They all produce the same normalized
 `ErrorEvent` (source, message, details, fingerprint), so the rest of the
 pipeline doesn't care where an error came from.
 
-- **Log files** (`monitors/logfile.py`) — tails files incrementally,
-  surviving rotation and truncation. Recognizes Python, Java, and Go
-  stack traces (including ones split across polls), lines matching the
-  configured error pattern, and structured JSON logs matched on a level
-  field. Requires maajun to run on the machine that writes the logs —
-  this is how failing requests on a VPS are detected, via the traceback
-  the app logs when a request errors.
+Runtime errors reach maajun through one of three sinks, which is what
+makes it deploy-method agnostic: however an app is started, its errors end
+up in a file, in the journal, or on a container's stdout. All three are the
+same *text*, so they share one reading of it — `LogStreamMonitor`
+(`monitors/stream.py`) owns the whole parse: Python, Java, and Go stack
+traces (including ones split across polls), lines matching the configured
+error pattern, structured JSON logs matched on a level field, and the
+carry-over that holds back text which may still be streaming. A subclass
+supplies only `read_stream()`.
+
+- **Log files** (`monitors/logfile.py`) — a byte offset into a file,
+  surviving rotation (inode change) and truncation (size below offset).
+- **journald** (`monitors/journald.py`) — `journalctl -u <unit> -o cat`,
+  positioned by journalctl's own cursor file under `daemon.workdir`, so a
+  restart resumes exactly where it stopped. A time window from startup
+  stands in until the cursor exists, rather than replaying the journal.
+- **docker** (`monitors/docker.py`) — `docker logs --since <last poll>`,
+  reading the container's stderr as well as its stdout, since that is
+  where an unhandled exception goes.
 - **GitHub Actions** (`monitors/github_actions.py`) — polls for failed
   workflow runs, turning CI breakage into incidents. Failures are
   fingerprinted by commit SHA, so several red workflows on the same
   commit collapse into a single incident.
 
-The GitHub Actions monitor is built on `HTTPPollMonitor`, which owns the
-HTTP client, remembers which item ids it has already emitted, and
-swallows (but logs) fetch failures — a monitor that can't reach its API
-returns no events rather than crashing the daemon. Adding a new
-HTTP-polled source means implementing three methods: fetch the items,
-identify one, convert one to an `ErrorEvent`.
+Neither journald nor docker asks for timestamps, on purpose: both prefix
+every line, which would leave the indented lines of a traceback no longer
+indented and so impossible to group into one incident.
+
+The two shelling-out monitors share `CommandStreamMonitor`
+(`monitors/shell.py`), which runs the command in a thread — `poll_once`
+gathers every monitor at once, so a blocking read would stall all of them —
+and reports an unreadable source once rather than every poll. The GitHub
+Actions monitor is built on `HTTPPollMonitor`, which owns the HTTP client,
+remembers which item ids it has already emitted, and swallows (but logs)
+fetch failures. Either way a monitor that can't reach its source returns no
+events rather than crashing the daemon.
 
 Every monitor also inherits **burst thresholding** from the base class:
 with `burst_threshold > 1`, events are buffered until N of them land
@@ -131,15 +149,17 @@ blip never becomes a pull request.
 ```
 maajun/
   agent/        the tool-calling loop and its tools
-  monitors/     error sources (log files, GitHub Actions) + shared defaults
+  monitors/     error sources (files, journald, docker, Actions) + defaults
   providers/    chat_completions.py (the protocol) + one file per vendor,
                 plus pricing.py
   daemon/       core (loop), reports (rendering), store, prompts, wiring
   chat/         the REPL, its memory, and the tools that drive the CLI
   vcs/          git workspace, GitHub client, API conventions
   cli/          one command per module, all registering on a shared Typer app
-  auth.py       credentials, read only from the OS keyring
+  auth.py       credentials: the OS keyring, then a gh login
+  inspection.py reads a codebase to find how its errors surface
   config.py     the config models and TOML round-trip
+  discovery.py  probes the host for how a repo is deployed
 ```
 
 ## The incident pipeline (`maajun watch`)
@@ -169,7 +189,11 @@ maajun/
    [multi-repo](monitoring.md#multiple-repositories) config each monitor
    is bound to a repo, so its errors are analyzed against — and open PRs
    on — the right one, each with its own clone, branch, and mode.
-4. **Publish** — depends on the repo's [mode](monitoring.md#modes). In
+4. **Check the report** — a blank answer, or one with none of the report's
+   sections, is asked for once more and then abandoned: no issue, no PR,
+   the incident marked failed. An empty artifact costs the reader more than
+   it gives and hides that the run went wrong.
+5. **Publish** — depends on the repo's [mode](monitoring.md#modes). In
    `suggest` mode the report is filed as a GitHub **issue**: no branch, no
    commit, no push, because there is no diff to review. In `fix` mode the
    repo's `test_command` (if set) is run in the workspace first and its
@@ -178,11 +202,14 @@ maajun/
    committed as `docs/incidents/<fingerprint>.md` alongside the
    agent's edits, the branch is pushed, and a **pull request** is opened
    with the report as its body — reusing an existing PR for the branch
-   rather than duplicating it. With no `github.repo` configured the daemon
+   rather than duplicating it. Fix mode always ends in a PR: when the agent
+   changed no code, the committed report is the diff and the body says so,
+   so the finding still lands in one reviewable place. With no
+   `github.repo` configured the daemon
    runs in [local mode](monitoring.md#1-configure) instead: steps 1–3 are
    unchanged, but the report is written to `<workdir>/reports/` and no git
    or GitHub operation runs at all.
-5. **Record** — the incident is marked processed with its PR URL, token
+6. **Record** — the incident is marked processed with its PR URL, token
    counts, and USD cost. If any step fails, the incident is marked failed
    and the daemon moves on; one bad incident never kills the loop.
 
@@ -190,7 +217,8 @@ maajun/
 
 The same pipeline runs without a monitor. `maajun report "<description>"`
 builds a synthetic `ErrorEvent` (source `manual`, fingerprinted from the
-description) and feeds it through steps 3–5 against a chosen repo, opening
+description), records it as an incident like any other, and feeds it
+through the analyze/publish steps against a chosen repo, opening
 a PR on a `maajun/report-<fingerprint>` branch. Detected incidents and
 manual reports share the analyze/publish code path, so cost tracking
 behaves identically. The one difference is dedup: the watch
@@ -201,13 +229,13 @@ an explicit request, not a passive observation.
 ### Progress feedback
 
 Foreground commands that do slow work surface it instead of hanging
-silently. `report` and interactive `watch` drive a Rich `Live` spinner
-(`progress.py`) whose phase label the daemon advances through a `progress`
-callback (*preparing workspace → analyzing with AI → opening PR*), and the
-daemon emits PR-opened / failure lines through an `on_notice` callback the
-CLI styles and prints. Both callbacks are injected, so the daemon core
-stays free of any terminal concerns; `--verbose` and non-interactive runs
-fall back to plain logging.
+silently. `report` and `chat` drive a Rich `Live` spinner (`progress.py`)
+whose phase label the daemon advances through a `progress` callback
+(*preparing workspace → analyzing with AI → opening PR*). `watch` has no
+spinner: it runs detached and its output is read out of a log file, where
+an animation is noise — it prints one line per event through the daemon's
+`on_notice` callback instead. Both callbacks are injected, so the daemon
+core stays free of any terminal concerns.
 
 ### Dry run
 
@@ -369,14 +397,28 @@ workspace it is analyzing; chat gets the working directory, `daemon.workdir`,
 and the configured log files named one by one — `/var/log` is not the
 project.
 
+## Running detached
+
+`maajun watch` starts itself again with `--foreground` in a new session
+(`daemon/service.py`), so the loop outlives the shell: stdout and stderr go
+to `<workdir>/watch.log`, the pid to `<workdir>/watch.pid`. Credentials and
+monitors are built *before* detaching, so a broken config fails in front of
+the user rather than in a log file nobody is watching yet. `--stop` sends
+`SIGTERM`, which the loop already handles by finishing the incident it is
+on. A stale pid file — power loss mid-run — is cleaned up on the next
+start rather than blocking it. Under a service manager, `--foreground` is
+the mode to use: systemd supervises the process itself.
+
 ## Security posture
 
 - The GitHub token is passed to git via `GIT_ASKPASS`, so it never
   appears in remote URLs, `.git/config`, or the process list.
-- Secrets live in the OS keyring and are read from nowhere else — no
-  environment variables, and no shelling out to `gh` — so a credential
-  cannot be injected into a running daemon's process environment, and the
-  token it pushes with cannot change without maajun being told.
+- Provider keys live in the OS keyring and are read from nowhere else; no
+  environment variable can inject one into a running daemon.
+- The GitHub token comes from the keyring, or failing that from `gh auth
+  token` — asked for once per process, and reported by `status` so the
+  source is never a mystery. With `github.transport = "ssh"` the push uses
+  the machine's own keys and the token stays with the API.
 - The daemon's agent never touches your running application — it works
   in its own clone under the daemon workdir.
 - `bash` is never available to the daemon's agent, in any mode.

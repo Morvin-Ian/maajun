@@ -1,10 +1,3 @@
-"""Tests for the boundary on what the tools may read and write.
-
-Everything a tool opens is sent to the AI provider, and in the daemon's case
-can be quoted into a public issue — so these are the tests that decide what
-leaves the machine.
-"""
-
 import pytest
 
 from maajun.agent.tools import BUILTIN_TOOLS, Sandbox, ToolRegistry, default_registry
@@ -252,16 +245,33 @@ def test_configured_log_files_are_reachable_but_not_their_directory(tmp_path):
     assert not sandbox.contains(log.parent.resolve() / "other.log")
 
 
-async def test_omitting_the_path_does_not_skip_the_check(project, tmp_path, monkeypatch):
-    """grep and list_dir fall back to the working directory when path is
-    omitted — which is a way out whenever the sandbox is not the cwd."""
+async def test_omitting_the_path_reads_the_sandbox_not_the_cwd(
+    project, tmp_path, monkeypatch
+):
+    """grep and list_dir default to the working directory when path is
+    omitted — a way out whenever the sandbox is not the cwd. The registry
+    fills the root in instead, which is also what the model meant."""
     monkeypatch.chdir(tmp_path / "elsewhere")
     registry = ToolRegistry(BUILTIN_TOOLS, Sandbox([project]))
 
-    assert "outside the directories" in await registry.execute("list_dir", {})
-    assert "outside the directories" in await registry.execute(
-        "grep", {"pattern": "not yours"}
-    )
+    listing = await registry.execute("list_dir", {})
+    assert "private.txt" not in listing
+    assert "src" in listing
+
+    found = await registry.execute("grep", {"pattern": "not yours"})
+    assert "private.txt" not in found
+
+
+async def test_a_relative_path_lands_inside_the_sandbox(project, tmp_path, monkeypatch):
+    """The model is told where the workspace is, then says "app.py". That used
+    to resolve next to maajun itself and be refused."""
+    monkeypatch.chdir(tmp_path / "elsewhere")
+    registry = ToolRegistry(BUILTIN_TOOLS, Sandbox([project]))
+
+    result = await registry.execute("read_file", {"path": "src/app.py"})
+
+    assert "outside the directories" not in result
+    assert "Error" not in result
 
 
 async def test_omitting_the_path_is_fine_when_the_cwd_is_allowed(project, monkeypatch):

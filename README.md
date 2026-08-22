@@ -26,11 +26,12 @@ Nothing merges without your review, in either mode.
 
 - Python 3.11 or newer
 - An API key for DeepSeek or OpenAI — see [AI providers](#ai-providers)
-- Optional: a GitHub token, to open issues and pull requests
+- Optional, to open issues and pull requests: GitHub access, set up with
+  `maajun login` — the GitHub CLI, a token, or SSH keys
 
-Log-file monitoring reads files on the local machine, so the daemon has to run
-on the server that writes them. The GitHub Actions monitor works from anywhere
-with network access.
+Runtime-error monitoring reads log files, `journalctl`, and `docker logs` on
+the local machine, so the daemon has to run on the server your app is deployed
+on. The GitHub Actions monitor works from anywhere with network access.
 
 ## Installation
 
@@ -63,15 +64,39 @@ report. Add `-m fix` to open a pull request with the fix applied, or
 ### Monitor continuously
 
 ```bash
-maajun setup             # provider key, GitHub, log files, GitHub Actions
-maajun watch --dry-run   # analyze real errors without opening PRs
-maajun watch             # run the daemon
+maajun setup             # provider key, GitHub, deployment, GitHub Actions
+maajun status            # what is watched, and what is not
+maajun watch             # watch in the background; the terminal comes back
+maajun watch --status    # what has it done?
+maajun watch --stop      # stop it
 ```
 
-`setup` asks for the provider and its key, then offers GitHub, log files, and
-GitHub Actions in turn — each skippable with Enter, so a minimal install is a key and a log
-path. It detects the repo from your `origin` remote, and re-runs safely: every
-prompt defaults to your current configuration.
+`maajun login` sets up GitHub access on its own, if you would rather do that
+first — it offers the GitHub CLI (it runs the login for you), a token, or
+your SSH keys, and then works out where each repo's errors land.
+
+`setup` asks for the provider and its key, then offers GitHub and the error
+sources in turn. For each repo it probes **this machine** for how the app is
+deployed — its folder, its port, and whether its errors land in a log file, a
+systemd unit's journal, or a container's stdout — and offers what it finds, so
+the runtime errors your users hit are watched without you typing a path from
+memory. It detects the repo from your `origin` remote, and re-runs safely:
+every prompt defaults to your current configuration.
+
+However you deploy — bare gunicorn, systemd, docker, compose, nginx in a
+container or on the host — errors land in one of those three sinks, and
+`maajun discover` finds which:
+
+```bash
+maajun discover                     # print what it finds, change nothing
+maajun discover -r you/app --save   # record it
+```
+
+It also **reads the code** to answer what the host cannot: the stack, the
+entrypoint, which files the logging config really writes, and where errors
+are swallowed instead of logged — a bare `except: pass`, a 500 handler that
+logs nothing, a log directory nothing creates. What maajun watches then
+comes from the code rather than from memory.
 
 Every prompt also has a flag, so once a key is in the keyring the rest can be
 reconfigured unattended:
@@ -92,15 +117,20 @@ detected and analyzed, but each report is written to
 
 ## How it works
 
-1. **Detect** — a monitor picks up a new error from a log file or a failed
+1. **Detect** — a monitor picks up a new error where that repo's errors land:
+   a log file, a systemd unit's journal, a container's stdout, or a failed
    GitHub Actions run.
 2. **Deduplicate** — each error is fingerprinted. The same error is never
    reported twice; repeat sightings bump a counter on the existing incident.
+   One that goes quiet and comes back is reported again, as a regression.
 3. **Analyze** — the agent reads the relevant source in a clone under
    `daemon.workdir` and produces a *what happened / root cause / suggested fix*
-   report, including the commit that likely introduced the bug.
+   report, including the commit that likely introduced the bug and how the app
+   runs where it broke (folder, port, docker or systemd).
 4. **Report** — an issue in `suggest` mode, or a branch, a test run, and a pull
-   request in `fix` mode.
+   request in `fix` mode. Always one or the other, and never empty: a report
+   that comes back blank is re-asked once, then abandoned as a failed
+   incident rather than filed as an empty issue.
 
 Each incident records its token count and cost, viewable with
 `maajun incidents`.
@@ -251,6 +281,16 @@ base_branch = "main"
 mode = "suggest"
 # test_command = "pytest -q"  # verifies a fix-mode edit; result goes in the PR
 
+# Where and how it runs, and where its runtime errors land. Any mix of the
+# three sinks; fill it in with `maajun discover --save`.
+[github.repos.deployment]
+path = "/srv/myapp"
+port = 8000
+runs = "docker compose"
+log_files = ["/var/log/nginx/error.log"]
+docker_containers = ["myapp-web-1"]
+# journald_units = ["myapp.service"]
+
 [monitor]
 log_files = ["/var/log/myapp/error.log"]
 poll_interval = 30
@@ -269,28 +309,34 @@ the daemon refuses to start with nothing to watch. See the
 [monitoring guide](https://github.com/Morvin-Ian/maajun/blob/main/docs/monitoring.md)
 for every key, detection tuning, and multi-repo setups.
 
-Credentials are never stored in this file. Keys and tokens are read only
-from the OS keyring, under the service name `maajun` — `maajun setup` puts them
-there. Nothing else is consulted — not environment variables, and not a
-`gh auth login` session — so there is exactly one place to look when `status`
-and the daemon disagree, and the token maajun pushes with cannot change without
-maajun being told.
+Credentials are never stored in this file. Provider API keys are read only
+from the OS keyring, under the service name `maajun` — `maajun setup` puts
+them there. Environment variables are never consulted.
 
-This means maajun needs a working keyring backend. On a headless server,
-install one (`keyrings.alt`, `gnome-keyring`) before running `setup`.
+The GitHub token is read from that keyring, and failing that from your
+GitHub CLI session — a credential you already manage, which maajun borrows
+rather than copies. `maajun login` picks between them, and `maajun status`
+says which is in use, so there is no doubt about what the daemon will push
+with. Branches can go over SSH instead, keeping the token to the API.
+
+maajun needs a working keyring backend to store anything of its own. On a
+headless server, install one (`keyrings.alt`, `gnome-keyring`) before
+running `setup` — or just log in with `gh` and skip it.
 
 ## Commands
 
 | Command | Purpose |
 |---------|---------|
 | `maajun setup` | Configure everything — provider key, GitHub, error sources |
+| `maajun login` | Choose how to reach GitHub: the CLI, a token, or SSH keys |
 | `maajun status` | Preflight check of credentials, repo access, and monitors |
-| `maajun watch` | Run the monitoring daemon (`--once`, `--dry-run`, `-m`) |
+| `maajun discover` | Find how each repo is deployed and where its errors land (`--save`) |
+| `maajun watch` | Watch in the background (`--status`, `--stop`, `-f`, `--dry-run`) |
 | `maajun report "…"` | Investigate an issue you describe, on demand |
 | `maajun chat` | Ask maajun anything, have it run commands, recall past work |
 | `maajun incidents` | List handled incidents with repo, status, cost, and links |
 | `maajun config [KEY] [VALUE]` | View or change settings (`--repo` for one repo) |
-| `maajun add-repo OWNER/NAME` | Watch an additional repository |
+| `maajun add-repo REPO` | Watch another repository (`myapp`, or `owner/myapp`) |
 | `maajun provider-list` | Show provider support and stored keys |
 | `maajun sign-out` | Clear stored credentials |
 | `maajun reset` | Delete all config, data, and credentials |

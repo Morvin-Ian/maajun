@@ -1,9 +1,3 @@
-"""Tool types and registry.
-
-A tool is a 2-tuple of (ToolDefinition, executor coroutine). Definitions
-are sent to the LLM; the agent loop calls executors.
-"""
-
 from __future__ import annotations
 
 from collections.abc import Callable, Coroutine, Iterable
@@ -77,6 +71,27 @@ class ToolRegistry:
         tool = self.tools.get(name)
         return bool(tool and tool.requires_permission)
 
+    def takes_path(self, name: str) -> bool:
+        tool = self.tools.get(name)
+        if tool is None:
+            return False
+        return "path" in tool.definition.parameters.get("properties", {})
+
+    def normalize(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        """Absolutize the path a call names, against the sandbox root.
+
+        Done before the permission check so the policy and the tool judge the
+        same path, and a relative one is not measured against the wrong root.
+        An omitted path becomes the root: grep and list_dir otherwise default
+        to the process directory, which is both useless to the model and a
+        way out of the sandbox.
+        """
+        if self.sandbox is None or not self.takes_path(name):
+            return arguments
+        given = str(arguments.get("path") or "")
+        resolved = self.sandbox.resolve(given) if given else self.sandbox.roots[0]
+        return {**arguments, "path": str(resolved)}
+
     def off_limits(self, tool: Tool, arguments: dict[str, Any]) -> str:
         """Why the sandbox refuses this call, or "" if it does not.
 
@@ -92,12 +107,13 @@ class ToolRegistry:
         properties = tool.definition.parameters.get("properties", {})
         if "path" not in properties:
             return ""
-        return self.sandbox.refusal(resolve_path(str(arguments.get("path") or ".")))
+        return self.sandbox.refusal(self.sandbox.resolve(str(arguments.get("path") or ".")))
 
     async def execute(self, name: str, arguments: dict[str, Any]) -> str:
         tool = self.tools.get(name)
         if not tool:
             return f"Error: unknown tool '{name}'"
+        arguments = self.normalize(name, arguments)
         refusal = self.off_limits(tool, arguments)
         if refusal:
             return f"Error: {refusal}"

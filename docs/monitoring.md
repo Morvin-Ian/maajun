@@ -40,6 +40,17 @@ mode = "suggest"              # "suggest" or "fix" — see Modes below
 # log_files = ["/var/log/api/error.log"]   # watched for this repo only
 # test_command = "pytest -q"  # verifies a fix-mode edit; result goes in the PR
 
+# How and where this repo runs, and where its runtime errors land.
+# Fill it in with `maajun discover --repo owner/name --save`.
+[github.repos.deployment]
+path = "/srv/myapp"           # the app's folder on the server
+port = 8000                   # what it listens on
+runs = "docker compose"       # free text: how it is started
+log_files = ["/srv/myapp/logs/error.log", "/var/log/nginx/error.log"]
+journald_units = ["myapp.service"]      # journalctl -u myapp.service
+docker_containers = ["myapp-web-1"]     # docker logs myapp-web-1
+# runtime = "none"            # this repo deliberately has no runtime source
+
 [monitor]
 log_files = [                 # files to tail for errors
   "/var/log/myapp/error.log",
@@ -151,9 +162,109 @@ the log path later. The repo appears in:
 
 ## Error sources
 
+### Runtime errors, however you deploy
+
+Runtime errors — the 500s your users actually hit — are what maajun is for,
+and every deployment sends them to one of three places:
+
+| Sink | Config | Typical deployment |
+|---|---|---|
+| A **file** | `log_files` | Django `FileHandler`, gunicorn `--error-logfile`, nginx on the host, supervisor |
+| The **journal** | `journald_units` | anything logging to stdout under systemd: gunicorn, uvicorn, nginx, supervisor |
+| A **container's stdout** | `docker_containers` | docker, docker compose, an app container, an nginx container |
+
+So there is no list of supported deploy methods to match — bare gunicorn,
+systemd, docker, compose, nginx in a container, nginx alone, a mix of them.
+Say where the errors land and maajun reads them. All three go through the
+same detection: `error_pattern`, the traceback grouping, and the burst
+settings under `[monitor]` apply whichever sink a repo uses.
+
+Mixing is the normal case. An app in compose behind nginx on the host:
+
+```toml
+[github.repos.deployment]
+path = "/srv/kfl"
+port = 8000
+runs = "docker compose"
+docker_containers = ["kfl-web-1"]           # the app's own exceptions
+log_files = ["/var/log/nginx/error.log"]    # 502s the app never sees
+```
+
+Each source belongs to the repo whose block it sits in, so it always knows
+which app it watches and which repo to file against.
+
+### Finding it for you
+
+You never write that block by hand, and you are never asked for a path.
+`setup` and `login` both work it out for every configured repo, and neither
+can skip it — a setup that does not know where the errors land has not set
+anything up. To re-run it later:
+
+```bash
+maajun discover                     # every repo, prints what it finds
+maajun discover -r you/app --save   # write it into the config
+```
+
+`discover` probes **this machine** for each configured repo: the app's
+folder (by the origin remote of the checkout, or the working directory a
+compose container was built from), its port (from the published container
+port or the unit's `ExecStart`), whether it runs under docker or systemd,
+and which files, units, or containers its errors reach maajun through. It
+explains how it found each one, and writes nothing unless you pass
+`--save`. `maajun setup` runs the same probe and offers what it finds.
+
+### Asking the code, not your memory
+
+The host says what is *running*; only the code says whether a failed
+request ever reaches a log at all. So `discover` also reads the repo with
+the AI — the same tools the incident agent uses, read-only — and reports:
+
+- the **stack** and **entrypoint** (recorded as `deployment.stack`, and
+  given to the agent later so a fix is written against the real framework),
+- the **files the logging config actually writes**, which become watched
+  sources,
+- **where errors are swallowed**: a bare `except: pass`, a 500 handler that
+  logs nothing, a `FileHandler` pointed at a directory that is never
+  created,
+- the **log format**, so `error_pattern` and `json_level_field` can be
+  matched to it — printed as commands to run, never changed silently,
+- **where bugs are likely**, from reading the code.
+
+```
+Errors are logged to:
+  • /srv/shop/logs/django-error.log
+Errors that would be missed:
+  • views.py:11 — except Exception: pass swallows database errors
+  • settings.py:9 — FileHandler targets logs/ but nothing creates it
+To catch them:
+  add os.makedirs(BASE_DIR / 'logs', exist_ok=True) before LOGGING …
+```
+
+It costs a few cents per repo and needs a checkout to read, so run it on
+the server (or pass `--path`). `--no-analyze` turns it off.
+
+Because it reads the local docker and systemd, it has to run **on the
+server** — the same place the daemon runs. A finding never overwrites
+something you set by hand; it only fills in blanks and adds sources.
+
+### A repo with no runtime source
+
+`maajun status` **fails** for a repo that nothing watches for runtime
+errors, and `maajun watch` warns about it on startup. Watching only GitHub
+Actions is watching CI, not your users' requests — which is exactly how a
+config ends up looking healthy while every 500 goes unreported.
+
+If that is deliberate for a repo (a library, a CI-only project), say so and
+the check passes:
+
+```bash
+maajun config github.deployment.runtime none -r you/app
+```
+
 ### Log files
 
-Point `monitor.log_files` at the files your app writes. The monitor
+Point a repo's `deployment.log_files` at the files your app writes (or
+`monitor.log_files` for a single-repo or local setup). The monitor
 tails them incrementally (surviving rotation and truncation), recognizes
 stack traces — including ones split across polls — and lines matching
 `error_pattern`. An ERROR line followed within a line or two by a
@@ -173,6 +284,54 @@ log (e.g. `/var/log/nginx/error.log`, gunicorn's `--error-logfile`)
 works too since `error_pattern` is a plain regex you can adapt to any
 log format. Errors that are swallowed without being logged are invisible
 — make sure unhandled exceptions actually reach a file.
+
+### Errors that are already in the log
+
+Watching starts from where each source stands when maajun starts: the end
+of a log file, and the present moment for a journal or a container. A log
+that has been collecting errors for months does not become months of issues
+the first time you run `maajun watch`.
+
+To work through what is already there:
+
+```bash
+maajun watch --backfill
+```
+
+That reads the whole log file, the unit's whole journal, and the
+container's whole log — once — and then carries on from the end as usual.
+What it costs is one analysis per distinct *error shape*, not per line:
+fingerprints ignore digits, hex and ids, so a thousand repeats of one
+traceback are a single incident. `daemon.max_incidents_per_cycle` and
+`daemon.max_usd_per_day` bound the first run if the backlog is unknown.
+
+A log file's byte offset is kept in `<workdir>/cursors`, so a restart
+resumes exactly where it stopped rather than re-reading the file — which
+also means the errors written while the daemon was down are picked up when
+it comes back. A file rotated or truncated in the meantime is read from the
+start, since nothing in it has been seen.
+
+### The journal and container logs
+
+`journald_units` runs `journalctl -u <unit> -o cat` each poll. The position
+is journalctl's own cursor file under `daemon.workdir/cursors`, so a daemon
+restart resumes exactly where it stopped; until that file exists a time
+window from startup stands in, rather than filing every historical error in
+the journal at once.
+
+`docker_containers` runs `docker logs --since <last poll> <name>`, reading
+the container's stderr as well as its stdout — an unhandled exception goes
+to stderr, so reading only stdout would miss every traceback.
+
+Neither uses `-t` or the default journal format on purpose: both prefix
+every line with a timestamp, which leaves the indented lines of a traceback
+no longer indented and so impossible to group into one incident.
+
+An unreadable source — no docker on the host, a container that no longer
+exists, a unit name with a typo — is logged once and skipped, never once per
+poll, and never at the cost of the other monitors. `maajun status` reports
+it: a missing unit or container fails, a stopped one is a warning, since its
+past logs are still readable.
 
 ### Tuning detection
 
@@ -224,6 +383,12 @@ same commit is still one incident.
 `maajun setup --github-actions` wires this up using the GitHub token you
 already stored, rather than asking for a second one.
 
+Actions monitoring is *additional*, never a replacement: log monitors are
+built from `monitor.log_files` and each repo's `log_files` regardless, and
+enabling Actions never clears them. But it only sees CI, so a setup with
+Actions and no log file never notices a failed request — `setup` and
+`status` both say so when that is the configuration you end up with.
+
 ## 2. Give it GitHub access
 
 Create a **fine-grained personal access token** at
@@ -251,13 +416,18 @@ errors, writing each incident report under `daemon.workdir/reports`
 instead of opening a pull request. Set `daemon.repo_path` to choose which
 local checkout it analyzes (the default is the current directory).
 
-maajun reads credentials only from the OS keyring, so a headless server
-needs a keyring backend installed before `setup` can store anything:
+maajun stores credentials only in the OS keyring, so a headless server
+needs a keyring backend before `setup` can save anything:
 
 ```bash
 pip install keyrings.alt        # or install gnome-keyring
 maajun setup                    # then store the key as usual
 ```
+
+The GitHub token is the exception to needing one at all: run
+`maajun login`, pick the GitHub CLI, and maajun uses that session's token
+without storing anything. If your SSH keys already work with GitHub, it
+records `github.transport = "ssh"` so branches are pushed over them.
 
 ## 3. Run
 
@@ -274,11 +444,23 @@ failure (handy in a deploy script); add `--no-network` to skip the
 GitHub round-trips.
 
 ```bash
+maajun watch                 # start watching, in the background
+maajun watch --status        # running? what has it done?
+maajun watch --stop          # stop it
 maajun watch --dry-run       # analyze errors, but skip git/PR — test your config
 maajun watch --once          # single poll cycle, then exit (cron)
-maajun watch                 # continuous monitoring
+maajun watch -f              # stay attached to this terminal
 maajun watch -m fix          # override the configured mode for this run
-maajun watch -v              # debug logging
+```
+
+`watch` detaches by default: the terminal comes back and the daemon keeps
+working, logging to `<workdir>/watch.log`. Credentials and monitors are
+checked before it detaches, so a broken config fails in front of you.
+Starting twice from one workdir is refused. `--dry-run`, `--once` and
+`-v` stay attached, since you are reading their output.
+
+```bash
+tail -f ~/.local/share/maajun/watch.log
 ```
 
 ### Dry run
@@ -309,30 +491,43 @@ The agent reads the target repo with its safe tools and writes the usual
 edits the clone. A live spinner shows each phase (preparing the workspace,
 analyzing, filing the issue) and finishes with the link. With multiple
 repos configured, `report` prompts you to pick one when `--repo` is
-omitted; pass `--repo owner/name` to skip the prompt in scripts. `--mode`,
-`--base-branch`, and `--dry-run` work the same as on `watch`.
+omitted; pass `--repo owner/name` to skip the prompt in scripts. `--mode`
+and `--dry-run` work the same as on `watch`, and `--base-branch` — which
+`watch` has no equivalent for, since it takes each repo's branch from the
+config — bases this one report on a different branch.
 
 Each report is recorded in the same incident database as detected errors,
-so its tokens and cost are tracked alongside them. Unlike the watch loop,
-`report` is not dedup-gated — running it again on the same description
-re-investigates and files a fresh issue (or, in `fix` mode, updates the
-existing `maajun/report-<fingerprint>` branch and PR).
+so it appears in `maajun incidents` — listed as `report` under **Caught
+by** — with its tokens and cost counted against the same daily cap. Unlike
+the watch loop, `report` is not dedup-gated: running it again on the same
+description re-investigates and files a fresh issue (or, in `fix` mode,
+updates the existing `maajun/report-<fingerprint>` branch and PR).
 
 ## Modes
 
 | | `suggest` (default) | `fix` |
 |---|---|---|
-| Artifact | A GitHub **issue** | A **pull request** on a branch |
+| Artifact | A GitHub **issue**, always | A **pull request**, always |
 | Agent file access | Read-only | May edit files, but only inside its own clone |
 | Agent shell access | None | None |
 | Contains | Incident report + suggested fix | Applied fix + incident report |
 | Verified | n/a — no diff | By `test_command`, if set |
 | You review | The suggestion | The actual diff |
 
-Suggest mode files an **issue**, not a pull request. A PR whose diff
-changes nothing still lands in the review queue and triggers CI, which is
-noise — an analysis is an issue. It's also cheaper: suggest mode clones the
-repo to read it, but creates no branch and pushes nothing.
+Suggest mode files an **issue**, not a pull request: an analysis with no
+diff is an issue, and it is cheaper — the repo is cloned to read, but no
+branch is created and nothing is pushed.
+
+Fix mode always ends in a **pull request**. When the agent concludes no
+code change is warranted, the PR carries the incident report alone and says
+so at the top — so the finding is still in one reviewable place, rather
+than the mode quietly producing something else.
+
+**Nothing is ever filed empty.** A report that comes back blank, or with
+none of its sections filled in, is asked for once more; if it is still
+unusable, no issue or PR is created and the incident is recorded as failed.
+An artifact with nothing in it costs the reader more than it gives, and
+hides that the run went wrong — `maajun incidents` shows it instead.
 
 Either way, **nothing merges without your review**. Start with `suggest`;
 switch to `fix` once you trust the reports.
@@ -413,6 +608,36 @@ Incidents handled from this version on also store their analysis text, so
 `maajun chat` can recall a root cause without going back to GitHub. Rows
 that predate the column keep their issue or PR link and show no report.
 
+### When a fixed bug comes back
+
+An error that is still happening is reported once: every sighting bumps its
+counter, and nothing new is filed. Spamming an unfixed bug helps nobody.
+
+An error that **stopped and started again** is a different thing — someone
+fixed it, and the fix did not hold — so maajun reports it again. The rule is
+a quiet gap: a published incident that goes `daemon.reopen_after_days`
+(7 by default) without being seen and then happens again is re-opened. The
+new issue or pull request says so at the top and links the earlier one, the
+incident keeps its history (`first_seen`, the total count), and the agent is
+told to check whether an earlier fix was reverted, incomplete, or papered
+over a symptom rather than explaining it as new.
+
+```toml
+[daemon]
+reopen_after_days = 7.0   # 0 reports each error once, ever
+```
+
+If you would rather not wait out the gap — you have merged the fix and want
+to hear immediately if it returns — forget the incident:
+
+```bash
+maajun incidents --forget <fingerprint>
+```
+
+That drops maajun's record of it, so the next occurrence is treated as new.
+A partial fingerprint is enough, and `--repo` settles it when two
+repositories share one.
+
 ## Cost tracking
 
 Each processed incident records the prompt/completion token counts and
@@ -479,7 +704,7 @@ After=network-online.target
 [Service]
 Type=simple
 User=deploy
-ExecStart=/home/deploy/.local/bin/maajun watch
+ExecStart=/home/deploy/.local/bin/maajun watch --foreground
 Restart=on-failure
 RestartSec=30
 
@@ -492,14 +717,19 @@ sudo systemctl enable --now maajun
 journalctl -u maajun -f
 ```
 
+`--foreground` matters here: systemd supervises the process itself, and a
+daemon that detached would look like one that exited. maajun's own
+background mode is for a shell, not for a service manager.
+
 The daemon shuts down gracefully on `SIGTERM`/`SIGINT`: it finishes the
 incident it is currently processing before exiting, so
 `systemctl stop`/`restart` never leaves a half-pushed branch.
 
-Note: after a restart the daemon re-reads watched logs from the start
-and re-fetches current CI failures. Deduplication makes this harmless —
-already-processed errors are recognized and skipped without any AI
-calls.
+Note: after a restart each source resumes from its own cursor — a log
+file's byte offset, journald's own cursor — so nothing is re-read and
+nothing written during the restart is lost. CI failures are re-fetched;
+deduplication makes that overlap harmless, since already-processed errors
+are recognized and skipped without any AI calls.
 
 ## Troubleshooting
 

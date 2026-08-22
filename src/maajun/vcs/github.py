@@ -1,5 +1,3 @@
-"""Minimal GitHub REST client for token validation and PR creation."""
-
 from __future__ import annotations
 
 from typing import Any

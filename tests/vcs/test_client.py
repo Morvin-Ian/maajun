@@ -1,5 +1,3 @@
-"""Tests for the GitHub client, using httpx.MockTransport."""
-
 import json
 
 import httpx

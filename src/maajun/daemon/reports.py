@@ -26,15 +26,24 @@ def provenance(event: ErrorEvent) -> str:
     )
 
 
-def issue_body(event: ErrorEvent, report: str, note: str = "") -> str:
-    """Suggest mode's artifact: the analysis plus the raw error.
+def regression_note(previous_url: str) -> str:
+    """A line saying this was reported before, or "" when it is new.
 
-    `note` carries a leading remark — used when fix mode falls back to an
-    issue because the analysis changed no code, so the reader is not left
-    wondering why a fix-mode repo produced an issue.
+    Filed at the top: whether a bug is back is the first thing a reader
+    needs, and it changes what they look at in the diff.
     """
+    if not previous_url:
+        return ""
     return (
-        (f"{note}\n\n" if note else "")
+        "> ⚠️ **This was reported before and has come back.** "
+        f"The earlier report: {previous_url}\n\n"
+    )
+
+
+def issue_body(event: ErrorEvent, report: str, previous_url: str = "") -> str:
+    """Suggest mode's artifact: the analysis plus the raw error."""
+    return (
+        regression_note(previous_url)
         + f"{report}\n\n---\n\n"
         f"## Error details\n\n```\n{event.details[:MAX_DETAILS_IN_BODY]}\n```\n\n"
         f"{provenance(event)}"
@@ -46,12 +55,28 @@ def pr_body(
     event: ErrorEvent,
     report: str,
     verification: CommandResult | None = None,
+    *,
+    code_changed: bool = True,
+    previous_url: str = "",
 ) -> str:
     """Fix mode's artifact: the analysis, the test verdict, and provenance."""
+    if code_changed:
+        summary = "This PR contains the applied fix and the incident report."
+        verdict = verification_section(repo_config, verification)
+    else:
+        # Still a pull request, so the finding is reviewed in one place —
+        # but the reader has to know the diff is the report, not a fix.
+        summary = (
+            "⚠️ **Analysis only — no code change.** The investigation is "
+            "below and in the report file; the fix still has to be written.\n"
+            "The suggested fix section says what to change."
+        )
+        verdict = ""
     return (
-        f"{report}\n\n---\n"
-        "This PR contains the applied fix and the incident report.\n\n"
-        f"{verification_section(repo_config, verification)}"
+        regression_note(previous_url)
+        + f"{report}\n\n---\n"
+        f"{summary}\n\n"
+        f"{verdict}"
         f"{provenance(event)}"
     )
 

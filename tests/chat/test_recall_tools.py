@@ -1,5 +1,3 @@
-"""Tests for the incident and conversation recall tools."""
-
 import json
 
 import pytest

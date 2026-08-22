@@ -1,5 +1,3 @@
-"""Tests for the `maajun chat` command itself."""
-
 import pytest
 from typer.testing import CliRunner
 

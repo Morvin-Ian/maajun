@@ -1,5 +1,3 @@
-"""Tests for cost tracking."""
-
 from maajun.providers.pricing import compute_cost, extract_usage
 
 
