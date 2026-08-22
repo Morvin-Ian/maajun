@@ -683,3 +683,57 @@ def test_discover_path_needs_one_repo(fake_keyring, tmp_path, monkeypatch):
 
     assert result.exit_code == 1
     assert "pass --repo too" in flat(result.output)
+
+
+# ---------------------------------------------------------------------------
+# A repo name without an owner
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def signed_in(monkeypatch):
+    """GitHub authenticated, so the account name is known."""
+    monkeypatch.setattr(
+        "maajun.cli.monitor.account_login", lambda token=None: "morvin"
+    )
+
+
+def test_add_repo_fills_in_the_owner(fake_keyring, signed_in, tmp_path):
+    """Once the account is known, "myapp" is not ambiguous."""
+    config_path = tmp_path / "config.toml"
+
+    result = runner.invoke(app, ["add-repo", "myapp", "--config", str(config_path)])
+
+    assert result.exit_code == 0
+    assert "Using morvin/myapp" in flat(result.output)
+    assert Config.load(config_path).github.repos[0].repo == "morvin/myapp"
+
+
+def test_a_full_slug_is_left_alone(fake_keyring, signed_in, tmp_path):
+    config_path = tmp_path / "config.toml"
+
+    runner.invoke(app, ["add-repo", "acme/api", "--config", str(config_path)])
+
+    assert Config.load(config_path).github.repos[0].repo == "acme/api"
+
+
+def test_without_a_login_it_says_to_sign_in(fake_keyring, tmp_path):
+    """Guessing an owner would put PRs on someone else's repo."""
+    result = runner.invoke(
+        app, ["add-repo", "myapp", "--config", str(tmp_path / "config.toml")]
+    )
+
+    assert result.exit_code == 1
+    assert "maajun login" in flat(result.output)
+
+
+def test_a_bare_name_still_reaches_the_repo_flags(fake_keyring, signed_in, tmp_path):
+    config_path = tmp_path / "config.toml"
+
+    runner.invoke(app, [
+        "add-repo", "myapp", "--config", str(config_path),
+        "-m", "fix", "--port", "8000",
+    ])
+
+    entry = Config.load(config_path).github.repos[0]
+    assert (entry.repo, entry.mode, entry.deployment.port) == ("morvin/myapp", "fix", 8000)

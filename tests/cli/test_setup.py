@@ -499,5 +499,24 @@ def test_a_repo_with_nothing_watching_it_is_told_how_to_fix_that(
     assert "maajun discover -r acme/webapp --save" in flat(result.output)
 
 
+def test_the_owner_is_filled_in_from_the_login(
+    fake_keyring, api_key, monkeypatch, tmp_path
+):
+    config_path = tmp_path / "config.toml"
+    monkeypatch.setattr(
+        "maajun.cli.setup.account_login", lambda token=None: "morvin"
+    )
+    monkeypatch.setattr(
+        "maajun.cli.deployment.discover", lambda repo, existing=None: Discovered()
+    )
+
+    result = runner.invoke(app, [
+        "setup", "--non-interactive", "--config", str(config_path), "--repo", "myapp",
+    ])
+
+    assert "Using morvin/myapp" in flat(result.output)
+    assert Config.load(config_path).github.repos[0].repo == "morvin/myapp"
+
+
 def flat(text):
     return " ".join(text.split())
