@@ -1,5 +1,3 @@
-"""Tests for the agent tool-calling loop."""
-
 import asyncio
 import json
 

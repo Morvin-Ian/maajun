@@ -1,5 +1,3 @@
-"""Tests for CLI awareness, execution, and gating."""
-
 import io
 
 import pytest

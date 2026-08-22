@@ -1,5 +1,3 @@
-"""Tests for chat session memory."""
-
 import pytest
 
 from maajun.chat.memory import ChatMemory

@@ -1,5 +1,3 @@
-"""Tests for the GitHub Actions monitor."""
-
 import httpx
 import pytest
 

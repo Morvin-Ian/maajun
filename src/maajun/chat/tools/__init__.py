@@ -1,5 +1,3 @@
-"""The chat agent's tool set: the builtins, plus maajun's own memory and CLI."""
-
 from pathlib import Path
 
 from maajun.agent.tools import BUILTIN_TOOLS, Sandbox, ToolRegistry

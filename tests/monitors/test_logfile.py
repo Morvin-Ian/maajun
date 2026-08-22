@@ -1,5 +1,3 @@
-"""Tests for error monitors and fingerprinting."""
-
 import pytest
 
 from maajun.monitors import ErrorEvent, LogFileMonitor, fingerprint

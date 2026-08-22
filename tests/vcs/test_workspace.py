@@ -1,5 +1,3 @@
-"""Tests for GitWorkspace — the isolated clone the daemon works in."""
-
 import subprocess
 
 from maajun.vcs import GitWorkspace
