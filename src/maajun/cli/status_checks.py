@@ -1,11 +1,16 @@
 from __future__ import annotations
 
 import os
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
 from maajun.config import Config, RepoConfig
 from maajun.vcs import GitHubClient, GitHubError
+
+# Answers "is this source readable here?" as (ok, detail, warn). Injected so
+# build_status stays pure: probing shells out to systemctl and docker.
+SourceProbe = Callable[[str, str], tuple[bool, str, bool]]
 
 
 @dataclass
@@ -47,7 +52,7 @@ async def gather_github(
         await client.aclose()
 
 
-def log_file_check(log_path: str) -> Check:
+def log_file_check(log_path: str, label: str = "", suffix: str = "") -> Check:
     """Existence *and* readability.
 
     A missing file is only a warning — the app may create it on its first
@@ -57,18 +62,83 @@ def log_file_check(log_path: str) -> Check:
     while `status` reported everything fine.
     """
     path = Path(log_path).expanduser()
+    described = f"{label}log file {log_path}{suffix}"
     if not path.exists():
-        return Check(
-            f"Log file {log_path}", False, "not found yet",
-            warn=True, counts=False,
-        )
+        return Check(described, False, "not found yet", warn=True, counts=False)
     if not os.access(path, os.R_OK):
         return Check(
-            f"Log file {log_path}", False,
+            described, False,
             "exists but is not readable — check permissions, or run maajun "
             "as a user that can read it",
         )
-    return Check(f"Log file {log_path}", True, counts=False)
+    return Check(described, True, counts=False)
+
+
+def source_check(
+    kind: str, target: str, label: str, probe: SourceProbe | None
+) -> Check:
+    """One runtime source, probed if a prober was supplied."""
+    if kind == "file":
+        return log_file_check(target, label=label)
+    described = f"{label}{kind}: {target}"
+    if probe is None:
+        return Check(described, True, "(not checked)", warn=True, counts=False)
+    ok, detail, warn = probe(kind, target)
+    return Check(described, ok, detail, warn=warn, counts=not warn)
+
+
+def build_monitor_checks(
+    config: Config, repos: list[RepoConfig], probe: SourceProbe | None
+) -> list[Check]:
+    """The Monitors section: every error source, and which repo it feeds.
+
+    Runtime sources are reported per repo, because that is how they are
+    configured — a repo with none is a repo whose 500s nobody sees, and that
+    fails the preflight unless it says `runtime = "none"` on purpose.
+    """
+    checks: list[Check] = []
+    grouped = config.sources_by_repo(repos)
+    label_repo = len(repos) > 1
+    watches_actions = bool(config.monitor.github_actions_repos)
+
+    if not watches_actions and not any(sources for _, sources in grouped):
+        checks.append(Check(
+            "At least one monitor configured", False,
+            "run 'maajun discover --save', or add monitor.log_files",
+        ))
+
+    for repo_config, sources in grouped:
+        label = f"{repo_config.repo} — " if (label_repo and repo_config) else ""
+        deployment = repo_config.deployment if repo_config else None
+        if deployment and deployment.path:
+            exists = Path(deployment.path).expanduser().is_dir()
+            checks.append(Check(
+                f"{label}folder {deployment.path}", exists,
+                "" if exists else "not a directory on this host",
+                warn=not exists, counts=exists,
+            ))
+        for kind, target in sources:
+            checks.append(source_check(kind, target, label, probe))
+        if sources or repo_config is None:
+            continue
+        if deployment and deployment.runtime == "none":
+            checks.append(Check(
+                f"{label}no runtime source", True,
+                'runtime = "none"', counts=False,
+            ))
+        else:
+            checks.append(Check(
+                f"{label}runtime error source", False,
+                "none configured — nothing watches this app's failed "
+                "requests; run 'maajun discover --save'",
+            ))
+
+    if watches_actions:
+        checks.append(Check(
+            f"GitHub Actions: {', '.join(config.monitor.github_actions_repos)}",
+            True, counts=False,
+        ))
+    return checks
 
 
 def build_status(
@@ -79,6 +149,7 @@ def build_status(
     has_token: bool,
     repos: list[RepoConfig],
     network: tuple[str | None, dict[str, bool]] | None,
+    probe: SourceProbe | None = None,
 ) -> tuple[list[Section], bool]:
     ai = Section("AI provider", [
         Check(f"API key for {provider}", has_key, "" if has_key else "run 'maajun setup'"),
@@ -94,7 +165,6 @@ def build_status(
             warn=True, counts=False,
         ))
     else:
-        # Exact now the keyring is the only source.
         github.checks.append(Check(
             "GitHub token stored", has_token,
             "" if has_token else "run 'maajun setup' to store one",
@@ -118,23 +188,7 @@ def build_status(
                         "" if can_push else "check token repo access / Contents perm",
                     ))
 
-    monitors = Section("Monitors", [])
-    log_paths = list(config.monitor.log_files)
-    for repo_config in repos:
-        log_paths.extend(repo_config.log_files)
-    watches_actions = bool(config.monitor.github_actions_repos)
-    if not log_paths and not watches_actions:
-        monitors.checks.append(Check(
-            "At least one monitor configured", False,
-            "add monitor.log_files or GitHub Actions",
-        ))
-    for log_path in log_paths:
-        monitors.checks.append(log_file_check(log_path))
-    if watches_actions:
-        monitors.checks.append(Check(
-            f"GitHub Actions: {', '.join(config.monitor.github_actions_repos)}",
-            True, counts=False,
-        ))
+    monitors = Section("Monitors", build_monitor_checks(config, repos, probe))
 
     sections = [ai, github, monitors]
     ok = all(
