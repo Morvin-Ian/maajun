@@ -40,21 +40,32 @@ def no_operation(_: str) -> None:
     pass
 
 
+# Tools fix mode may use. Anything else gated is refused with a reason, so
+# the model reads the refusal and tries a call that works.
+EDIT_TOOLS = ("edit_file", "write_file")
+
+
 def make_permission_policy(mode: str, workspace: Path) -> PermissionCallback | None:
-    """suggest -> None (all gated tools denied, agent is read-only).
-    fix     -> file edits allowed inside the workspace only; bash denied."""
+    """suggest -> None (every gated tool denied; the agent is read-only).
+    fix     -> edits allowed anywhere inside the workspace clone."""
     if mode != "fix":
         return None
 
     root = workspace.resolve()
 
-    async def approve(name: str, args: dict) -> bool:
-        if name not in ("edit_file", "write_file"):
-            return False
+    async def approve(name: str, args: dict) -> bool | str:
+        if name not in EDIT_TOOLS:
+            return f"{name} is not available; edit files with edit_file or write_file."
         path = args.get("path")
         if not path:
-            return False
-        return Path(path).expanduser().resolve().is_relative_to(root)
+            return f"Say which file to edit: pass an absolute path under {root}."
+        target = Path(path).expanduser().resolve()
+        if target.is_relative_to(root):
+            return True
+        return (
+            f"{target} is outside the checkout. Edit the copy under {root} "
+            "instead — that is the branch the pull request is opened from."
+        )
 
     return approve
 
