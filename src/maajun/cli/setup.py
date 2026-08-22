@@ -9,7 +9,12 @@ from pathlib import Path
 import typer
 from rich.panel import Panel
 
-from maajun.auth import AuthManager
+from maajun.auth import (
+    AuthManager,
+    credentials_file,
+    install_backend_command,
+    keyring_works,
+)
 from maajun.cli.deployment import record_deployment
 from maajun.cli.github_auth import authenticate, report_push_access
 from maajun.cli.shared import (
@@ -98,6 +103,8 @@ def setup_provider(
         console.print(f"  [green]✓[/green] {provider} API key already stored")
         return provider
 
+    say_where_credentials_go()
+
     signup = PROVIDER_SIGNUP_URLS.get(provider)
     if signup:
         console.print(f"  [dim]Get a key at {signup}[/dim]")
@@ -130,14 +137,27 @@ def setup_provider(
     return provider
 
 
+def say_where_credentials_go() -> None:
+    """Mention the file, once, when there is no keyring to use instead.
+
+    A statement, not a question: there is one sensible answer on a server,
+    and asking it of everyone who installs maajun there is friction for
+    nothing. The alternative is named for anyone who wants it.
+    """
+    if keyring_works():
+        return
+    console.print(
+        f"  [dim]No keyring on this machine, so credentials go in "
+        f"{credentials_file()} (chmod 600).\n"
+        f"    To use a keyring instead: {install_backend_command()}[/dim]"
+    )
+
+
 def store_api_key(auth: AuthManager, provider: str, key: str) -> None:
     try:
         auth.set_api_key(provider, key)
     except RuntimeError as e:
-        # The keyring is the only store, so this is fatal, not a fallback.
-        console.print(
-            f"  [red]✗ Could not store the key: {e}[/red]"
-        )
+        console.print(f"  [red]✗ Could not store the key: {e}[/red]")
         raise typer.Exit(1) from e
 
 

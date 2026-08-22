@@ -484,8 +484,20 @@ up again.
 ## Where secrets live
 
 Provider API keys: the OS keyring (gnome-keyring / macOS Keychain), under
-the service name `maajun` — and nowhere else. Environment variables are
-never read.
+the service name `maajun`. Environment variables are never read.
+
+Where there is no keyring — most servers — credentials go in
+`~/.config/maajun/credentials.json` instead, and setup says so before asking
+for anything. A JSON file created `chmod 600` inside a `chmod 700`
+directory, opened at that mode rather than chmod'ed afterwards, so the
+secret is never briefly world-readable. `maajun status` names the file when
+it is in use, and `maajun sign-out` empties it.
+
+That is a secret in the clear on disk, protected by its mode. It is also
+exactly what the usual advice for a headless box — `keyrings.alt` — does,
+with a package in front of it; maajun does it without the extra install and
+says so out loud. Install a keyring backend if you want more than file
+permissions.
 
 The GitHub token: that keyring first, then `gh auth token` if the keyring
 has none. Borrowing the `gh` login means a machine that already has one
@@ -497,6 +509,8 @@ not maajun's to end.
 Pushing can avoid the token entirely: with `github.transport = "ssh"`,
 branches go over your SSH keys and the token is used only for the API.
 
-maajun needs a working keyring backend to store anything itself; on a
-headless server, install one (`keyrings.alt`, `gnome-keyring`) before
-running `setup`, or log in with `gh` instead.
+To use a keyring on a server instead, install a backend for the environment
+maajun lives in — `pipx inject maajun keyrings.alt`, `uv tool install maajun
+--with keyrings.alt`, or `pip install keyrings.alt`. `setup` prints whichever
+of those applies. (`pip install` into the wrong environment is the usual
+reason the next run fails identically.)

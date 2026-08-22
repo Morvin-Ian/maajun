@@ -520,3 +520,68 @@ def test_the_owner_is_filled_in_from_the_login(
 
 def flat(text):
     return " ".join(text.split())
+
+
+# ---------------------------------------------------------------------------
+# A machine with no keyring
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def headless(monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    monkeypatch.setattr("maajun.cli.setup.keyring_works", lambda: False)
+
+
+def test_a_server_is_told_where_its_credentials_went(
+    fake_keyring, headless, tmp_path
+):
+    """Said, not asked: there is one sensible answer on a machine with no
+    keyring, and a question there is friction for nothing."""
+    result = runner.invoke(app, [
+        "setup", "--config", str(tmp_path / "config.toml"),
+    ], input="\n\n")
+
+    output = flat(result.output)
+    assert "No keyring on this machine" in output
+    # Rich wraps a long path, so assert on parts that cannot split.
+    assert "chmod 600" in output
+    assert "keyrings.alt" in output  # the alternative, for anyone who wants it
+    assert "Choice" not in output
+
+
+def test_the_notice_comes_before_the_key_is_typed(fake_keyring, headless, tmp_path):
+    result = runner.invoke(app, [
+        "setup", "--config", str(tmp_path / "config.toml"),
+    ], input="\n\n")
+
+    output = flat(result.output)
+    assert output.index("No keyring") < output.index("API key (input hidden)")
+
+
+def test_a_machine_with_a_keyring_hears_nothing_about_files(
+    fake_keyring, monkeypatch, tmp_path
+):
+    monkeypatch.setattr("maajun.cli.setup.keyring_works", lambda: True)
+
+    result = runner.invoke(app, [
+        "setup", "--non-interactive", "--config", str(tmp_path / "config.toml"),
+    ])
+
+    assert "credentials.json" not in flat(result.output)
+
+
+def test_setup_finishes_unattended_without_a_keyring(
+    fake_keyring, api_key, headless, tmp_path
+):
+    """--non-interactive used to be a dead end on exactly the machines maajun
+    is deployed to."""
+    config_path = tmp_path / "config.toml"
+
+    result = runner.invoke(app, [
+        "setup", "--non-interactive", "--config", str(config_path),
+        "--repo", "acme/webapp",
+    ])
+
+    assert result.exit_code == 0
+    assert config_path.exists()
