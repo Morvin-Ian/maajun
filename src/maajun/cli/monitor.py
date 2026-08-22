@@ -17,8 +17,9 @@ from maajun.config import RepoConfig
 from maajun.daemon import build_daemon, build_daemon_for_report, service
 from maajun.discovery import probe_source
 from maajun.progress import working
-from maajun.utils import is_valid_repo, truncate
+from maajun.utils import is_valid_repo, qualify, truncate
 from maajun.vcs import GitHubClient
+from maajun.vcs.gh import account_login
 
 NOTICE_STYLES = {"info": "cyan", "success": "green", "warn": "yellow", "error": "red"}
 
@@ -401,9 +402,21 @@ def add_repo(
 ):
     """Add a repository to watch.
 
-    Re-adding a repo already in the list updates only the settings you pass,
-    leaving its other settings alone.
+    The owner can be left off once GitHub is authenticated: `add-repo myapp`
+    becomes `<your-login>/myapp`. Re-adding a repo already in the list
+    updates only the settings you pass, leaving its other settings alone.
     """
+    if "/" not in repo:
+        owner = account_login(AuthManager().get_github_token())
+        if not owner:
+            console.print(
+                f'[red]✗ "{repo}" has no owner, and maajun is not signed in '
+                "to GitHub to fill one in. Run 'maajun login', or pass "
+                "owner/name.[/red]"
+            )
+            raise typer.Exit(1)
+        repo = qualify(repo, owner)
+        console.print(f"[dim]Using {repo}[/dim]")
     if not is_valid_repo(repo):
         console.print(f'[red]✗ "{repo}" is not in owner/name form.[/red]')
         raise typer.Exit(1)

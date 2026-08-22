@@ -27,8 +27,8 @@ from maajun.daemon import service
 from maajun.discovery import probe_source
 from maajun.providers.base import ProviderType
 from maajun.providers.factory import ProviderFactory
-from maajun.utils import is_valid_repo
-from maajun.vcs.gh import gh_account, ssh_works
+from maajun.utils import is_valid_repo, qualify
+from maajun.vcs.gh import account_login, gh_account, ssh_works
 
 PROVIDER_SIGNUP_URLS = {
     "deepseek": "https://platform.deepseek.com",
@@ -160,15 +160,18 @@ def setup_github(
     if detected and not current:
         console.print(f"  [dim]Detected from git remote: {detected}[/dim]")
 
-    repo = requested_repo or ask.text(
-        "Repository to open PRs on (owner/name)", current or detected or ""
-    )
+    owner = account_login(auth.get_github_token())
+    hint = "Repository to open PRs on" + (f" (name, or {owner}/name)" if owner else " (owner/name)")
+    repo = requested_repo or ask.text(hint, current or detected or "")
     if not repo:
         console.print(
             "  [dim]Skipped — maajun will analyze errors and write reports "
             "to disk instead of opening PRs.[/dim]"
         )
         return
+    if "/" not in repo and owner:
+        repo = qualify(repo, owner)
+        console.print(f"  [dim]Using {repo}[/dim]")
     if not is_valid_repo(repo):
         console.print(
             f'  [yellow]⚠ "{repo}" is not in owner/name form — skipping GitHub '
