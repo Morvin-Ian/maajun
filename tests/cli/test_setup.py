@@ -531,48 +531,57 @@ def flat(text):
 def headless(monkeypatch, tmp_path):
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
     monkeypatch.setattr("maajun.cli.setup.keyring_works", lambda: False)
-    monkeypatch.setattr("maajun.cli.setup.file_store_enabled", lambda: False)
 
 
-def test_the_choice_comes_before_the_key_is_typed(
-    fake_keyring, headless, monkeypatch, tmp_path
+def test_a_server_is_told_where_its_credentials_went(
+    fake_keyring, headless, tmp_path
 ):
-    """Asking for a secret and then discovering there is nowhere to put it
-    throws the secret away."""
-    enabled = []
-    monkeypatch.setattr(
-        "maajun.cli.setup.enable_file_store", lambda: enabled.append(True)
-    )
-
+    """Said, not asked: there is one sensible answer on a machine with no
+    keyring, and a question there is friction for nothing."""
     result = runner.invoke(app, [
         "setup", "--config", str(tmp_path / "config.toml"),
-    ], input="\n1\n\n")
+    ], input="\n\n")
 
     output = flat(result.output)
-    assert "This machine has no keyring" in output
-    assert output.index("no keyring") < output.index("API key (input hidden)")
-    assert enabled == [True]
+    assert "No keyring on this machine" in output
+    # Rich wraps a long path, so assert on parts that cannot split.
+    assert "chmod 600" in output
+    assert "keyrings.alt" in output  # the alternative, for anyone who wants it
+    assert "Choice" not in output
 
 
-def test_choosing_the_backend_route_stops_and_says_the_command(
-    fake_keyring, headless, tmp_path
-):
+def test_the_notice_comes_before_the_key_is_typed(fake_keyring, headless, tmp_path):
     result = runner.invoke(app, [
         "setup", "--config", str(tmp_path / "config.toml"),
-    ], input="\n2\n")
+    ], input="\n\n")
 
-    assert result.exit_code == 1
-    assert "keyrings.alt" in flat(result.output)
-    assert "setup' again" in flat(result.output)
+    output = flat(result.output)
+    assert output.index("No keyring") < output.index("API key (input hidden)")
 
 
-def test_non_interactive_says_what_to_run_rather_than_choosing(
-    fake_keyring, headless, tmp_path
+def test_a_machine_with_a_keyring_hears_nothing_about_files(
+    fake_keyring, monkeypatch, tmp_path
 ):
-    """It cannot ask, and writing a secret to disk unasked is not its call."""
+    monkeypatch.setattr("maajun.cli.setup.keyring_works", lambda: True)
+
     result = runner.invoke(app, [
         "setup", "--non-interactive", "--config", str(tmp_path / "config.toml"),
     ])
 
-    assert result.exit_code == 1
-    assert "Nowhere to store a credential" in flat(result.output)
+    assert "credentials.json" not in flat(result.output)
+
+
+def test_setup_finishes_unattended_without_a_keyring(
+    fake_keyring, api_key, headless, tmp_path
+):
+    """--non-interactive used to be a dead end on exactly the machines maajun
+    is deployed to."""
+    config_path = tmp_path / "config.toml"
+
+    result = runner.invoke(app, [
+        "setup", "--non-interactive", "--config", str(config_path),
+        "--repo", "acme/webapp",
+    ])
+
+    assert result.exit_code == 0
+    assert config_path.exists()

@@ -66,14 +66,9 @@ def write_file_store(values: dict[str, str]) -> None:
     os.chmod(path, FILE_MODE)
 
 
-def file_store_enabled() -> bool:
+def file_store_in_use() -> bool:
+    """Whether credentials are being kept in maajun's own file."""
     return credentials_file().exists()
-
-
-def enable_file_store() -> None:
-    """Start keeping credentials in a file, for a host with no keyring."""
-    if not file_store_enabled():
-        write_file_store({})
 
 
 def get_stored(name: str) -> str | None:
@@ -88,23 +83,25 @@ def get_stored(name: str) -> str | None:
 def set_stored(name: str, value: str) -> None:
     """Store a secret where this machine can keep it.
 
-    The keyring when there is one. Otherwise the file, but only once someone
-    has said to use it — silently writing a secret to disk because the
-    keyring was missing is not a decision to make on their behalf.
+    The keyring when there is one, and maajun's own file when there is not —
+    which on a server is most of the time. Failing instead would be correct
+    only if there were something better to do, and there is not: the usual
+    advice, keyrings.alt, is the same file with an extra package in front.
     """
     try:
         keyring.set_password(SERVICE_NAME, name, value)
         return
-    except keyring.errors.KeyringError as e:
-        if not file_store_enabled():
-            raise RuntimeError(
-                "No usable keyring on this machine (normal on a server). "
-                "Run `maajun setup` and choose where to keep credentials, "
-                f"or install a keyring backend: {e}"
-            ) from e
+    except keyring.errors.KeyringError:
+        pass
     values = read_file_store()
     values[name] = value
-    write_file_store(values)
+    try:
+        write_file_store(values)
+    except OSError as e:
+        raise RuntimeError(
+            f"No keyring on this machine, and {credentials_file()} could not "
+            f"be written either: {e}"
+        ) from e
 
 
 def delete_stored(name: str) -> None:
