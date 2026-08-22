@@ -260,7 +260,31 @@ tail -f ~/.local/share/maajun/watch.log
 | `--once` | One poll cycle, then exit (testing, cron) — implies foreground |
 | `--dry-run` | Analyze errors but skip git/PR operations; nothing is persisted |
 | `-m, --mode MODE` | Override the configured mode for this run (`suggest`/`fix`) |
+| `--backfill` | Also work through the errors already in the logs, once |
 | `-v, --verbose` | Debug logging (implies foreground) |
+
+**Starting on a log that already has errors in it.** Watching begins where
+each source stands *now*: a log file is read from its end, a journal from
+the moment maajun started, a container from the same. What is already there
+happened before you asked maajun to watch, and filing an issue for each of
+it is not what starting a monitor should mean.
+
+`--backfill` says to read it anyway — the whole log file, the unit's whole
+journal, the container's whole log — once, and then carry on normally. It
+is worth knowing how much that is first: distinct *error shapes* is what
+costs money, not lines, since fingerprinting strips digits and ids, so a
+thousand repeats of one traceback are one analysis. Cap the first run if
+you are unsure:
+
+```bash
+maajun config daemon.max_incidents_per_cycle 3
+maajun watch --backfill
+```
+
+A log file's position is kept in `<workdir>/cursors`, so a restart carries
+on exactly where it stopped instead of re-reading the file. A log rotated
+or truncated while the daemon was down is read from the start, since none
+of what it holds has been seen.
 
 A background run writes everything to `<workdir>/watch.log` and its pid to
 `<workdir>/watch.pid`; starting twice from the same workdir is refused
