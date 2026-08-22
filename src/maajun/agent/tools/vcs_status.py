@@ -1,5 +1,3 @@
-"""Git tools: git_status."""
-
 from __future__ import annotations
 
 import asyncio

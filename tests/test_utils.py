@@ -1,5 +1,3 @@
-"""Tests for the shared helpers in maajun.utils."""
-
 import pytest
 
 from maajun.utils import (

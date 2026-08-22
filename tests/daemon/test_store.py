@@ -1,5 +1,3 @@
-"""Tests for the incident store."""
-
 import pytest
 
 from maajun.daemon.store import (

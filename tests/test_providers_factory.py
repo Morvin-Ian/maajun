@@ -1,5 +1,3 @@
-"""Tests for provider selection and the shared OpenAI-compatible base."""
-
 import pytest
 
 from maajun.providers.base import ProviderType
