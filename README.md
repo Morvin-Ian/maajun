@@ -36,7 +36,7 @@ on. The GitHub Actions monitor works from anywhere with network access.
 ## Installation
 
 ```bash
-uv tool install maajun     # or: pipx install maajun / pip install maajun
+uv tool install maajun     # or: pipx install maajun
 ```
 
 From source:
