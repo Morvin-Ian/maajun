@@ -342,6 +342,7 @@ class Agent:
 
     async def execute_tool(self, name: str, args: dict[str, Any]) -> str:
         log.info("tool_call name=%s args=%s", name, args)
+        args = self.registry.normalize(name, args)
         verdict = await self.permitted(name, args)
         if verdict is True:
             result = await self.registry.execute(name, args)
