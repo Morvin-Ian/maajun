@@ -319,9 +319,14 @@ rather than copies. `maajun login` picks between them, and `maajun status`
 says which is in use, so there is no doubt about what the daemon will push
 with. Branches can go over SSH instead, keeping the token to the API.
 
-maajun needs a working keyring backend to store anything of its own. On a
-headless server, install one (`keyrings.alt`, `gnome-keyring`) before
-running `setup` — or just log in with `gh` and skip it.
+Most servers have no keyring. `maajun setup` finds that out **before** it
+asks for anything, and offers the choice: keep credentials in
+`~/.config/maajun/credentials.json`, a file only your user can read
+(`chmod 600`), or install a keyring backend and start again — with the
+command for the way you installed maajun (`pipx inject maajun keyrings.alt`,
+`uv tool install maajun --with keyrings.alt`, `pip install keyrings.alt`).
+It never writes a secret to disk without being told to, and `maajun status`
+says where the ones it has are kept.
 
 ## Commands
 

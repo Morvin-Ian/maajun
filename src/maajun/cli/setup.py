@@ -9,7 +9,14 @@ from pathlib import Path
 import typer
 from rich.panel import Panel
 
-from maajun.auth import AuthManager
+from maajun.auth import (
+    AuthManager,
+    credentials_file,
+    enable_file_store,
+    file_store_enabled,
+    install_backend_command,
+    keyring_works,
+)
 from maajun.cli.deployment import record_deployment
 from maajun.cli.github_auth import authenticate, report_push_access
 from maajun.cli.shared import (
@@ -98,6 +105,9 @@ def setup_provider(
         console.print(f"  [green]✓[/green] {provider} API key already stored")
         return provider
 
+    if not settle_where_credentials_go(ask):
+        raise typer.Exit(1)
+
     signup = PROVIDER_SIGNUP_URLS.get(provider)
     if signup:
         console.print(f"  [dim]Get a key at {signup}[/dim]")
@@ -130,14 +140,49 @@ def setup_provider(
     return provider
 
 
+def settle_where_credentials_go(ask: Asker) -> bool:
+    """Make sure there is somewhere to put a secret, before asking for one.
+
+    A headless server usually has no keyring, and finding that out after the
+    key has been typed means it is gone and the run is wasted.
+    """
+    if keyring_works() or file_store_enabled():
+        return True
+
+    console.print(
+        "  [yellow]This machine has no keyring[/yellow] "
+        "[dim](usual on a server).[/dim]"
+    )
+    console.print(
+        f"    [cyan]1.[/cyan] Keep credentials in {credentials_file()}\n"
+        "       [dim]a file only your user can read (chmod 600)[/dim]\n"
+        "    [cyan]2.[/cyan] Install a keyring backend and start again\n"
+        f"       [dim]{install_backend_command()}[/dim]"
+    )
+    if not ask.interactive:
+        console.print(
+            "  [red]✗ Nowhere to store a credential. Run 'maajun setup' "
+            f"interactively, or: {install_backend_command()}[/red]"
+        )
+        return False
+
+    if ask.text("  Choice", "1").strip() != "1":
+        console.print(f"\n  [cyan]{install_backend_command()}[/cyan]")
+        console.print("  [dim]Then run 'maajun setup' again.[/dim]")
+        return False
+
+    enable_file_store()
+    console.print(
+        f"  [green]✓[/green] Using {credentials_file()} [dim](chmod 600)[/dim]"
+    )
+    return True
+
+
 def store_api_key(auth: AuthManager, provider: str, key: str) -> None:
     try:
         auth.set_api_key(provider, key)
     except RuntimeError as e:
-        # The keyring is the only store, so this is fatal, not a fallback.
-        console.print(
-            f"  [red]✗ Could not store the key: {e}[/red]"
-        )
+        console.print(f"  [red]✗ Could not store the key: {e}[/red]")
         raise typer.Exit(1) from e
 
 
