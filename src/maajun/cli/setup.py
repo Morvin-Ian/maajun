@@ -10,22 +10,24 @@ import typer
 from rich.panel import Panel
 
 from maajun.auth import AuthManager
+from maajun.cli.deployment import record_deployment
+from maajun.cli.github_auth import authenticate, report_push_access
 from maajun.cli.shared import (
+    Asker,
     app,
     configured_providers,
     console,
     implemented_providers,
     load_config,
-    prompt_line,
     prompt_mode,
-    prompt_secret,
 )
-from maajun.cli.status_checks import build_status, gather_github
+from maajun.cli.status_checks import build_status
 from maajun.config import Config, RepoConfig, default_config_path
+from maajun.discovery import probe_source
 from maajun.providers.base import ProviderType
 from maajun.providers.factory import ProviderFactory
 from maajun.utils import is_valid_repo
-from maajun.vcs import GitHubClient, GitHubError
+from maajun.vcs.gh import gh_account, ssh_works
 
 PROVIDER_SIGNUP_URLS = {
     "deepseek": "https://platform.deepseek.com",
@@ -47,33 +49,6 @@ def detect_repo_from_git(directory: Path | None = None) -> str | None:
         return None
     match = GITHUB_REMOTE_RE.search(result.stdout.strip())
     return match.group(1) if match else None
-
-class Asker:
-    """Prompts that fall back to defaults when running non-interactively."""
-
-    def __init__(self, interactive: bool):
-        self.interactive = interactive
-
-    def text(self, prompt: str, default: str = "") -> str:
-        if not self.interactive:
-            return default
-        shown = f"{prompt} [{default}]: " if default else f"{prompt}: "
-        return prompt_line(f"> {shown}").strip() or default
-
-    def secret(self, prompt: str) -> str:
-        if not self.interactive:
-            return ""
-        return prompt_secret(f"> {prompt}: ")
-
-    def confirm(self, prompt: str, default: bool = False) -> bool:
-        if not self.interactive:
-            return default
-        hint = "Y/n" if default else "y/N"
-        answer = prompt_line(f"> {prompt} ({hint}): ").strip().lower()
-        if not answer:
-            return default
-        return answer.startswith("y")
-
 
 def step(number: int, total: int, title: str, optional: bool = False) -> None:
     tag = " [dim](optional — press Enter to skip)[/dim]" if optional else ""
@@ -241,61 +216,57 @@ def setup_github(
             test_command=resolved_test_command,
         ))
 
-    setup_github_token(auth, ask, repo, reconfigure=reconfigure)
+    setup_github_token(auth, config, ask, repo, reconfigure=reconfigure)
 
 
 def setup_github_token(
-    auth: AuthManager, ask: Asker, repo: str, *, reconfigure: bool
+    auth: AuthManager, config: Config, ask: Asker, repo: str, *, reconfigure: bool
 ) -> None:
-    if auth.has_github_token() and not reconfigure:
-        console.print("  [green]✓[/green] GitHub token already stored")
-        report_push_access(auth, repo)
-        return
+    """Settle how maajun reaches GitHub, asking only when it has to."""
+    if not reconfigure:
+        source = auth.github_token_source()
+        if source == "keyring":
+            console.print("  [green]✓[/green] GitHub token already stored")
+            choose_transport(config)
+            report_push_access(auth, repo)
+            return
+        if source == "gh":
+            account = gh_account()
+            console.print(
+                "  [green]✓[/green] Using your GitHub CLI login"
+                + (f" as [cyan]{account}[/cyan]" if account else "")
+                + " [dim](nothing to store)[/dim]"
+            )
+            choose_transport(config)
+            report_push_access(auth, repo)
+            return
 
-    console.print(
-        f"  [dim]Create a fine-grained token at {GITHUB_TOKEN_URL}\n"
-        f"    Scope it to {repo} with Contents: read/write and "
-        "Pull requests: read/write.[/dim]"
-    )
-    token = ask.secret("GitHub token (input hidden, Enter to skip)")
-    if not token:
+    if not ask.interactive:
         console.print(
-            "  [yellow]⚠ No token — PRs will fail until you re-run "
-            "'maajun setup' and provide one.[/yellow]"
+            "  [yellow]⚠ No GitHub credential. Run 'maajun login' to pick "
+            "one — issues and PRs fail until you do.[/yellow]"
         )
         return
-    try:
-        auth.set_github_token(token)
-        console.print("  [green]✓[/green] Token stored")
-    except RuntimeError as e:
-        console.print(f"  [red]✗ Could not store the token: {e}[/red]")
+
+    if not authenticate(auth, config, repo):
+        console.print(
+            "  [yellow]⚠ No credential set — run 'maajun login' to try "
+            "again.[/yellow]"
+        )
         return
     report_push_access(auth, repo)
 
 
-def report_push_access(auth: AuthManager, repo: str) -> None:
-    """Warn early if the token cannot push — the daemon would fail much later."""
-    token = auth.get_github_token()
-    if not token:
+def choose_transport(config: Config) -> None:
+    """Push over SSH when the machine's keys already work.
+
+    Keeps the token to the API, where it is unavoidable, instead of putting
+    it in front of every git push.
+    """
+    if config.github.transport != "auto" or not ssh_works():
         return
-    client = GitHubClient(token)
-    try:
-        with console.status("[dim]Checking repository access...[/dim]"):
-            login, pushable = asyncio.run(
-                gather_github(client, [RepoConfig(repo=repo)])
-            )
-    except GitHubError as e:
-        console.print(f"  [yellow]⚠ Could not reach GitHub: {e}[/yellow]")
-        return
-    if login is None:
-        console.print("  [yellow]⚠ GitHub rejected the token.[/yellow]")
-        return
-    console.print(f"  [green]✓[/green] Authenticated as {login}")
-    if not pushable.get(repo):
-        console.print(
-            f"  [yellow]⚠ The token cannot push to {repo}. Check its "
-            "repository access and Contents permission.[/yellow]"
-        )
+    config.github.transport = "ssh"
+    console.print("  [green]✓[/green] Pushing over SSH [dim](your keys work)[/dim]")
 
 
 def setup_error_sources(
@@ -306,11 +277,23 @@ def setup_error_sources(
     log_paths: str | None,
     github_actions: bool | None,
 ) -> None:
-    logs = log_paths if log_paths is not None else ask.text(
-        "Log files to watch (comma-separated)",
-        ",".join(config.monitor.log_files),
-    )
-    config.monitor.log_files = [path.strip() for path in logs.split(",") if path.strip()]
+    # Always: without knowing where this app's errors land, the daemon has
+    # nothing to watch, and a finished setup would be a lie.
+    for entry in config.github.get_all_repos():
+        record_deployment(entry, config, auth)
+
+    configured_repos = config.github.get_all_repos()
+    # Only asked when it is still needed: a repo that already knows where its
+    # errors land does not need a path typed in as well.
+    covered = any(sources for _, sources in config.sources_by_repo())
+    if log_paths is not None or not covered:
+        logs = log_paths if log_paths is not None else ask.text(
+            "Log files to watch (comma-separated)",
+            ",".join(config.monitor.log_files),
+        )
+        config.monitor.log_files = [
+            path.strip() for path in logs.split(",") if path.strip()
+        ]
     for path in config.monitor.log_files:
         if Path(path).expanduser().exists():
             console.print(f"  [green]✓[/green] {path}")
@@ -318,12 +301,12 @@ def setup_error_sources(
             # Fine: the app may only create its error log on first use.
             console.print(f"  [yellow]⚠[/yellow] {path} [dim](not found yet)[/dim]")
 
-    configured_repos = config.github.get_all_repos()
     want_actions = (
         github_actions if github_actions is not None
         else (
             bool(configured_repos)
-            and ask.confirm("Watch GitHub Actions for failed runs?")
+            and auth.has_github_token()
+            and ask.confirm("Watch GitHub Actions for failed runs too?", default=True)
         )
     )
     if want_actions:
@@ -340,6 +323,19 @@ def setup_error_sources(
             console.print(
                 f"  [green]✓[/green] Watching Actions on {', '.join(repo_names)}"
             )
+
+    # Actions only sees CI. Runtime errors — the failed requests users
+    # actually hit — reach maajun through one of the three sinks or not at all.
+    unwatched = [
+        repo_config.repo for repo_config, sources in config.sources_by_repo()
+        if repo_config and not sources and repo_config.deployment.runtime != "none"
+    ]
+    if unwatched:
+        console.print(
+            "  [yellow]⚠ Nothing watches runtime errors for "
+            f"{', '.join(unwatched)}. Run 'maajun discover --save' once the "
+            "app is deployed on this host.[/yellow]"
+        )
 
 
 @app.command()
@@ -400,7 +396,7 @@ def setup(
         test_command=test_command, reconfigure=reconfigure,
     )
 
-    step(3, total, "Error sources", optional=True)
+    step(3, total, "Error sources")
     setup_error_sources(
         auth, config, ask,
         log_paths=logs, github_actions=github_actions,
@@ -411,7 +407,7 @@ def setup(
     print_summary(config, auth)
 
 
-def print_summary(config: Config, auth: AuthManager) -> None:
+def print_summary(config: Config, auth: AuthManager) -> bool:
     repos = config.github.get_all_repos()
     has_token = auth.has_github_token()
     sections, ok = build_status(
@@ -421,6 +417,8 @@ def print_summary(config: Config, auth: AuthManager) -> None:
         has_token=has_token,
         repos=repos,
         network=None,
+        probe=probe_source,
+        token_source=auth.github_token_source(),
     )
     console.print("\n[bold]Status[/bold]")
     for section in sections:
@@ -439,16 +437,16 @@ def print_summary(config: Config, auth: AuthManager) -> None:
             "\n[yellow]Fix the ✗ items above, then run "
             "[bold]maajun status[/bold] to re-check.[/yellow]"
         )
-        return
+        return False
+    console.print("\n[bold]You're ready.[/bold]")
     if repos:
-        console.print("\n[bold]You're ready.[/bold] Next:")
+        console.print("  [cyan]maajun watch[/cyan]            "
+                      "[dim]watch in the background[/dim]")
         console.print("  [cyan]maajun watch --dry-run[/cyan]  "
                       "[dim]analyze without opening PRs[/dim]")
-        console.print("  [cyan]maajun watch[/cyan]            "
-                      "[dim]start monitoring for real[/dim]")
     else:
-        console.print("\n[bold]You're ready.[/bold] Next:")
         console.print("  [cyan]maajun watch[/cyan]  "
                       "[dim]analyze errors into local reports[/dim]")
         console.print("  [dim]Run 'maajun setup' again to connect GitHub "
                       "and open PRs instead.[/dim]")
+    return True

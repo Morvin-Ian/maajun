@@ -18,6 +18,7 @@ from maajun.monitors import (
     Monitor,
 )
 from maajun.vcs import GitHubClient, GitWorkspace
+from maajun.vcs.gh import remote_url
 
 log = logging.getLogger(__name__)
 
@@ -65,11 +66,15 @@ class DaemonDeps:
             self.token = token
             self.github = GitHubClient(token)
             self.repos = repos
+            transport = config.github.transport
             self.workspaces = {
                 repo_config.repo: GitWorkspace(
                     workdir / "workspaces",
                     repo_config.repo,
                     token,
+                    remote_url=remote_url(
+                        repo_config.repo, transport, has_token=True
+                    ),
                 )
                 for repo_config in repos
             }

@@ -119,3 +119,51 @@ def test_clearing_the_token_leaves_nothing_behind(fake_keyring):
     auth.set_github_token("ghp_stored")
     auth.clear_github_token()
     assert auth.get_github_token() is None
+
+
+# ---------------------------------------------------------------------------
+# Borrowing the GitHub CLI's login
+# ---------------------------------------------------------------------------
+
+
+def test_the_gh_login_stands_in_for_a_stored_token(fake_keyring, monkeypatch):
+    """A machine where someone ran `gh auth login` needs no second credential."""
+    monkeypatch.setattr("maajun.auth.gh_token", lambda: "gho_from_gh")
+    auth = AuthManager()
+
+    assert auth.get_github_token() == "gho_from_gh"
+    assert auth.has_github_token()
+    assert auth.github_token_source() == "gh"
+
+
+def test_a_stored_token_wins_over_the_gh_login(fake_keyring, monkeypatch):
+    monkeypatch.setattr("maajun.auth.gh_token", lambda: "gho_from_gh")
+    auth = AuthManager()
+    auth.set_github_token("ghp_mine")
+
+    assert auth.get_github_token() == "ghp_mine"
+    assert auth.github_token_source() == "keyring"
+
+
+def test_gh_is_asked_once(fake_keyring, monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        "maajun.auth.gh_token", lambda: calls.append(1) or "gho_from_gh"
+    )
+    auth = AuthManager()
+
+    auth.get_github_token()
+    auth.get_github_token()
+
+    assert len(calls) == 1
+
+
+def test_signing_out_does_not_claim_to_undo_a_gh_login(fake_keyring, monkeypatch):
+    """Clearing our own copy is ours to do; their gh session is not."""
+    monkeypatch.setattr("maajun.auth.gh_token", lambda: "gho_from_gh")
+    auth = AuthManager()
+    auth.set_github_token("ghp_mine")
+
+    auth.clear_github_token()
+
+    assert auth.get_github_token() == "gho_from_gh"

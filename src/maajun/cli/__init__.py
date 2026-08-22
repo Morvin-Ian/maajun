@@ -2,6 +2,7 @@ from maajun.cli import (  # noqa: F401,E402  register commands
     chat,
     credentials,
     deployment,
+    github_auth,
     incidents,
     monitor,
     settings,

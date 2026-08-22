@@ -1,5 +1,3 @@
-"""Shared fixtures for all maajun tests."""
-
 import getpass
 
 import keyring
@@ -42,6 +40,40 @@ def never_the_real_home(monkeypatch, tmp_path):
     """
     for name in ("XDG_CONFIG_HOME", "XDG_DATA_HOME"):
         monkeypatch.setenv(name, str(tmp_path / name.lower()))
+
+
+@pytest.fixture(autouse=True)
+def no_github_cli(monkeypatch):
+    """No test borrows the developer's own gh login or SSH keys.
+
+    maajun falls back to `gh auth token` when the keyring is empty, and
+    probes SSH during setup — so without this a machine with gh logged in
+    takes different paths than CI, and every setup test waits on ssh.
+    """
+    import importlib
+
+    stubs = {
+        "gh_token": lambda: "",
+        "gh_available": lambda: False,
+        "gh_account": lambda: "",
+        "gh_login": lambda: 1,
+        "ssh_works": lambda: False,
+        # Reaches the real keyring and the GitHub API otherwise, which also
+        # decides whether a bare repo name can be completed.
+        "account_login": lambda token=None: "",
+    }
+    # Patched per module, since each imported the names it uses by value.
+    for module_name in (
+        "maajun.auth",
+        "maajun.cli.setup",
+        "maajun.cli.github_auth",
+        "maajun.cli.monitor",
+        "maajun.vcs.gh",
+    ):
+        module = importlib.import_module(module_name)
+        for name, value in stubs.items():
+            if hasattr(module, name):
+                monkeypatch.setattr(module, name, value)
 
 
 # ---------------------------------------------------------------------------

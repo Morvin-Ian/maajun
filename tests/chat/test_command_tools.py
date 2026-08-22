@@ -164,6 +164,13 @@ async def test_the_run_tool_refuses_watch(run_tool):
     assert "runs until interrupted" in result
 
 
+async def test_the_run_tool_refuses_login(run_tool):
+    """It prompts, and option 1 hands the terminal to gh — both would hang."""
+    result = await run_tool(command="login")
+    assert "Refusing to run 'login'" in result
+    assert "your own terminal" in result
+
+
 async def test_the_run_tool_refuses_reset(run_tool):
     result = await run_tool(command="reset", args="--force")
     assert "Refusing to run 'reset'" in result
