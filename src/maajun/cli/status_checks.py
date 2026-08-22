@@ -99,6 +99,8 @@ def credential_label(source: str) -> str:
     """What the GitHub credential is, so a surprise login is visible."""
     if source == "gh":
         return "GitHub credential from the gh CLI"
+    if source == "file":
+        return "GitHub token in maajun's credentials file"
     return "GitHub token stored"
 
 
@@ -166,9 +168,14 @@ def build_status(
     network: tuple[str | None, dict[str, bool]] | None,
     probe: SourceProbe | None = None,
     token_source: str = "",
+    key_detail: str = "",
 ) -> tuple[list[Section], bool]:
     ai = Section("AI provider", [
-        Check(f"API key for {provider}", has_key, "" if has_key else "run 'maajun setup'"),
+        Check(
+            f"API key for {provider}", has_key,
+            key_detail if has_key else "run 'maajun setup'",
+            counts=True,
+        ),
     ])
 
     # No repo is a note, not a failure — reports go to disk. Once one is
