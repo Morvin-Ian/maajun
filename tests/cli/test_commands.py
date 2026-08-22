@@ -1,5 +1,3 @@
-"""Tests for the CLI commands (Typer app)."""
-
 import keyring
 import keyring.errors
 import pytest
@@ -7,6 +5,8 @@ from typer.testing import CliRunner
 
 from maajun.auth import AuthManager
 from maajun.cli import app
+from maajun.config import Config
+from maajun.discovery import Discovered
 
 runner = CliRunner()
 
@@ -517,3 +517,169 @@ def test_a_plain_data_directory_is_allowed(tmp_path):
     from maajun.cli.settings import unsafe_to_delete
 
     assert unsafe_to_delete(tmp_path / "maajun-data") == ""
+
+
+# ---------------------------------------------------------------------------
+# Deployment: add-repo flags and `discover`
+# ---------------------------------------------------------------------------
+
+
+def repo_config(config_path):
+    return Config.load(config_path).github.repos[0]
+
+
+def test_add_repo_records_a_deployment(fake_keyring, tmp_path):
+    config_path = tmp_path / "config.toml"
+
+    result = runner.invoke(app, [
+        "add-repo", "acme/api", "--config", str(config_path),
+        "--path", "/srv/api", "--port", "8000", "--runs", "docker compose",
+        "--journald-units", "api.service, nginx.service",
+        "--docker-containers", "api-web-1",
+    ])
+
+    assert result.exit_code == 0
+    deployment = repo_config(config_path).deployment
+    assert deployment.path == "/srv/api"
+    assert deployment.port == 8000
+    assert deployment.runs == "docker compose"
+    assert deployment.journald_units == ["api.service", "nginx.service"]
+    assert deployment.docker_containers == ["api-web-1"]
+
+
+def test_re_adding_a_repo_leaves_its_deployment_alone(fake_keyring, tmp_path):
+    """The "None means leave as is" contract, extended to deployment flags."""
+    config_path = tmp_path / "config.toml"
+    runner.invoke(app, [
+        "add-repo", "acme/api", "--config", str(config_path),
+        "--path", "/srv/api", "--port", "8000",
+    ])
+
+    runner.invoke(app, [
+        "add-repo", "acme/api", "--config", str(config_path), "--mode", "fix",
+    ])
+
+    entry = repo_config(config_path)
+    assert entry.mode == "fix"
+    assert (entry.deployment.path, entry.deployment.port) == ("/srv/api", 8000)
+
+
+def test_a_port_outside_the_valid_range_is_rejected(fake_keyring, tmp_path):
+    result = runner.invoke(app, [
+        "add-repo", "acme/api", "--config", str(tmp_path / "config.toml"),
+        "--port", "99999",
+    ])
+    assert result.exit_code != 0
+
+
+def test_config_sets_a_deployment_value_for_one_repo(fake_keyring, tmp_path):
+    config_path = tmp_path / "config.toml"
+    runner.invoke(app, ["add-repo", "acme/api", "--config", str(config_path)])
+
+    result = runner.invoke(app, [
+        "config", "github.deployment.port", "8000",
+        "--repo", "acme/api", "--config", str(config_path),
+    ])
+
+    assert result.exit_code == 0
+    assert repo_config(config_path).deployment.port == 8000
+
+
+def test_a_deployment_value_needs_a_repo(fake_keyring, tmp_path):
+    """A port belongs to one deployment; cascading it is never meant."""
+    config_path = tmp_path / "config.toml"
+    runner.invoke(app, ["add-repo", "acme/api", "--config", str(config_path)])
+
+    result = runner.invoke(app, [
+        "config", "github.deployment.port", "8000", "--config", str(config_path),
+    ])
+
+    assert result.exit_code == 1
+    assert "needs a repository" in flat(result.output)
+
+
+def test_discover_prints_what_it_finds_without_writing(
+    fake_keyring, tmp_path, monkeypatch
+):
+    """Read-only by default: it reports, you decide."""
+    config_path = tmp_path / "config.toml"
+    runner.invoke(app, ["add-repo", "acme/api", "--config", str(config_path)])
+    monkeypatch.setattr(
+        "maajun.cli.deployment.discover",
+        lambda repo, existing=None: Discovered(
+            path="/srv/api", port=8000, runs="docker compose",
+            docker_containers=["api-web-1"], notes=["container api-web-1"],
+        ),
+    )
+
+    result = runner.invoke(app, ["discover", "--config", str(config_path)])
+
+    assert result.exit_code == 0
+    assert "api-web-1" in flat(result.output)
+    assert repo_config(config_path).deployment.docker_containers == []
+
+
+def test_discover_save_writes_the_deployment(fake_keyring, tmp_path, monkeypatch):
+    config_path = tmp_path / "config.toml"
+    runner.invoke(app, ["add-repo", "acme/api", "--config", str(config_path)])
+    monkeypatch.setattr(
+        "maajun.cli.deployment.discover",
+        lambda repo, existing=None: Discovered(
+            path="/srv/api", journald_units=["api.service"]
+        ),
+    )
+
+    result = runner.invoke(app, [
+        "discover", "--save", "--config", str(config_path),
+    ])
+
+    assert result.exit_code == 0
+    deployment = repo_config(config_path).deployment
+    assert deployment.path == "/srv/api"
+    assert deployment.journald_units == ["api.service"]
+
+
+def test_discover_says_when_it_finds_no_runtime_source(
+    fake_keyring, tmp_path, monkeypatch
+):
+    config_path = tmp_path / "config.toml"
+    runner.invoke(app, ["add-repo", "acme/api", "--config", str(config_path)])
+    monkeypatch.setattr(
+        "maajun.cli.deployment.discover", lambda repo, existing=None: Discovered()
+    )
+
+    result = runner.invoke(app, ["discover", "--config", str(config_path)])
+
+    assert "No runtime error source found" in flat(result.output)
+
+
+def test_discover_without_a_repo_configured_says_so(fake_keyring, tmp_path):
+    result = runner.invoke(app, ["discover", "--config", str(tmp_path / "c.toml")])
+
+    assert result.exit_code == 1
+    assert "No repositories configured" in flat(result.output)
+
+
+def test_discover_rejects_an_unconfigured_repo(fake_keyring, tmp_path):
+    config_path = tmp_path / "config.toml"
+    runner.invoke(app, ["add-repo", "acme/api", "--config", str(config_path)])
+
+    result = runner.invoke(app, [
+        "discover", "--repo", "acme/nope", "--config", str(config_path),
+    ])
+
+    assert result.exit_code == 1
+    assert "is not configured" in flat(result.output)
+
+
+def test_discover_path_needs_one_repo(fake_keyring, tmp_path, monkeypatch):
+    config_path = tmp_path / "config.toml"
+    for repo in ("acme/api", "acme/web"):
+        runner.invoke(app, ["add-repo", repo, "--config", str(config_path)])
+
+    result = runner.invoke(app, [
+        "discover", "--path", "/srv/api", "--config", str(config_path),
+    ])
+
+    assert result.exit_code == 1
+    assert "pass --repo too" in flat(result.output)
