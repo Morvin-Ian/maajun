@@ -7,14 +7,18 @@ import subprocess
 from collections.abc import Callable
 from pathlib import Path
 
-from maajun.agent.core import PermissionCallback
+from maajun.agent.core import PermissionCallback, accumulate_usage
 from maajun.config import Config, RepoConfig
 from maajun.daemon import reports
 from maajun.daemon.prompts import (
     ANALYZE_PROMPT,
+    DEPLOYMENT_SECTION,
     FIX_PROMPT_SUFFIX,
+    INVESTIGATION_RULES,
     MANUAL_REPORT_PROMPT,
     RECENT_COMMITS_SECTION,
+    REPORT_FORMAT,
+    RETRY_SUFFIX,
 )
 from maajun.daemon.store import (
     ARTIFACT_ISSUE,
@@ -39,6 +43,57 @@ NoticeCallback = Callable[[str, str], None]
 def no_operation(_: str) -> None:
     pass
 
+
+
+# A report shorter than this has never been a real finding — it is a refusal,
+# an apology, or a one-line guess.
+MIN_REPORT_CHARS = 200
+
+# The sections that make a report actionable. Not every one is required: a
+# model that renames a heading should not cost a filed incident.
+REPORT_HEADINGS = ("what happened", "root cause", "suggested fix")
+
+
+def report_problem(report: str) -> str:
+    """Why a report is not worth filing, or "" when it is.
+
+    An issue or pull request with no findings costs the reader more than it
+    gives, and hides that the run failed — so this gates publishing.
+    """
+    if not report:
+        return "it was empty"
+    if len(report) < MIN_REPORT_CHARS:
+        return f"it was {len(report)} characters long"
+    lowered = report.lower()
+    found = [heading for heading in REPORT_HEADINGS if heading in lowered]
+    if len(found) < 2:
+        return "it has none of the report's sections"
+    return ""
+
+
+def deployment_section(repo_config: RepoConfig, watching: list[str]) -> str:
+    """The deployment facts for the prompt, or "" when none are recorded.
+
+    Omitted entirely rather than half-filled: a report that says "port 0" or
+    invents a folder is worse than one that does not mention the deployment.
+    `watching` is the monitors actually attached to this repo, so the prompt
+    describes what is running rather than what the config hoped for.
+    """
+    deployment = repo_config.deployment
+    facts = []
+    if deployment.path:
+        facts.append(f"- Folder on the server: {deployment.path}")
+    if deployment.port:
+        facts.append(f"- Listens on port: {deployment.port}")
+    if deployment.runs:
+        facts.append(f"- Started by: {deployment.runs}")
+    if deployment.stack:
+        facts.append(f"- Built with: {deployment.stack}")
+    if watching:
+        facts.append(f"- Errors are read from: {', '.join(watching)}")
+    if not facts:
+        return ""
+    return DEPLOYMENT_SECTION.format(facts="\n".join(facts))
 
 # Tools fix mode may use. Anything else gated is refused with a reason, so
 # the model reads the refusal and tries a call that works.
@@ -215,6 +270,13 @@ class Daemon:
         return RECENT_COMMITS_SECTION.format(
             branch=branch, commits="\n".join(commits)
         )
+
+    def monitors_for(self, repo_config: RepoConfig) -> list[str]:
+        """Names of the monitors feeding this repo, in wiring order."""
+        return [
+            monitor.name for monitor in self.monitors
+            if self.monitor_to_repo.get(id(monitor)) is repo_config
+        ]
 
     def cycle_full(self) -> bool:
         """Whether this poll cycle has already analyzed its allowance.
@@ -436,6 +498,8 @@ class Daemon:
             source=event.source,
             timestamp=event.timestamp,
             details=event.details[:8000],
+            rules=INVESTIGATION_RULES,
+            format=REPORT_FORMAT,
         )
         return await self.analyze_and_open_pr(
             event,
@@ -471,9 +535,14 @@ class Daemon:
             details=description,
             repo=repo_config.repo,
         )
+        # mark_processed only updates, so without a row a report was analyzed,
+        # published, and then missing from `maajun incidents` entirely.
+        self.store.record(event)
         prompt = MANUAL_REPORT_PROMPT.format(
             workspace=workspace.path,
             description=description[:8000],
+            rules=INVESTIGATION_RULES,
+            format=REPORT_FORMAT,
         )
         return await self.analyze_and_open_pr(
             event,
@@ -484,19 +553,27 @@ class Daemon:
             title=f"[maajun] {description[:80]}",
             commit_message=f"maajun: manual report for {description[:60]}",
             dry_run_header="AI analysis for manual report",
+            # A dry run publishes nothing, so it should leave no incident
+            # behind either — the row exists only to be marked processed.
+            forget_on_dry_run=True,
             dry_run=dry_run,
             progress=progress,
         )
 
-    def record_failed_spend(self, event: ErrorEvent, agent) -> None:
+    def record_failed_spend(
+        self, event: ErrorEvent, agent, already_counted: dict[str, int] | None = None
+    ) -> None:
         """Bank what an analysis spent before it failed, against its incident.
 
         Best-effort: losing the cost figure is no reason to lose the original
-        exception. A manual report has no row, so the update matches nothing.
+        exception. `already_counted` carries earlier asks in the same run,
+        which the agent has since cleared off itself.
         """
         try:
+            spent = dict(already_counted or {})
+            accumulate_usage(spent, agent.take_usage())
             prompt_tokens, completion_tokens, cost = extract_usage(
-                agent.take_usage(), agent.model
+                spent, agent.model
             )
             self.store.add_spend(
                 event.fingerprint,
@@ -541,25 +618,48 @@ class Daemon:
         if blame_deploy:
             prompt += await self.recent_commits_section(repo_config, workspace)
 
+        prompt += deployment_section(repo_config, self.monitors_for(repo_config))
+
         if repo_config.mode == "fix":
             prompt += FIX_PROMPT_SUFFIX.format(workspace=workspace.path)
 
         progress("Analyzing with AI")
         agent = self.agent_factory_for_repo(repo_config, workspace)()
+        # Summed across asks: chat() reports one call, and the first is the
+        # expensive one — the cap and the recorded cost must see both.
+        spent: dict[str, int] = {}
         try:
             response = await agent.chat(prompt)
+            accumulate_usage(spent, response.usage)
+            report = response.content.strip()
+            problem = report_problem(report)
+            if problem:
+                # One more round rather than filing an empty artifact: the
+                # usual cause is a model that answered conversationally.
+                log.info("re-asking for a usable report: %s", problem)
+                progress("Re-asking for the report")
+                response = await agent.chat(RETRY_SUFFIX.format(problem=problem))
+                accumulate_usage(spent, response.usage)
+                report = response.content.strip()
         except BaseException:
             # There is no response to read the usage off, and the rounds it
             # did make were billed. Bank them before the failure propagates.
-            self.record_failed_spend(event, agent)
+            self.record_failed_spend(event, agent, already_counted=spent)
             raise
         finally:
             # One agent per incident; a watch run would leak their pools.
             await agent.aclose()
-        report = response.content.strip()
         prompt_tokens, completion_tokens, cost = extract_usage(
-            response.usage, getattr(response, "model", None)
+            spent, getattr(response, "model", None)
         )
+
+        problem = report_problem(report)
+        if problem and not dry_run:
+            # Nothing is published: an issue or PR with no findings costs the
+            # reader more than it gives, and hides that the run failed. What
+            # it cost is still banked against the incident.
+            self.record_failed_spend(event, agent, already_counted=spent)
+            raise RuntimeError(f"the analysis produced no usable report ({problem})")
 
         if dry_run:
             reports.print_dry_run(
@@ -577,22 +677,20 @@ class Daemon:
 
         # Asked before the report file is written — that file is itself a
         # change, so afterwards the answer is always yes.
-        unfixed = ""
-        if opens_pull_request and not await workspace.has_changes():
+        code_changed = opens_pull_request and await workspace.has_changes()
+        if opens_pull_request and not code_changed:
             log.info(
-                "fix mode changed no files for fp=%s in repo=%s; filing an "
-                "issue instead of an empty pull request",
+                "fix mode changed no code for fp=%s in repo=%s; the pull "
+                "request carries the analysis alone",
                 event.fingerprint, repo_config.repo,
-            )
-            opens_pull_request = False
-            unfixed = (
-                "> This repo is in `fix` mode, but the analysis did not "
-                "change any code — so this is an issue rather than a pull "
-                "request."
             )
 
         if opens_pull_request:
-            verification = await self.verify(repo_config, workspace, progress)
+            # Only a diff is worth testing; an analysis-only PR changed no code.
+            verification = (
+                await self.verify(repo_config, workspace, progress)
+                if code_changed else None
+            )
             progress("Opening PR")
             reports.write_report_file(
                 workspace.path / "docs" / "incidents", event, report
@@ -604,17 +702,19 @@ class Daemon:
                 head=branch,
                 base=repo_config.base_branch,
                 title=title,
-                body=reports.pr_body(repo_config, event, report, verification),
+                body=reports.pr_body(
+                    repo_config, event, report, verification,
+                    code_changed=code_changed,
+                ),
             )
             recorded_branch = branch
             artifact_kind = ARTIFACT_PR
         else:
-            # No code changed, so a PR would be an empty diff to review.
             progress("Filing issue")
             url = await self.github.create_issue(
                 repo_config.repo,
                 title=title,
-                body=reports.issue_body(event, report, note=unfixed),
+                body=reports.issue_body(event, report),
             )
             recorded_branch = ""
             artifact_kind = ARTIFACT_ISSUE

@@ -1,16 +1,17 @@
-"""End-to-end daemon tests against a local bare git repo.
-
-Real: monitors, incident store, git workspace (clone/branch/commit/push).
-Fake: the AI agent and the GitHub API.
-"""
-
 import asyncio
 import subprocess
 from pathlib import Path
 
 import pytest
 
-from maajun.config import Config, DaemonConfig, GitHubConfig, MonitorConfig, RepoConfig
+from maajun.config import (
+    Config,
+    DaemonConfig,
+    DeploymentConfig,
+    GitHubConfig,
+    MonitorConfig,
+    RepoConfig,
+)
 from maajun.daemon.core import (
     Daemon,
     LocalWorkspace,
@@ -28,7 +29,19 @@ Traceback (most recent call last):
 IndexError: list index out of range
 """
 
-REPORT = "# IndexError in handler\n\n## Root cause\nOff-by-one in main.py."
+REPORT = """# IndexError in handler
+
+## What happened
+Requests to /items with an empty cart returned a 500. The handler indexed
+the first element of a list that can be empty.
+
+## Root cause
+`main.py:12` reads `items[0]` without checking the list. Off-by-one on an
+empty collection: the caller guarantees a list, never a non-empty one.
+
+## Suggested fix
+Guard the access and return an empty response instead.
+"""
 
 
 def git(*args, cwd):
@@ -64,12 +77,25 @@ class FakeAgent:
         self.edit_path = edit_path
         self.prompts: list[str] = []
         self.closed = False
+        # Set to answer differently per round, e.g. an unusable first reply.
+        self.replies: list[str] | None = None
+        self.usage_per_call = {"prompt_tokens": 1000, "completion_tokens": 100}
 
     async def chat(self, message):
         self.prompts.append(message)
         if self.edit_path:
             self.edit_path.write_text("items = [0]\n")
-        return CompletionResponse(content=self.report)
+        content = self.replies.pop(0) if self.replies else self.report
+        return CompletionResponse(content=content, usage=dict(self.usage_per_call))
+
+    def take_usage(self):
+        # The real agent hands over what it spent and forgets it; a fake
+        # without this loses the cost of a failed run silently.
+        return {}
+
+    @property
+    def model(self):
+        return "fake-model"
 
     async def aclose(self):
         self.closed = True
@@ -340,7 +366,7 @@ async def test_fix_mode_commits_agent_changes(setup):
     handled = await daemon.poll_once()
     fp = handled[0]
 
-    assert "MAY apply the fix" in agent.prompts[0]
+    assert "Now fix it." in agent.prompts[0]
 
     show = subprocess.run(
         ["git", "show", f"maajun/incident-{fp}:main.py"],
@@ -909,6 +935,46 @@ async def test_cap_warning_reports_the_configured_amount(setup):
 # ---------------------------------------------------------------------------
 
 
+async def test_prompt_describes_the_deployment(setup):
+    """A 502 from a proxy and a worker timeout only make sense against how
+    the app actually runs, which the clone cannot show."""
+    daemon, logfile, agent, github, store, remote = setup
+    deployment = daemon.repo_configs[0].deployment
+    deployment.path = "/srv/kfl"
+    deployment.port = 8000
+    deployment.runs = "docker compose"
+
+    with open(logfile, "a") as f:
+        f.write(TRACEBACK)
+    await daemon.poll_once()
+
+    prompt = agent.prompts[0]
+    assert "Folder on the server: /srv/kfl" in prompt
+    assert "Listens on port: 8000" in prompt
+    assert "Started by: docker compose" in prompt
+    assert f"Errors are read from: logfile:{logfile}" in prompt
+
+
+def test_nothing_recorded_omits_the_deployment_section():
+    """Better silent than a report that says "port 0"."""
+    from maajun.daemon.core import deployment_section
+
+    assert deployment_section(RepoConfig(repo="acme/api"), []) == ""
+
+
+def test_the_deployment_section_lists_only_what_is_known():
+    from maajun.daemon.core import deployment_section
+
+    section = deployment_section(
+        RepoConfig(repo="acme/api", deployment=DeploymentConfig(port=8000)),
+        ["docker:api-web-1"],
+    )
+
+    assert "Listens on port: 8000" in section
+    assert "Errors are read from: docker:api-web-1" in section
+    assert "Folder on the server" not in section
+
+
 async def test_prompt_offers_recent_commits_for_blame(setup):
     """The clone is already on disk; naming the likely commit is nearly free."""
     daemon, logfile, agent, github, store, remote = setup
@@ -1312,11 +1378,11 @@ def fix_mode_daemon(tmp_path, remote):
 # ---------------------------------------------------------------------------
 
 
-async def test_fix_mode_that_changes_no_code_files_an_issue(setup):
-    """A 'fix' PR whose only diff is the incident report wastes a review.
+async def test_fix_mode_always_opens_a_pull_request(setup):
+    """Fix mode's artifact is a PR, even when the analysis changed no code.
 
-    Fix mode is free to conclude that no code change is warranted; when it
-    does, the artifact is an issue, exactly as in suggest mode.
+    The report file is committed either way, so there is always a diff to
+    review and one place the finding lives.
     """
     daemon, logfile, agent, github, store, remote = setup
     daemon.repo_for(daemon.monitors[0]).mode = "fix"  # agent edits nothing
@@ -1325,14 +1391,15 @@ async def test_fix_mode_that_changes_no_code_files_an_issue(setup):
         f.write(TRACEBACK)
     fp = (await daemon.poll_once())[0]
 
-    assert github.calls == []
-    assert len(github.issues) == 1
+    assert github.issues == []
+    assert len(github.calls) == 1
     row = store.get(fp, "owner/name")
-    assert row["artifact_kind"] == ARTIFACT_ISSUE
-    assert row["branch"] == ""
+    assert row["artifact_kind"] == ARTIFACT_PR
+    assert row["branch"] == f"maajun/incident-{fp}"
 
 
-async def test_that_issue_explains_why_it_is_not_a_pull_request(setup):
+async def test_a_pull_request_with_no_fix_says_so(setup):
+    """Reviewing it as a fix would waste the review; the diff is the report."""
     daemon, logfile, agent, github, store, remote = setup
     daemon.repo_for(daemon.monitors[0]).mode = "fix"
 
@@ -1340,12 +1407,23 @@ async def test_that_issue_explains_why_it_is_not_a_pull_request(setup):
         f.write(TRACEBACK)
     await daemon.poll_once()
 
-    body = github.issues[0]["body"]
-    assert "did not change any code" in body
+    body = github.calls[0]["body"]
+    assert "Analysis only" in body
     assert "Root cause" in body  # the analysis is still there
 
 
-async def test_fix_mode_that_changes_nothing_pushes_no_branch(setup):
+async def test_a_pull_request_with_a_fix_does_not_say_analysis_only(setup):
+    daemon, logfile, agent, github, store, remote = setup
+    fix_mode(daemon, agent)
+
+    with open(logfile, "a") as f:
+        f.write(TRACEBACK)
+    await daemon.poll_once()
+
+    assert "Analysis only" not in github.calls[0]["body"]
+
+
+async def test_fix_mode_pushes_a_branch_even_with_no_code_change(setup):
     daemon, logfile, agent, github, store, remote = setup
     daemon.repo_for(daemon.monitors[0]).mode = "fix"
 
@@ -1357,32 +1435,7 @@ async def test_fix_mode_that_changes_nothing_pushes_no_branch(setup):
         ["git", "branch", "-a"], cwd=str(remote),
         capture_output=True, text=True, check=True,
     ).stdout
-    assert "maajun/incident-" not in branches
-
-
-async def test_a_suggest_mode_issue_carries_no_fix_mode_note(setup):
-    daemon, logfile, agent, github, store, remote = setup
-
-    with open(logfile, "a") as f:
-        f.write(TRACEBACK)
-    await daemon.poll_once()
-
-    assert "did not change any code" not in github.issues[0]["body"]
-
-
-async def test_the_notice_names_what_was_actually_published(setup):
-    """Saying 'PR opened' would send the reader after one that does not exist."""
-    daemon, logfile, agent, github, store, remote = setup
-    daemon.repo_for(daemon.monitors[0]).mode = "fix"
-    notices = []
-    daemon.on_notice = lambda message, level: notices.append(message)
-
-    with open(logfile, "a") as f:
-        f.write(TRACEBACK)
-    await daemon.poll_once()
-
-    published = [n for n in notices if "opened" in n or "written" in n]
-    assert published and "Issue opened" in published[0]
+    assert "maajun/incident-" in branches
 
 
 async def test_the_notice_says_pr_when_one_was_opened(setup):
@@ -1544,3 +1597,129 @@ async def test_local_mode_still_writes_its_report(tmp_path):
     row = store.get(fp, "")
     assert row["artifact_kind"] == "report"
     assert Path(row["pr_url"]).exists()
+
+
+# ---------------------------------------------------------------------------
+# Nothing is published without content
+# ---------------------------------------------------------------------------
+
+
+async def test_an_empty_answer_is_re_asked_before_anything_is_filed(setup):
+    """A model that answers conversationally gets one more round, rather than
+    an empty issue standing in for a finding."""
+    daemon, logfile, agent, github, store, remote = setup
+    agent.replies = ["Sure! Let me take a look.", REPORT]
+
+    with open(logfile, "a") as f:
+        f.write(TRACEBACK)
+    fp = (await daemon.poll_once())[0]
+
+    assert len(agent.prompts) == 2
+    assert "not a usable report" in agent.prompts[1]
+    assert len(github.issues) == 1
+    assert "Root cause" in store.get(fp, "owner/name")["report_text"]
+
+
+async def test_a_re_ask_does_not_lose_the_first_asks_tokens(setup):
+    """chat() reports one call, and the first is the expensive one — counting
+    only the retry would under-report the cost and under-spend the cap."""
+    daemon, logfile, agent, github, store, remote = setup
+    agent.replies = ["Sure! Let me look.", REPORT]
+
+    with open(logfile, "a") as f:
+        f.write(TRACEBACK)
+    fp = (await daemon.poll_once())[0]
+
+    row = store.get(fp, "owner/name")
+    assert row["prompt_tokens"] == 2000  # both asks, not just the second
+    assert row["completion_tokens"] == 200
+
+
+async def test_a_failed_run_banks_what_every_ask_cost(setup):
+    daemon, logfile, agent, github, store, remote = setup
+    agent.replies = ["nope", "still nope"]
+
+    with open(logfile, "a") as f:
+        f.write(TRACEBACK)
+    await daemon.poll_once()
+
+    row = store.all()[0]
+    assert row["status"] == "failed"
+    assert row["prompt_tokens"] == 2000
+
+
+async def test_a_report_that_stays_empty_files_nothing(setup):
+    """Better a failed incident, visible in `maajun incidents`, than an issue
+    that tells the reader nothing."""
+    daemon, logfile, agent, github, store, remote = setup
+    agent.replies = ["Sure!", "Still nothing useful."]
+    notices = []
+    daemon.on_notice = lambda message, level: notices.append((level, message))
+
+    with open(logfile, "a") as f:
+        f.write(TRACEBACK)
+    handled = await daemon.poll_once()
+
+    assert handled == []
+    assert github.issues == [] and github.calls == []
+    assert any(level == "error" for level, _ in notices)
+    assert [row["status"] for row in store.all()] == ["failed"]
+
+
+@pytest.mark.parametrize("report,problem", [
+    ("", "empty"),
+    ("Looks fine to me.", "characters long"),
+    ("x" * 400, "none of the report's sections"),
+])
+def test_what_counts_as_an_unusable_report(report, problem):
+    from maajun.daemon.core import report_problem
+
+    assert problem in report_problem(report)
+
+
+def test_a_filled_in_report_passes():
+    from maajun.daemon.core import report_problem
+
+    assert report_problem(REPORT) == ""
+
+
+# ---------------------------------------------------------------------------
+# Manual reports are incidents too
+# ---------------------------------------------------------------------------
+
+
+async def test_a_manual_report_lands_in_the_incident_list(setup):
+    """It was analyzed, published, and then missing from `maajun incidents`:
+    mark_processed only updates, and nothing had recorded a row."""
+    daemon, logfile, agent, github, store, remote = setup
+    repo_config = daemon.repo_for(daemon.monitors[0])
+
+    url = await daemon.handle_manual_report("Checkout 500s on empty cart", repo_config)
+
+    rows = store.all()
+    assert len(rows) == 1
+    assert rows[0]["source"] == "manual"
+    assert rows[0]["status"] == "processed"
+    assert rows[0]["pr_url"] == url
+    assert "Root cause" in rows[0]["report_text"]
+
+
+async def test_a_dry_run_report_leaves_no_incident_behind(setup):
+    """It publishes nothing, so it must not leave a row that never resolves."""
+    daemon, logfile, agent, github, store, remote = setup
+    repo_config = daemon.repo_for(daemon.monitors[0])
+
+    await daemon.handle_manual_report("Slow /search", repo_config, dry_run=True)
+
+    assert store.all() == []
+
+
+async def test_a_manual_reports_cost_is_tracked(setup):
+    """Its spend counts against the daily cap like any other incident."""
+    daemon, logfile, agent, github, store, remote = setup
+    repo_config = daemon.repo_for(daemon.monitors[0])
+
+    await daemon.handle_manual_report("Slow /search endpoint", repo_config)
+
+    assert store.total_cost() >= 0
+    assert store.all()[0]["cost_usd"] is not None
