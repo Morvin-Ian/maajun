@@ -1,5 +1,3 @@
-"""Tests for agent tools (read_file, edit_file, glob, grep, etc.)."""
-
 import os
 
 import pytest

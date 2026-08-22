@@ -1,5 +1,3 @@
-"""Tests for `maajun incidents`."""
-
 import pytest
 from typer.testing import CliRunner
 
@@ -232,3 +230,100 @@ def test_local_mode_incidents_are_labelled_not_left_blank(workdir):
 
     result = runner.invoke(app, ["incidents", "-c", str(config_path)])
     assert "(local)" in result.output
+
+
+def test_a_reported_issue_is_told_apart_from_a_caught_one(workdir):
+    """`maajun report` records an incident too; the list has to say which is
+    which, or a report looks like an error a monitor found."""
+    config_path, data = workdir
+    store = open_store(data)
+    add(store, "fp1", message="KeyError: discount", url="https://github.com/o/n/issues/7")
+    store.record(ErrorEvent(
+        source="manual", message="Checkout is slow", details="Checkout is slow",
+        fingerprint="fp2",
+    ))
+    store.mark_processed("fp2", branch="", pr_url="https://github.com/o/n/issues/8")
+    store.close()
+
+    result = runner.invoke(app, ["incidents", "-c", str(config_path)])
+
+    assert "Caught by" in result.output
+    assert "report" in result.output
+    assert "logfile" in result.output
+
+
+def test_one_kind_of_source_needs_no_column(workdir):
+    config_path, data = workdir
+    store = open_store(data)
+    add(store, "fp1", message="KeyError: discount")
+    store.close()
+
+    result = runner.invoke(app, ["incidents", "-c", str(config_path)])
+
+    assert "Caught by" not in result.output
+
+
+def test_forgetting_an_incident_lets_it_be_reported_again(workdir):
+    """The manual half of regression reporting: you fixed it, so tell maajun
+    to speak up the moment it comes back."""
+    config_path, data = workdir
+    store = open_store(data)
+    add(store, "abc123def456", message="KeyError: discount", url="https://x/1")
+    store.close()
+
+    result = runner.invoke(
+        app, ["incidents", "-c", str(config_path), "--forget", "abc123"]
+    )
+
+    assert result.exit_code == 0
+    assert "Forgot abc123def456" in flat(result.output)
+    assert open_store(data).all() == []
+
+
+def test_forgetting_something_unknown_says_so(workdir):
+    config_path, data = workdir
+    store = open_store(data)
+    add(store, "fp1", message="KeyError")
+    store.close()
+
+    result = runner.invoke(
+        app, ["incidents", "-c", str(config_path), "--forget", "nope"]
+    )
+
+    assert "No incident starting with nope" in flat(result.output)
+
+
+def test_an_ambiguous_fingerprint_is_not_guessed(workdir):
+    """Forgetting the wrong repo's incident would silently re-file it."""
+    config_path, data = workdir
+    store = open_store(data)
+    add(store, "shared", message="KeyError", repo="acme/api")
+    add(store, "shared", message="KeyError", repo="acme/web")
+    store.close()
+
+    result = runner.invoke(
+        app, ["incidents", "-c", str(config_path), "--forget", "shared"]
+    )
+
+    assert "add --repo" in flat(result.output)
+    assert len(open_store(data).all()) == 2
+
+
+def test_a_repo_settles_an_ambiguous_fingerprint(workdir):
+    config_path, data = workdir
+    store = open_store(data)
+    add(store, "shared", message="KeyError", repo="acme/api")
+    add(store, "shared", message="KeyError", repo="acme/web")
+    store.close()
+
+    runner.invoke(app, [
+        "incidents", "-c", str(config_path), "--forget", "shared", "-r", "acme/api",
+    ])
+
+    assert [row["repo"] for row in open_store(data).all()] == ["acme/web"]
+
+
+def flat(text: str) -> str:
+    """Rich wraps at the console width; a long fingerprint or path can break
+    across lines. Flatten before asserting on a message."""
+    return " ".join(text.split())

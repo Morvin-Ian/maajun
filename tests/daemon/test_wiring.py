@@ -1,7 +1,11 @@
-"""Tests for how monitors are wired from config + credentials."""
-
 from maajun.auth import AuthManager
-from maajun.config import Config, GitHubConfig, MonitorConfig, RepoConfig
+from maajun.config import (
+    Config,
+    DeploymentConfig,
+    GitHubConfig,
+    MonitorConfig,
+    RepoConfig,
+)
 from maajun.daemon.wiring import build_monitors
 
 
@@ -102,6 +106,94 @@ def test_global_log_files_attach_to_the_first_repo(fake_keyring):
     ]
 
 
+def test_every_deployment_source_routes_to_its_own_repo(fake_keyring):
+    """The point of the deployment block: a source names its own repo, rather
+    than landing on whichever repo happens to be first."""
+    config = multi(
+        RepoConfig(repo="acme/api", deployment=DeploymentConfig(
+            log_files=["/srv/api/error.log"], journald_units=["api.service"],
+        )),
+        RepoConfig(repo="acme/web", deployment=DeploymentConfig(
+            docker_containers=["web-1"], journald_units=["nginx.service"],
+        )),
+    )
+    monitors, monitor_to_repo = build_monitors(
+        config, config.github.get_all_repos(), AuthManager()
+    )
+
+    assert routing(monitors, monitor_to_repo) == [
+        ("logfile:/srv/api/error.log", "acme/api"),
+        ("journald:api.service", "acme/api"),
+        ("journald:nginx.service", "acme/web"),
+        ("docker:web-1", "acme/web"),
+    ]
+
+
+def test_the_older_repo_log_files_spelling_still_works(fake_keyring):
+    """A config written before deployment blocks existed keeps working, and
+    the two spellings do not double up on one path."""
+    shared = "/srv/api/error.log"
+    config = multi(
+        RepoConfig(
+            repo="acme/api",
+            log_files=[shared],
+            deployment=DeploymentConfig(log_files=[shared, "/srv/api/web.log"]),
+        ),
+    )
+    monitors, monitor_to_repo = build_monitors(
+        config, config.github.get_all_repos(), AuthManager()
+    )
+
+    assert routing(monitors, monitor_to_repo) == [
+        (f"logfile:{shared}", "acme/api"),
+        ("logfile:/srv/api/web.log", "acme/api"),
+    ]
+
+
+def test_the_same_source_can_feed_two_repos(fake_keyring):
+    """An nginx container fronting two apps is one source, two incidents."""
+    config = multi(
+        RepoConfig(repo="acme/api", deployment=DeploymentConfig(
+            docker_containers=["nginx"])),
+        RepoConfig(repo="acme/web", deployment=DeploymentConfig(
+            docker_containers=["nginx"])),
+    )
+    monitors, monitor_to_repo = build_monitors(
+        config, config.github.get_all_repos(), AuthManager()
+    )
+
+    assert routing(monitors, monitor_to_repo) == [
+        ("docker:nginx", "acme/api"),
+        ("docker:nginx", "acme/web"),
+    ]
+
+
+def test_a_journald_monitor_gets_a_cursor_under_the_workdir(fake_keyring, tmp_path):
+    """The cursor is what lets a restart resume where it left off."""
+    config = multi(
+        RepoConfig(repo="acme/api", deployment=DeploymentConfig(
+            journald_units=["api.service"])),
+    )
+    config.daemon.workdir = str(tmp_path)
+    monitors, _ = build_monitors(config, config.github.get_all_repos(), AuthManager())
+
+    cursor = monitors[0].cursor_file
+    assert cursor.parent == tmp_path / "cursors"
+    assert cursor.name.startswith("api.service-")
+
+
+def test_local_mode_attaches_global_logs_to_its_synthetic_repo(fake_keyring):
+    """Local mode runs against one entry that is not in the config. A monitor
+    with no repo attached is skipped by the daemon, so it must still map."""
+    config = Config(monitor=MonitorConfig(log_files=["/var/log/app.log"]))
+    synthetic = [RepoConfig(mode="suggest")]
+
+    monitors, monitor_to_repo = build_monitors(config, synthetic, AuthManager())
+
+    assert [m.name for m in monitors] == ["logfile:/var/log/app.log"]
+    assert monitor_to_repo[id(monitors[0])] is synthetic[0]
+
+
 def test_actions_repo_routes_to_itself_when_configured(fake_keyring):
     auth = AuthManager()
     auth.set_github_token("ghp_stored")
@@ -172,3 +264,47 @@ def test_the_daemon_agent_can_only_read_its_own_workspace(fake_keyring, tmp_path
     assert sandbox.contains((tmp_path / "workspaces" / "owner-name" / "src").resolve())
     assert not sandbox.contains(Path("/etc/passwd"))
     assert not sandbox.contains(tmp_path.resolve())
+
+
+def test_backfill_reaches_every_kind_of_source(fake_keyring, tmp_path):
+    """The flag means one thing: read what is already there, whatever the
+    source is."""
+    config = multi(
+        RepoConfig(repo="acme/api", deployment=DeploymentConfig(
+            log_files=[str(tmp_path / "a.log")],
+            journald_units=["api.service"],
+            docker_containers=["api-web-1"],
+        )),
+    )
+    config.daemon.workdir = str(tmp_path)
+
+    monitors, _ = build_monitors(
+        config, config.github.get_all_repos(), AuthManager(), backfill=True
+    )
+
+    assert [m.backfill for m in monitors] == [True, True, True]
+
+
+def test_without_the_flag_nothing_backfills(fake_keyring, tmp_path):
+    config = multi(
+        RepoConfig(repo="acme/api", deployment=DeploymentConfig(
+            log_files=[str(tmp_path / "a.log")])),
+    )
+    config.daemon.workdir = str(tmp_path)
+
+    monitors, _ = build_monitors(config, config.github.get_all_repos(), AuthManager())
+
+    assert monitors[0].backfill is False
+
+
+def test_a_log_monitor_keeps_its_cursor_under_the_workdir(fake_keyring, tmp_path):
+    config = multi(
+        RepoConfig(repo="acme/api", deployment=DeploymentConfig(
+            log_files=["/srv/api/error.log"])),
+    )
+    config.daemon.workdir = str(tmp_path)
+
+    monitors, _ = build_monitors(config, config.github.get_all_repos(), AuthManager())
+
+    assert monitors[0].cursor_file.parent == tmp_path / "cursors"
+    assert monitors[0].cursor_file.suffix == ".offset"

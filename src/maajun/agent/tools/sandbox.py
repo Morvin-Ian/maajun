@@ -1,10 +1,3 @@
-"""Which paths a tool may touch.
-
-Everything a tool reads is sent to the AI provider, and in the daemon's case
-may end up quoted in a public issue or pull request. So the boundary is not
-advice in a prompt — the registry refuses the call.
-"""
-
 from __future__ import annotations
 
 from collections.abc import Iterable
@@ -37,6 +30,19 @@ class Sandbox:
     def __init__(self, roots: Iterable[Path | str]):
         resolved = (Path(root).expanduser().resolve() for root in roots)
         self.roots = tuple(dict.fromkeys(resolved))
+
+    def resolve(self, path: str) -> Path:
+        """A handed path as an absolute one.
+
+        Relative paths resolve against the first root, not the process
+        directory: the model is told where the workspace is and then says
+        "app/views.py", which used to resolve next to maajun itself and be
+        refused as outside the sandbox.
+        """
+        candidate = Path(path).expanduser()
+        if not candidate.is_absolute() and self.roots:
+            candidate = self.roots[0] / candidate
+        return candidate.resolve()
 
     def contains(self, path: Path) -> bool:
         return any(path == root or path.is_relative_to(root) for root in self.roots)

@@ -38,6 +38,10 @@ def incidents(
     repo: str | None = typer.Option(
         None, "--repo", "-r", help="Only incidents attributed to this repo (owner/name)"
     ),
+    forget: str | None = typer.Option(
+        None, "--forget",
+        help="Forget this fingerprint, so the error is reported again if it returns",
+    ),
 ):
     """List handled incidents with their repo, status, cost, and links."""
     config = load_config(config_path)
@@ -56,6 +60,9 @@ def incidents(
         console.print(f"[red]✗ {e}[/red]")
         raise typer.Exit(1) from e
     try:
+        if forget:
+            forget_incident(store, forget, repo)
+            return
         if repo is not None and repo not in store.repos():
             console.print(f"[yellow]No incidents recorded for {repo}.[/yellow]")
             known = [name for name in store.repos() if name]
@@ -70,6 +77,49 @@ def incidents(
         render_incidents(store, rows, config, failed=failed)
     finally:
         store.close()
+
+
+def caught_by(source: str) -> str:
+    """Which kind of source found an incident: "docker", "manual", …
+
+    The target is in the artifact; here the kind is what tells a reported
+    issue apart from one a monitor caught.
+    """
+    if not source:
+        return "—"
+    kind = source.split(":", 1)[0]
+    return "report" if kind == "manual" else kind
+
+
+def forget_incident(store: IncidentStore, fingerprint: str, repo: str | None) -> None:
+    """Drop one incident's record, so a recurrence is treated as new.
+
+    For when the fix is in and you want to hear about it immediately if it
+    comes back, rather than after daemon.reopen_after_days.
+    """
+    matches = [
+        row for row in store.all()
+        if row["fingerprint"].startswith(fingerprint)
+        and (repo is None or row["repo"] == repo)
+    ]
+    if not matches:
+        console.print(f"[yellow]No incident starting with {fingerprint}.[/yellow]")
+        return
+    if len(matches) > 1 and repo is None:
+        console.print(
+            f"[yellow]{len(matches)} incidents start with {fingerprint} — "
+            "add --repo, or give more of the fingerprint.[/yellow]"
+        )
+        for row in matches:
+            console.print(f"  {row['fingerprint']}  {row['repo'] or LOCAL_REPO_LABEL}")
+        return
+    row = matches[0]
+    store.forget_artifact(row["fingerprint"], row["repo"])
+    console.print(
+        f"[green]✓ Forgot {row['fingerprint']}[/green] "
+        f"[dim]({truncate(row['message'], 50, '…')})[/dim]\n"
+        "[dim]It will be reported again the next time it happens.[/dim]"
+    )
 
 
 def render_incidents(
@@ -88,11 +138,16 @@ def render_incidents(
 
     if rows:
         show_repo = len({row["repo"] for row in rows}) > 1
+        # Shown only when it separates rows — a reported issue among ones a
+        # monitor caught. Otherwise it is a column of the same word.
+        show_source = len({caught_by(row["source"]) for row in rows}) > 1
         table = Table(title=title)
         table.add_column("Fingerprint", style="dim", no_wrap=True)
         if show_repo:
             table.add_column("Repo", no_wrap=True)
         table.add_column("Status")
+        if show_source:
+            table.add_column("Caught by", no_wrap=True)
         table.add_column("Error")
         table.add_column("Seen", justify="right")
         table.add_column("Cost", justify="right")
@@ -107,8 +162,10 @@ def render_incidents(
             cells = [row["fingerprint"]]
             if show_repo:
                 cells.append(row["repo"] or LOCAL_REPO_LABEL)
+            cells.append(f"[{style}]{label}[/{style}]")
+            if show_source:
+                cells.append(caught_by(row["source"]))
             cells.extend([
-                f"[{style}]{label}[/{style}]",
                 truncate(row["message"], 60, "…"),
                 str(row["count"]),
                 f"${row['cost_usd']:.4f}" if row["cost_usd"] else "—",

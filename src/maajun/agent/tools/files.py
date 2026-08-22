@@ -1,5 +1,3 @@
-"""File tools: read_file, edit_file, write_file."""
-
 from __future__ import annotations
 
 import asyncio

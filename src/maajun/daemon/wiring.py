@@ -10,8 +10,15 @@ from maajun.auth import AuthManager
 from maajun.config import AIProviderConfig, Config, RepoConfig
 from maajun.daemon.core import Daemon, LocalWorkspace, make_permission_policy
 from maajun.daemon.store import IncidentStore
-from maajun.monitors import GitHubActionsMonitor, LogFileMonitor, Monitor
+from maajun.monitors import (
+    DockerLogMonitor,
+    GitHubActionsMonitor,
+    JournaldMonitor,
+    LogFileMonitor,
+    Monitor,
+)
 from maajun.vcs import GitHubClient, GitWorkspace
+from maajun.vcs.gh import remote_url
 
 log = logging.getLogger(__name__)
 
@@ -28,7 +35,10 @@ class DaemonDeps:
             )
 
         workdir = Path(config.daemon.workdir).expanduser()
-        self.store = IncidentStore(workdir / "incidents.db")
+        self.store = IncidentStore(
+            workdir / "incidents.db",
+            reopen_after_days=config.daemon.reopen_after_days,
+        )
         self.report_dir = workdir / "reports"
         # From here a failure has a database to close.
         try:
@@ -59,9 +69,15 @@ class DaemonDeps:
             self.token = token
             self.github = GitHubClient(token)
             self.repos = repos
+            transport = config.github.transport
             self.workspaces = {
                 repo_config.repo: GitWorkspace(
-                    workdir / "workspaces", repo_config.repo, token
+                    workdir / "workspaces",
+                    repo_config.repo,
+                    token,
+                    remote_url=remote_url(
+                        repo_config.repo, transport, has_token=True
+                    ),
                 )
                 for repo_config in repos
             }
@@ -94,7 +110,11 @@ def local_repo_path(config: Config) -> Path:
 
 
 def build_monitors(
-    config: Config, repos: list[RepoConfig], auth: AuthManager | None = None
+    config: Config,
+    repos: list[RepoConfig],
+    auth: AuthManager | None = None,
+    *,
+    backfill: bool = False,
 ) -> tuple[list[Monitor], dict[int, RepoConfig]]:
     """Build monitors and map each to the repo whose PRs it should open.
 
@@ -117,24 +137,45 @@ def build_monitors(
         if repo_config is not None:
             monitor_to_repo[id(monitor)] = repo_config
 
-    # One path can feed two repos, but watching it twice for one repo just
-    # reads the file twice and discards the second copy.
-    watched: set[tuple[str, str]] = set()
+    # One source can feed two repos, but watching it twice for one repo just
+    # reads it twice and discards the second copy.
+    watched: set[tuple[str, str, str]] = set()
+    cursor_dir = Path(config.daemon.workdir).expanduser() / "cursors"
 
-    def attach_logfile(path: str, repo_config: RepoConfig | None) -> None:
-        key = (path, repo_config.repo if repo_config else "")
+    def build_source(kind: str, target: str) -> Monitor:
+        """A monitor for one (kind, target), sharing the log-parsing tuning.
+
+        Every kind is a stream of the same log text — only where it is read
+        from differs — so error_pattern, the traceback headers and the burst
+        settings apply to all three.
+        """
+        if kind == "journald":
+            return JournaldMonitor(
+                target, cursor_dir=cursor_dir, backfill=backfill,
+                **monitor_cfg.logfile_kwargs(),
+            )
+        if kind == "docker":
+            return DockerLogMonitor(
+                target, backfill=backfill, **monitor_cfg.logfile_kwargs()
+            )
+        return LogFileMonitor(
+            target, cursor_dir=cursor_dir, backfill=backfill,
+            **monitor_cfg.logfile_kwargs(),
+        )
+
+    def attach_source(
+        kind: str, target: str, repo_config: RepoConfig | None
+    ) -> None:
+        key = (kind, target, repo_config.repo if repo_config else "")
         if key in watched:
-            log.debug("log file %s already watched for repo %s", *key)
+            log.debug("%s %s already watched for repo %s", *key)
             return
         watched.add(key)
-        attach(LogFileMonitor(path, **monitor_cfg.logfile_kwargs()), repo_config)
+        attach(build_source(kind, target), repo_config)
 
-    for path in monitor_cfg.log_files:
-        attach_logfile(path, default_repo)
-
-    for repo_config in repos:
-        for path in repo_config.log_files:
-            attach_logfile(path, repo_config)
+    for repo_config, sources in config.sources_by_repo(repos):
+        for kind, target in sources:
+            attach_source(kind, target, repo_config)
 
     # Skipped without a token; `status` reports it. One unusable monitor
     # should not stop the log monitors.
@@ -168,12 +209,16 @@ def build_monitors(
     return monitors, monitor_to_repo
 
 
-def build_daemon(config: Config, auth: AuthManager | None = None) -> Daemon:
+def build_daemon(
+    config: Config, auth: AuthManager | None = None, *, backfill: bool = False
+) -> Daemon:
     """Wire a Daemon from config + stored credentials."""
     auth = auth or AuthManager()
     deps = DaemonDeps(config, auth)
     try:
-        monitors, monitor_to_repo = build_monitors(config, deps.repos, auth)
+        monitors, monitor_to_repo = build_monitors(
+            config, deps.repos, auth, backfill=backfill
+        )
         if not monitors:
             raise RuntimeError(
                 "No monitors configured. Add log files under [monitor] "

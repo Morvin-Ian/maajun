@@ -4,8 +4,9 @@ import logging
 import sqlite3
 from pathlib import Path
 
+from maajun.limits import DEFAULT_REOPEN_AFTER_DAYS
 from maajun.monitors.base import ErrorEvent
-from maajun.utils import utcnow_iso
+from maajun.utils import hours_between, utcnow_iso
 
 log = logging.getLogger(__name__)
 
@@ -27,6 +28,8 @@ CREATE TABLE IF NOT EXISTS incidents (
     attempts    INTEGER NOT NULL DEFAULT 0,
     report_text TEXT NOT NULL DEFAULT '',
     artifact_kind TEXT NOT NULL DEFAULT '',
+    reopened_at TEXT NOT NULL DEFAULT '',
+    previous_url TEXT NOT NULL DEFAULT '',
     PRIMARY KEY (fingerprint, repo)
 )
 """
@@ -37,10 +40,11 @@ INCIDENT_COLUMNS: tuple[str, ...] = (
     "fingerprint", "repo", "source", "message", "first_seen", "last_seen",
     "count", "status", "branch", "pr_url", "cost_usd", "prompt_tokens",
     "completion_tokens", "attempts", "report_text", "artifact_kind",
+    "reopened_at", "previous_url",
 )
 
 # Bumped with every MIGRATIONS entry. Databases predating this sit at 0.
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 # What an incident produced. Recorded, not inferred from `branch != ""`,
 # which cannot tell a suggest-mode issue from a local-mode report.
@@ -249,8 +253,20 @@ def migrate_to_4(conn: sqlite3.Connection) -> None:
         )
 
 
+def migrate_to_5(conn: sqlite3.Connection) -> None:
+    """Room to record that an incident came back after being reported.
+
+    Without these an incident published once was published forever: the
+    recurrence bumped a counter and nothing said the bug had returned.
+    """
+    add_column_if_missing(conn, "incidents", "reopened_at", "TEXT NOT NULL DEFAULT ''")
+    add_column_if_missing(conn, "incidents", "previous_url", "TEXT NOT NULL DEFAULT ''")
+
+
 # Index i applies to a database at user_version i, taking it to i + 1.
-MIGRATIONS = (migrate_to_1, migrate_to_2, migrate_to_3, migrate_to_4)
+MIGRATIONS = (
+    migrate_to_1, migrate_to_2, migrate_to_3, migrate_to_4, migrate_to_5,
+)
 
 # Incident lifecycle: new -> processed, or new -> failed -> new (retried) ->
 # ... -> failed permanently once MAX_ATTEMPTS is reached.
@@ -316,9 +332,14 @@ def migrate(conn: sqlite3.Connection, path: Path) -> None:
 
 
 class IncidentStore:
-    def __init__(self, path: str | Path):
+    def __init__(
+        self,
+        path: str | Path,
+        reopen_after_days: float = DEFAULT_REOPEN_AFTER_DAYS,
+    ):
         self.path = Path(path).expanduser()
         self.conn = connect(self.path)
+        self.reopen_after_days = reopen_after_days
 
     def record(self, event: ErrorEvent) -> bool:
         """Record a sighting. Returns True if this error should be handled.
@@ -333,6 +354,10 @@ class IncidentStore:
         by a daemon that was killed mid-analysis is picked up on the next
         poll instead of being stranded.
 
+        True again for one that was published, went quiet for
+        `reopen_after_days`, and came back: the fix did not hold, and nobody
+        finds that out from a counter going up.
+
         Scoped to `event.repo`: the same traceback in two repos is two
         incidents, because it needs two issues in two places. Deduping on the
         error text alone meant whichever repo was polled first claimed the
@@ -340,7 +365,7 @@ class IncidentStore:
         """
         now = utcnow_iso()
         existing = self.conn.execute(
-            "SELECT status, attempts FROM incidents"
+            "SELECT status, attempts, last_seen FROM incidents"
             " WHERE fingerprint = ? AND repo = ?",
             (event.fingerprint, event.repo),
         ).fetchone()
@@ -369,6 +394,10 @@ class IncidentStore:
             )
             return True
 
+        if existing["status"] == "processed" and self.is_regression(existing, now):
+            self.reopen(event, existing, now)
+            return True
+
         retryable = (
             existing["status"] == "failed" and existing["attempts"] < MAX_ATTEMPTS
         )
@@ -379,6 +408,45 @@ class IncidentStore:
                 existing["attempts"] + 1, MAX_ATTEMPTS,
             )
         return retryable
+
+    def is_regression(self, existing, now: str) -> bool:
+        """Whether a published incident has come back after going quiet.
+
+        An error still happening has its last_seen bumped every poll, so the
+        gap never opens and it is not re-reported — spamming an unfixed bug
+        helps nobody. One that stopped and then started again is a different
+        thing: someone fixed it, and it is broken once more.
+        """
+        if self.reopen_after_days <= 0:
+            return False
+        quiet = hours_between(existing["last_seen"], now)
+        if quiet < self.reopen_after_days * 24:
+            return False
+        log.info("incident quiet for %.0f hours and back; reopening", quiet)
+        return True
+
+    def reopen(self, event: ErrorEvent, existing, now: str) -> None:
+        """Put a published incident back in the queue, remembering the last
+        artifact so the new one can point at it."""
+        self.conn.execute(
+            "UPDATE incidents SET status = 'new', attempts = 0,"
+            " reopened_at = ?, previous_url = COALESCE(NULLIF(pr_url, ''), previous_url)"
+            " WHERE fingerprint = ? AND repo = ?",
+            (now, event.fingerprint, event.repo),
+        )
+        self.conn.commit()
+
+    def forget_artifact(self, fp: str, repo: str = NO_REPO) -> bool:
+        """Let an incident be reported again, as if it had never been seen.
+
+        For when the fix is in and you want to know if it comes back before
+        the quiet period is up. Returns False if there was nothing to forget.
+        """
+        cursor = self.conn.execute(
+            "DELETE FROM incidents WHERE fingerprint = ? AND repo = ?", (fp, repo)
+        )
+        self.conn.commit()
+        return cursor.rowcount > 0
 
     def mark_processed(
         self,

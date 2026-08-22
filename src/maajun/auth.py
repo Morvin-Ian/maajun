@@ -2,6 +2,7 @@ import keyring
 import keyring.errors
 
 from maajun.providers.base import ProviderType
+from maajun.vcs.gh import gh_token
 
 SERVICE_NAME = "maajun"
 GITHUB_KEY_NAME = "github_token"
@@ -40,6 +41,8 @@ class AuthManager:
 
     def __init__(self):
         self.cache = {}
+        # None until asked: shelling out to gh is worth doing once.
+        self.gh_token: str | None = None
 
     def get_api_key(self, provider: str) -> str | None:
         key_name = self.SUPPORTED_PROVIDERS.get(provider)
@@ -80,7 +83,24 @@ class AuthManager:
         self.cache.pop(provider, None)
 
     def get_github_token(self) -> str | None:
-        return get_keyring(GITHUB_KEY_NAME)
+        """The token for the GitHub API: the keyring, else a `gh` login.
+
+        Borrowing gh's token means a machine where someone has run
+        `gh auth login` needs no second credential, and maajun still stores
+        nothing of its own.
+        """
+        stored = get_keyring(GITHUB_KEY_NAME)
+        if stored:
+            return stored
+        if self.gh_token is None:
+            self.gh_token = gh_token()
+        return self.gh_token or None
+
+    def github_token_source(self) -> str:
+        """Where the token comes from: "keyring", "gh", or "" — for status."""
+        if get_keyring(GITHUB_KEY_NAME):
+            return "keyring"
+        return "gh" if self.get_github_token() else ""
 
     def set_github_token(self, token: str) -> None:
         set_keyring(GITHUB_KEY_NAME, token.strip())
@@ -90,6 +110,8 @@ class AuthManager:
 
     def clear_github_token(self) -> None:
         delete_keyring(GITHUB_KEY_NAME)
+        # Only maajun's own copy is cleared; a gh login is not ours to undo.
+        self.gh_token = None
 
     def clear_all(self) -> None:
         for provider in self.SUPPORTED_PROVIDERS:

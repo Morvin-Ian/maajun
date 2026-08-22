@@ -1,5 +1,3 @@
-"""Search tools: glob, grep, list_dir."""
-
 from __future__ import annotations
 
 import asyncio

@@ -1,5 +1,3 @@
-"""Tests for the animated terminal status indicators."""
-
 from rich.console import Console
 
 from maajun.progress import WorkingStatus, working

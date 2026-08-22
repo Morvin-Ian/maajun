@@ -66,6 +66,10 @@ BLOCKED: dict[str, str] = {
         "Run it in your own terminal."
     ),
     "chat": "you are already in a chat session.",
+    "login": (
+        "it prompts, and can hand the terminal to the GitHub CLI. "
+        "Run it in your own terminal."
+    ),
     "reset": (
         "it permanently deletes all config, data, and credentials. "
         "Run it yourself if you mean it."
@@ -358,8 +362,8 @@ def command_tools(quiet: QuietScope = unquieted) -> list[Tool]:
                     "Run a maajun CLI command and return its output. "
                     "Read-only commands run immediately; anything that changes "
                     "configuration or opens a PR asks the user first. "
-                    "'watch', 'reset', and 'sign-out' cannot be run here — "
-                    "tell the user the command instead."
+                    "'watch', 'login', 'reset', and 'sign-out' cannot be run "
+                    "here — tell the user the command instead."
                 ),
                 parameters=json_schema(
                     {
