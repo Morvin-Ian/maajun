@@ -18,8 +18,13 @@ Three steps, of which only the first is required:
    remote, and reports whether a token is already stored. Checks that the
    token authenticates *and* can push, so a misconfigured token fails here
    rather than at 3 a.m.
-3. **Error sources** *(optional)* — log files, and GitHub Actions
-   (reusing the GitHub token rather than asking for a second one).
+3. **Error sources** — always runs, for every configured repo, and asks
+   nothing: it probes this host for how the app is deployed (folder, port,
+   docker or systemd), reads the code to find where its errors surface, and
+   records what it finds. No paths to remember and type — a path typed from
+   memory is how a repo ends up watching a file nothing writes. If nothing
+   turns up, it says so and gives the command to fix it on the server.
+   Then GitHub Actions, reusing the same credential.
 
 Press Enter to skip any optional step. Re-running is safe: every answer
 defaults to your current configuration, and stored credentials are not
@@ -44,6 +49,13 @@ isn't there yet — it exits non-zero if the provider has no key in the
 keyring. Run `maajun setup` interactively once per machine, then use
 `--non-interactive` to reconfigure repos and monitors unattended.
 
+**GitHub credentials** are settled by [`maajun login`](#maajun-login), and
+setup runs the same chooser when there is no credential yet. An existing one
+is reused without asking.
+
+Setup ends by offering to start watching, so a fresh machine goes from
+nothing to a running daemon in one command.
+
 ### `maajun incidents`
 
 List handled incidents with status, sighting count, cost, and the issue or
@@ -62,6 +74,11 @@ Local-mode incidents show as `(local)`.
 
 Add a repository to watch. Repositories are always `[[github.repos]]`
 entries, one per repo, so this is how the first one gets configured too.
+
+The owner is optional once GitHub is authenticated — maajun knows the
+account, so `add-repo myapp` records `<your-login>/myapp` and says which
+slug it used. Without a login it refuses rather than guess an owner, since
+a guess would file issues on someone else's repository.
 Re-adding a repo already in the list updates only the settings you pass,
 leaving the rest of its entry alone and keeping its position — the first
 repo is the one global `monitor.log_files` attach to, so order matters.
@@ -71,22 +88,73 @@ repo is the one global `monitor.log_files` attach to, so order matters.
 | `-b, --base-branch NAME` | Branch PRs target (new repos default to `main`) |
 | `-m, --mode MODE` | `suggest` or `fix` (new repos default to `suggest`) |
 | `-l, --log-files PATHS` | Comma-separated log paths for this repo (replaces the list) |
+| `--path DIR` | The app's folder on the server |
+| `--port N` | Port the app listens on |
+| `--runs TEXT` | How it runs, e.g. `docker compose` |
+| `--journald-units NAMES` | Comma-separated systemd units to read the journal of |
+| `--docker-containers NAMES` | Comma-separated containers to read logs from |
 | `-c, --config PATH` | Config file location |
 
+The deployment flags are usually easier to fill in with
+[`discover`](#maajun-discover) than by hand.
+
 See [multiple repositories](monitoring.md#multiple-repositories).
+
+### `maajun login`
+
+Choose how maajun reaches GitHub. It first says what is in use now, then
+offers:
+
+```
+How should maajun reach GitHub?
+  1. GitHub CLI (recommended)
+     opens a browser login; maajun then stores nothing
+  2. Personal access token
+     paste a fine-grained token; stored in the OS keyring
+  3. SSH keys for pushing
+     use your keys for branches; still needs one of the above for the API
+```
+
+1. **GitHub CLI** — maajun runs `gh auth login` for you, handing over the
+   terminal for its browser flow, then borrows that token. Nothing of
+   maajun's own is stored. If `gh` is missing, it prints how to install it.
+2. **Personal access token** — a hidden paste, kept in the OS keyring.
+   Offered first when `gh` is not installed.
+3. **SSH keys** — records `github.transport = "ssh"` so branches push over
+   your keys, after checking GitHub actually accepts one. Issues and pull
+   requests still go through the API, so it then asks which credential to
+   use for that.
+
+Either way, if your SSH keys work maajun prefers them for pushing and keeps
+the token to the API. Set it by hand with
+`maajun config github.transport ssh|https|auto`.
+
+It finishes by checking push access to each configured repo and then
+**working out where their errors land** — the same discovery `setup` runs,
+because a repo maajun can push to but cannot read errors from is still a
+repo nobody is watching.
+
+| Flag | Meaning |
+|------|---------|
+| `-c, --config PATH` | Config file location |
 
 ### `maajun status`
 
 Preflight check before `watch`: verifies the provider API key is stored,
 the GitHub token is present and (over the network) authenticates and can
-push to each configured repo, and that at least one monitor is
-configured. Missing log files are reported as warnings (they may not
-exist until the app first logs). Exits non-zero if any required check
-fails, so it works in scripts and CI.
+push to each configured repo, and that every repo has something watching
+it for runtime errors. Sources are listed per repo and probed: a missing
+systemd unit or container fails, a stopped one is a warning (its past logs
+are still readable), and a missing log file is a warning too (it may not
+exist until the app first logs). A repo with **no** runtime source fails,
+unless it says `deployment.runtime = "none"` on purpose — watching only
+GitHub Actions means watching CI, not your users' requests. Exits non-zero
+if any required check fails, so it works in scripts and CI.
 
 | Flag | Meaning |
 |------|---------|
-| `--no-network` | Skip the GitHub reachability checks (offline/fast) |
+| `--no-network` | Skip the GitHub reachability checks, and probing docker/systemd |
+
 | `-c, --config PATH` | Config file location |
 
 ### `maajun config [KEY] [VALUE]`
@@ -115,33 +183,101 @@ formatting survive.
 A `github.*` key that also exists per repo (`base_branch`, `mode`,
 `test_command`, `log_files`) is written to **every** configured repo, so
 one command still covers wanting the same setting everywhere. Use
-`--repo` to change a single repository instead. To add or remove a
+`--repo` to change a single repository instead.
+
+Deployment keys are addressed as `github.deployment.<name>`
+(`path`, `port`, `runs`, `log_files`, `journald_units`,
+`docker_containers`, `runtime`) and **require** `--repo`: a folder or a
+port describes one deployment, so applying it to every repo is never what
+was meant.
+
+```bash
+maajun config github.deployment.port 8000 -r team/api
+maajun config github.deployment.docker_containers api-web-1,api-nginx-1 -r team/api
+maajun config github.deployment.runtime none -r team/lib   # CI-only, on purpose
+``` To add or remove a
 repository, use [`add-repo`](#maajun-add-repo-repo): there is no
 `github.repo` key, since a repository is an entry in the list rather than
 a top-level setting.
 
+### `maajun discover`
+
+Find out how each configured repo is deployed on this machine, and where
+its runtime errors land. Read-only unless you pass `--save`.
+
+```bash
+maajun discover                              # every repo, prints findings
+maajun discover -r you/app --save            # write it into the config
+maajun discover -r you/app --path /srv/app --save   # when the probe can't tell
+```
+
+| Flag | Meaning |
+|------|---------|
+| `-r, --repo OWNER/NAME` | Only probe this repository |
+| `--save` | Write what was found into the config |
+| `--no-analyze` | Skip the AI pass over the code (host probes only) |
+| `--path DIR` | Where the app is deployed, when the probe cannot tell (needs `--repo`) |
+| `-c, --config PATH` | Config file location |
+
+It probes the app's folder, its port, whether it runs under docker or
+systemd, and which files, units, or containers its errors reach maajun
+through — printing how it found each one. Findings are additive: a value
+you set by hand is never overwritten, and a source already configured is
+not duplicated. Run it **on the server**, since it reads the local docker
+and systemd.
+
+It then **reads the code** (an AI pass, a few cents) to answer what the
+host cannot: the stack, the entrypoint, which files the app's logging
+config actually writes, and where errors are swallowed instead of logged —
+a bare `except: pass`, a handler that returns 500 without logging. Those
+log paths are recorded too, so what maajun watches comes from the code
+rather than from memory. `--no-analyze` skips it.
+
+That pass is built to be quick: maajun reads the manifest, the Dockerfile
+or compose file, and the logging config itself **locally** and hands them
+over with the question, so the model answers instead of spending calls
+finding files. Its tool budget is capped at a few rounds for the same
+reason.
+
 ### `maajun watch`
 
-Run the monitoring daemon.
+Run the monitoring daemon. **Detached by default**: the terminal comes
+straight back and the daemon keeps working.
+
+```bash
+maajun watch                 # start in the background
+maajun watch --status        # is it running? what has it done?
+maajun watch --stop          # stop it
+tail -f ~/.local/share/maajun/watch.log
+```
 
 | Flag | Meaning |
 |------|---------|
 | `-c, --config PATH` | Config file (default `~/.config/maajun/config.toml`) |
-| `--once` | One poll cycle, then exit (testing, cron) |
+| `--stop` | Stop the daemon running in the background |
+| `--status` | Say whether it is running, and show recent output |
+| `-f, --foreground` | Stay attached to this terminal (systemd, containers, debugging) |
+| `--once` | One poll cycle, then exit (testing, cron) — implies foreground |
 | `--dry-run` | Analyze errors but skip git/PR operations; nothing is persisted |
 | `-m, --mode MODE` | Override the configured mode for this run (`suggest`/`fix`) |
-| `-v, --verbose` | Debug logging |
+| `-v, --verbose` | Debug logging (implies foreground) |
 
-The daemon exits gracefully on `SIGTERM`/`SIGINT`, finishing the
-incident it is currently processing first. In `--once` mode it also
-flushes any partial state a monitor is still holding (e.g. a traceback
-that arrived mid-poll) before exiting, so nothing is lost.
+A background run writes everything to `<workdir>/watch.log` and its pid to
+`<workdir>/watch.pid`; starting twice from the same workdir is refused
+rather than doubling up. The log is rotated to `watch.log.1` at startup once
+it passes 5 MB, so months of running cannot fill the disk. Credentials and monitors are checked *before*
+detaching, so a misconfiguration fails in front of you instead of in a log
+file nobody is watching yet.
 
-An interactive run (a real TTY, no `-v`) shows a live status spinner —
-`Watching for errors…`, switching to the analysis phases while it works,
-and printing a line whenever a PR opens or an incident fails. `--verbose`
-swaps the spinner for full debug logs, and non-interactive runs (piped
-output, systemd) always log instead of animating.
+There is no spinner: output is one line per event, which reads the same
+live in a terminal and later in the log. `--stop` sends `SIGTERM`, which
+the loop handles gracefully — it finishes the incident it is on first, so
+no branch is left half-pushed. In `--once` mode it also flushes any partial
+state a monitor is holding (a traceback that arrived mid-poll) before
+exiting, so nothing is lost.
+
+Under systemd, use `ExecStart=maajun watch --foreground` — the unit
+supervises the process itself.
 
 ### `maajun report DESCRIPTION`
 
@@ -316,15 +452,20 @@ up again.
 
 ## Where secrets live
 
-The OS keyring (gnome-keyring / macOS Keychain), under the service name
-`maajun` — and nowhere else. Environment variables are not read, so there
-is exactly one place to look when `status` and the daemon disagree about a
-credential.
+Provider API keys: the OS keyring (gnome-keyring / macOS Keychain), under
+the service name `maajun` — and nowhere else. Environment variables are
+never read.
 
-Nothing else is a source — not environment variables, and not a
-`gh auth login` session. maajun never shells out to another tool for a
-credential: a borrowed token can change without maajun being told, and
-`status` could not then vouch for what the daemon will push with.
+The GitHub token: that keyring first, then `gh auth token` if the keyring
+has none. Borrowing the `gh` login means a machine that already has one
+needs no second credential and maajun stores nothing extra; `maajun status`
+names which source is in use, so there is no doubt about what the daemon
+pushes with. `maajun sign-out` clears maajun's own copy — a `gh` session is
+not maajun's to end.
 
-maajun therefore needs a working keyring backend; on a headless server,
-install one (`keyrings.alt`, `gnome-keyring`) before running `setup`.
+Pushing can avoid the token entirely: with `github.transport = "ssh"`,
+branches go over your SSH keys and the token is used only for the API.
+
+maajun needs a working keyring backend to store anything itself; on a
+headless server, install one (`keyrings.alt`, `gnome-keyring`) before
+running `setup`, or log in with `gh` instead.
