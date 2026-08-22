@@ -12,8 +12,6 @@ from rich.panel import Panel
 from maajun.auth import (
     AuthManager,
     credentials_file,
-    enable_file_store,
-    file_store_enabled,
     install_backend_command,
     keyring_works,
 )
@@ -105,8 +103,7 @@ def setup_provider(
         console.print(f"  [green]✓[/green] {provider} API key already stored")
         return provider
 
-    if not settle_where_credentials_go(ask):
-        raise typer.Exit(1)
+    say_where_credentials_go()
 
     signup = PROVIDER_SIGNUP_URLS.get(provider)
     if signup:
@@ -140,42 +137,20 @@ def setup_provider(
     return provider
 
 
-def settle_where_credentials_go(ask: Asker) -> bool:
-    """Make sure there is somewhere to put a secret, before asking for one.
+def say_where_credentials_go() -> None:
+    """Mention the file, once, when there is no keyring to use instead.
 
-    A headless server usually has no keyring, and finding that out after the
-    key has been typed means it is gone and the run is wasted.
+    A statement, not a question: there is one sensible answer on a server,
+    and asking it of everyone who installs maajun there is friction for
+    nothing. The alternative is named for anyone who wants it.
     """
-    if keyring_works() or file_store_enabled():
-        return True
-
+    if keyring_works():
+        return
     console.print(
-        "  [yellow]This machine has no keyring[/yellow] "
-        "[dim](usual on a server).[/dim]"
+        f"  [dim]No keyring on this machine, so credentials go in "
+        f"{credentials_file()} (chmod 600).\n"
+        f"    To use a keyring instead: {install_backend_command()}[/dim]"
     )
-    console.print(
-        f"    [cyan]1.[/cyan] Keep credentials in {credentials_file()}\n"
-        "       [dim]a file only your user can read (chmod 600)[/dim]\n"
-        "    [cyan]2.[/cyan] Install a keyring backend and start again\n"
-        f"       [dim]{install_backend_command()}[/dim]"
-    )
-    if not ask.interactive:
-        console.print(
-            "  [red]✗ Nowhere to store a credential. Run 'maajun setup' "
-            f"interactively, or: {install_backend_command()}[/red]"
-        )
-        return False
-
-    if ask.text("  Choice", "1").strip() != "1":
-        console.print(f"\n  [cyan]{install_backend_command()}[/cyan]")
-        console.print("  [dim]Then run 'maajun setup' again.[/dim]")
-        return False
-
-    enable_file_store()
-    console.print(
-        f"  [green]✓[/green] Using {credentials_file()} [dim](chmod 600)[/dim]"
-    )
-    return True
 
 
 def store_api_key(auth: AuthManager, provider: str, key: str) -> None:

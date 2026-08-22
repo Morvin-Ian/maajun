@@ -486,13 +486,18 @@ up again.
 Provider API keys: the OS keyring (gnome-keyring / macOS Keychain), under
 the service name `maajun`. Environment variables are never read.
 
-Where there is no keyring — most servers — `maajun setup` says so before it
-asks for anything and offers `~/.config/maajun/credentials.json` instead: a
-JSON file created `chmod 600` in a `chmod 700` directory, written at that
-mode rather than chmod'ed afterwards, so the secret is never briefly
-world-readable. It is opt-in: without that choice, storing a credential
-fails rather than quietly landing on disk. `maajun status` names the file
-when it is in use, and `maajun sign-out` empties it.
+Where there is no keyring — most servers — credentials go in
+`~/.config/maajun/credentials.json` instead, and setup says so before asking
+for anything. A JSON file created `chmod 600` inside a `chmod 700`
+directory, opened at that mode rather than chmod'ed afterwards, so the
+secret is never briefly world-readable. `maajun status` names the file when
+it is in use, and `maajun sign-out` empties it.
+
+That is a secret in the clear on disk, protected by its mode. It is also
+exactly what the usual advice for a headless box — `keyrings.alt` — does,
+with a package in front of it; maajun does it without the extra install and
+says so out loud. Install a keyring backend if you want more than file
+permissions.
 
 The GitHub token: that keyring first, then `gh auth token` if the keyring
 has none. Borrowing the `gh` login means a machine that already has one

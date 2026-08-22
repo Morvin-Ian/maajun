@@ -10,8 +10,7 @@ from maajun import auth as auth_module
 from maajun.auth import (
     AuthManager,
     credentials_file,
-    enable_file_store,
-    file_store_enabled,
+    file_store_in_use,
     install_backend_command,
     keyring_works,
 )
@@ -36,16 +35,16 @@ def test_a_server_with_no_keyring_is_recognised(headless):
     assert keyring_works() is False
 
 
-def test_a_secret_is_not_written_to_disk_unasked(headless):
-    """Falling back silently would downgrade everyone's security to a file."""
-    with pytest.raises(RuntimeError, match="No usable keyring"):
-        AuthManager().set_api_key("deepseek", "sk-secret")
+def test_a_server_with_no_keyring_just_works(headless):
+    """The alternative — failing, and sending someone to install a package
+    that writes the same file — costs a wasted run and buys nothing."""
+    AuthManager().set_api_key("deepseek", "sk-secret")
 
-    assert not credentials_file().exists()
+    assert AuthManager().get_api_key("deepseek") == "sk-secret"
+    assert credentials_file().exists()
 
 
-def test_once_asked_for_credentials_round_trip(headless):
-    enable_file_store()
+def test_credentials_round_trip(headless):
     auth = AuthManager()
 
     auth.set_api_key("deepseek", "sk-secret")
@@ -59,7 +58,6 @@ def test_once_asked_for_credentials_round_trip(headless):
 
 def test_the_file_is_readable_only_by_its_owner(headless):
     """It holds an API key in the clear; the mode is the whole protection."""
-    enable_file_store()
     AuthManager().set_api_key("deepseek", "sk-secret")
 
     path = credentials_file()
@@ -78,14 +76,12 @@ def test_the_file_is_never_briefly_world_readable(headless, monkeypatch):
         return real_open(path, flags, mode)
 
     monkeypatch.setattr(os, "open", watched)
-    enable_file_store()
     AuthManager().set_api_key("deepseek", "sk-secret")
 
     assert seen and all(mode == 0o600 for mode in seen)
 
 
 def test_signing_out_empties_the_file(headless):
-    enable_file_store()
     auth = AuthManager()
     auth.set_api_key("deepseek", "sk-secret")
     auth.set_github_token("ghp_token")
@@ -97,7 +93,7 @@ def test_signing_out_empties_the_file(headless):
 
 
 def test_a_garbled_file_is_not_fatal(headless):
-    enable_file_store()
+    credentials_file().parent.mkdir(parents=True, exist_ok=True)
     credentials_file().write_text("{ not json")
 
     assert AuthManager().get_api_key("deepseek") is None
@@ -114,13 +110,24 @@ def test_the_keyring_still_wins_where_there_is_one(fake_keyring, tmp_path, monke
     assert auth.get_api_key("deepseek") == "sk-in-keyring"
 
 
-def test_the_file_store_is_remembered(headless):
-    """So a later `maajun login` does not have to ask again."""
-    assert file_store_enabled() is False
+def test_the_file_is_only_in_use_once_something_is_stored(headless):
+    """`status` reports the location, so it must not claim one too early."""
+    assert file_store_in_use() is False
 
-    enable_file_store()
+    AuthManager().set_api_key("deepseek", "sk-secret")
 
-    assert file_store_enabled() is True
+    assert file_store_in_use() is True
+
+
+def test_nowhere_to_write_is_still_an_error(headless, monkeypatch):
+    """No keyring and no writable config directory: that one has to be said."""
+    def refuse(*args, **kwargs):
+        raise OSError("read-only file system")
+
+    monkeypatch.setattr(auth_module, "write_file_store", refuse)
+
+    with pytest.raises(RuntimeError, match="could not be written"):
+        AuthManager().set_api_key("deepseek", "sk-secret")
 
 
 @pytest.mark.parametrize("prefix,expected", [

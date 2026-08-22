@@ -416,11 +416,11 @@ errors, writing each incident report under `daemon.workdir/reports`
 instead of opening a pull request. Set `daemon.repo_path` to choose which
 local checkout it analyzes (the default is the current directory).
 
-A headless server usually has no keyring. `maajun setup` checks before it
-asks for a key, and offers two ways forward: keep credentials in
-`~/.config/maajun/credentials.json` (`chmod 600`, owner-only), or install a
-backend and run setup again. Nothing is written to disk unless you pick the
-first.
+A headless server usually has no keyring, and maajun carries on regardless:
+credentials go in `~/.config/maajun/credentials.json`, `chmod 600` and
+owner-only, and setup says so before asking for anything. Install a keyring
+backend if you would rather have one — setup prints the command for your
+install.
 
 The GitHub token is the exception to needing one at all: run
 `maajun login`, pick the GitHub CLI, and maajun uses that session's token
