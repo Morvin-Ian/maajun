@@ -72,6 +72,18 @@ def incidents(
         store.close()
 
 
+def caught_by(source: str) -> str:
+    """Which kind of source found an incident: "docker", "manual", …
+
+    The target is in the artifact; here the kind is what tells a reported
+    issue apart from one a monitor caught.
+    """
+    if not source:
+        return "—"
+    kind = source.split(":", 1)[0]
+    return "report" if kind == "manual" else kind
+
+
 def render_incidents(
     store: IncidentStore, rows: list[dict], config: Config, *, failed: bool
 ) -> None:
@@ -88,11 +100,16 @@ def render_incidents(
 
     if rows:
         show_repo = len({row["repo"] for row in rows}) > 1
+        # Shown only when it separates rows — a reported issue among ones a
+        # monitor caught. Otherwise it is a column of the same word.
+        show_source = len({caught_by(row["source"]) for row in rows}) > 1
         table = Table(title=title)
         table.add_column("Fingerprint", style="dim", no_wrap=True)
         if show_repo:
             table.add_column("Repo", no_wrap=True)
         table.add_column("Status")
+        if show_source:
+            table.add_column("Caught by", no_wrap=True)
         table.add_column("Error")
         table.add_column("Seen", justify="right")
         table.add_column("Cost", justify="right")
@@ -107,8 +124,10 @@ def render_incidents(
             cells = [row["fingerprint"]]
             if show_repo:
                 cells.append(row["repo"] or LOCAL_REPO_LABEL)
+            cells.append(f"[{style}]{label}[/{style}]")
+            if show_source:
+                cells.append(caught_by(row["source"]))
             cells.extend([
-                f"[{style}]{label}[/{style}]",
                 truncate(row["message"], 60, "…"),
                 str(row["count"]),
                 f"${row['cost_usd']:.4f}" if row["cost_usd"] else "—",

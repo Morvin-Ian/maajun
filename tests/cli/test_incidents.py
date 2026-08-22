@@ -1,5 +1,3 @@
-"""Tests for `maajun incidents`."""
-
 import pytest
 from typer.testing import CliRunner
 
@@ -232,3 +230,34 @@ def test_local_mode_incidents_are_labelled_not_left_blank(workdir):
 
     result = runner.invoke(app, ["incidents", "-c", str(config_path)])
     assert "(local)" in result.output
+
+
+def test_a_reported_issue_is_told_apart_from_a_caught_one(workdir):
+    """`maajun report` records an incident too; the list has to say which is
+    which, or a report looks like an error a monitor found."""
+    config_path, data = workdir
+    store = open_store(data)
+    add(store, "fp1", message="KeyError: discount", url="https://github.com/o/n/issues/7")
+    store.record(ErrorEvent(
+        source="manual", message="Checkout is slow", details="Checkout is slow",
+        fingerprint="fp2",
+    ))
+    store.mark_processed("fp2", branch="", pr_url="https://github.com/o/n/issues/8")
+    store.close()
+
+    result = runner.invoke(app, ["incidents", "-c", str(config_path)])
+
+    assert "Caught by" in result.output
+    assert "report" in result.output
+    assert "logfile" in result.output
+
+
+def test_one_kind_of_source_needs_no_column(workdir):
+    config_path, data = workdir
+    store = open_store(data)
+    add(store, "fp1", message="KeyError: discount")
+    store.close()
+
+    result = runner.invoke(app, ["incidents", "-c", str(config_path)])
+
+    assert "Caught by" not in result.output
