@@ -247,6 +247,17 @@ class GitHubConfig(Base):
     """GitHub configuration: a list of repositories, each with its own settings. """
 
     repos: list[RepoConfig] = Field(default_factory=list)
+    # How branches are pushed: "ssh", "https", or "auto" (token if there is
+    # one, SSH keys otherwise). The API always needs a token either way.
+    transport: str = "auto"
+
+    @field_validator("transport")
+    @classmethod
+    def validate_transport(cls, value: str) -> str:
+        if value not in ("auto", "ssh", "https"):
+            raise ValueError('transport must be "auto", "ssh", or "https"')
+        return value
+
     def get_all_repos(self) -> list[RepoConfig]:
         return self.repos
 
@@ -358,6 +369,7 @@ class Config(Base):
         github = table(doc, "github")
         for legacy in LEGACY_GITHUB_SCALARS:
             github.pop(legacy, None)
+        set_if_customized(github, self.github, "transport")
         if self.github.repos:
             repos_table = tomlkit.aot()
             for repo_config in self.github.repos:

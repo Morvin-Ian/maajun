@@ -87,6 +87,21 @@ def source_check(
     return Check(described, ok, detail, warn=warn, counts=not warn)
 
 
+def describe_transport(config: Config, has_token: bool) -> str:
+    """The transport branches are actually pushed over, "auto" resolved."""
+    transport = config.github.transport
+    if transport != "auto":
+        return transport.upper() if transport == "ssh" else "HTTPS"
+    return "HTTPS" if has_token else "SSH"
+
+
+def credential_label(source: str) -> str:
+    """What the GitHub credential is, so a surprise login is visible."""
+    if source == "gh":
+        return "GitHub credential from the gh CLI"
+    return "GitHub token stored"
+
+
 def build_monitor_checks(
     config: Config, repos: list[RepoConfig], probe: SourceProbe | None
 ) -> list[Check]:
@@ -150,6 +165,7 @@ def build_status(
     repos: list[RepoConfig],
     network: tuple[str | None, dict[str, bool]] | None,
     probe: SourceProbe | None = None,
+    token_source: str = "",
 ) -> tuple[list[Section], bool]:
     ai = Section("AI provider", [
         Check(f"API key for {provider}", has_key, "" if has_key else "run 'maajun setup'"),
@@ -158,6 +174,7 @@ def build_status(
     # No repo is a note, not a failure — reports go to disk. Once one is
     # configured, a working token becomes required.
     github = Section("GitHub", [])
+    transport = describe_transport(config, has_token)
     if not repos:
         github.checks.append(Check(
             "Repository configured", False,
@@ -166,9 +183,13 @@ def build_status(
         ))
     else:
         github.checks.append(Check(
-            "GitHub token stored", has_token,
-            "" if has_token else "run 'maajun setup' to store one",
+            credential_label(token_source), has_token,
+            "" if has_token else "run 'gh auth login', or 'maajun setup'",
         ))
+        if has_token and transport:
+            github.checks.append(Check(
+                f"Pushing over {transport}", True, counts=False,
+            ))
         if network is None:
             for repo_config in repos:
                 github.checks.append(Check(

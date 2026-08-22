@@ -338,16 +338,39 @@ def test_token_check_says_stored_because_the_keyring_is_the_only_source():
     assert check.detail == ""
 
 
-def test_missing_token_still_says_how_to_supply_one():
+def test_missing_token_names_both_ways_to_supply_one():
     sections, ok = build_status(
         make_config(), provider="deepseek", has_key=True, has_token=False,
         repos=[RepoConfig(repo="owner/name")], network=None,
     )
     check = find(sections, "GitHub token stored")
     assert not check.ok and not ok
+    assert "gh auth login" in check.detail
     assert "maajun setup" in check.detail
+    # The environment is still not a source; only the keyring and gh are.
     assert "GITHUB_TOKEN" not in check.detail
 
+
+def test_a_borrowed_gh_login_says_where_it_came_from():
+    """Pushing as someone else's account is worth seeing before it happens."""
+    sections, _ = build_status(
+        make_config(), provider="deepseek", has_key=True, has_token=True,
+        repos=[RepoConfig(repo="owner/name")], network=None, token_source="gh",
+    )
+
+    assert "GitHub credential from the gh CLI" in check_labels(sections)
+
+
+def test_the_push_transport_is_shown():
+    config = make_config()
+    config.github.transport = "ssh"
+
+    sections, _ = build_status(
+        config, provider="deepseek", has_key=True, has_token=True,
+        repos=[RepoConfig(repo="owner/name")], network=None,
+    )
+
+    assert "Pushing over SSH" in check_labels(sections)
 
 
 def make_config() -> Config:
