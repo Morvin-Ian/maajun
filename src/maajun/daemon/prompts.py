@@ -68,6 +68,15 @@ of reasoning; write "Unclear" if none of them touch the code involved>
 
 {format}"""
 
+REGRESSION_SECTION = """
+This error was reported before, on {reported}, and was quiet until now. The
+earlier report is at {url}.
+
+So a fix for it may already be in the history and have been reverted,
+incompletely applied, or worked around a symptom. Check that before
+explaining it as new — and say in the report which of those it is.
+"""
+
 RECENT_COMMITS_SECTION = """
 Recent commits on {branch}, newest first — one of these may have introduced
 the error. Use git_status and read_file to check what they touched; do not

@@ -17,6 +17,7 @@ from maajun.daemon.prompts import (
     INVESTIGATION_RULES,
     MANUAL_REPORT_PROMPT,
     RECENT_COMMITS_SECTION,
+    REGRESSION_SECTION,
     REPORT_FORMAT,
     RETRY_SUFFIX,
 )
@@ -270,6 +271,17 @@ class Daemon:
         return RECENT_COMMITS_SECTION.format(
             branch=branch, commits="\n".join(commits)
         )
+
+    def previous_artifact(self, event: ErrorEvent) -> dict | None:
+        """What this incident produced last time, if it is one that came back.
+
+        Read before publishing, because publishing overwrites the row it is
+        stored in.
+        """
+        row = self.store.get(event.fingerprint, event.repo)
+        if not row or not row["reopened_at"]:
+            return None
+        return {"url": row["previous_url"], "when": row["reopened_at"][:10]}
 
     def monitors_for(self, repo_config: RepoConfig) -> list[str]:
         """Names of the monitors feeding this repo, in wiring order."""
@@ -614,6 +626,12 @@ class Daemon:
             if opens_pull_request:
                 await workspace.create_branch(branch, repo_config.base_branch)
 
+        previous = self.previous_artifact(event)
+        if previous:
+            prompt += REGRESSION_SECTION.format(
+                reported=previous["when"], url=previous["url"] or "no link recorded"
+            )
+
         # After sync: there is no history to read until the clone exists.
         if blame_deploy:
             prompt += await self.recent_commits_section(repo_config, workspace)
@@ -705,6 +723,7 @@ class Daemon:
                 body=reports.pr_body(
                     repo_config, event, report, verification,
                     code_changed=code_changed,
+                    previous_url=previous["url"] if previous else "",
                 ),
             )
             recorded_branch = branch
@@ -714,7 +733,9 @@ class Daemon:
             url = await self.github.create_issue(
                 repo_config.repo,
                 title=title,
-                body=reports.issue_body(event, report),
+                body=reports.issue_body(
+                    event, report, previous_url=previous["url"] if previous else ""
+                ),
             )
             recorded_branch = ""
             artifact_kind = ARTIFACT_ISSUE

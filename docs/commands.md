@@ -69,6 +69,13 @@ Local-mode incidents show as `(local)`.
 | `-n, --limit N` | How many to show (default 20) |
 | `--failed` | Only incidents that failed 3 times and are no longer retried |
 | `-r, --repo OWNER/NAME` | Only incidents attributed to this repo |
+| `--forget FINGERPRINT` | Forget an incident, so the error is reported again if it returns |
+
+`--forget` is for a fix you have merged: it drops maajun's record of that
+incident, so the next occurrence is filed as new instead of bumping a
+counter. Without it, a published incident is re-opened on its own if it goes
+quiet for `daemon.reopen_after_days` and then comes back — see
+[when a fixed bug comes back](monitoring.md#when-a-fixed-bug-comes-back).
 
 ### `maajun add-repo REPO`
 
