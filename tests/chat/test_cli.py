@@ -22,13 +22,13 @@ def config(tmp_path):
 
 @pytest.fixture
 def no_keys(monkeypatch):
-    monkeypatch.setattr("maajun.auth.get_keyring", lambda name: None)
+    monkeypatch.setattr("maajun.auth.get_stored", lambda name: None)
 
 
 @pytest.fixture
 def deepseek_key(monkeypatch):
     monkeypatch.setattr(
-        "maajun.auth.get_keyring",
+        "maajun.auth.get_stored",
         lambda name: "sk-test" if name == "deepseek_api_key" else None,
     )
 

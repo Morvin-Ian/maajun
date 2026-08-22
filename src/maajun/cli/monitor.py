@@ -10,7 +10,7 @@ import typer
 from rich.markup import escape
 from rich.panel import Panel
 
-from maajun.auth import AuthManager
+from maajun.auth import AuthManager, credentials_file, file_store_in_use
 from maajun.cli.shared import app, console, load_config, pick_repo, split_list
 from maajun.cli.status_checks import build_status, gather_github
 from maajun.config import RepoConfig
@@ -514,6 +514,9 @@ def status(
         has_token=has_token, repos=repos, network=network,
         probe=None if no_network else probe_source,
         token_source=auth.github_token_source(),
+        key_detail=(
+            f"in {credentials_file()}" if file_store_in_use() else ""
+        ),
     )
 
     console.print(Panel("[bold]Maajun status[/bold]", border_style="blue"))
