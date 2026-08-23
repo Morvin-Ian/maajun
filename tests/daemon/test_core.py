@@ -1930,3 +1930,117 @@ async def test_a_report_with_no_verdict_is_still_filed(setup):
 
     assert len(github.issues) == 1
     assert store.ignored() == []
+
+
+# ---------------------------------------------------------------------------
+# Fix mode has to actually fix
+# ---------------------------------------------------------------------------
+
+DESCRIBED_BUT_NOT_APPLIED = """# settings inherit a wildcard in production
+
+## Root cause
+`config/settings/base.py:58` falls back to "*" when the env var is unset.
+
+## Suggested fix
+Pin it in production.py.
+
+## Applied fix
+Not yet applied — this report documents the gap and the concrete patch.
+"""
+
+
+async def test_fix_mode_that_only_described_the_fix_is_asked_again(setup, tmp_path):
+    """A pull request with no diff publishes nothing anyone can review. The
+    escape hatch for fixes that live outside the repo gets taken for findings
+    that do have an in-repo fix — an environment variable especially."""
+    daemon, logfile, agent, github, store, remote = setup
+    repo_config = daemon.repo_for(daemon.monitors[0])
+    repo_config.mode = "fix"
+    workspace = daemon.workspaces["owner/name"]
+    edit = workspace.path / "main.py"
+
+    class Reluctant(FakeAgent):
+        """Describes the fix, then applies it only when pushed."""
+
+        async def chat(self, message):
+            self.prompts.append(message)
+            if len(self.prompts) > 1:
+                edit.write_text("items = [0]\n")
+                return CompletionResponse(
+                    content=REPORT, usage=dict(self.usage_per_call)
+                )
+            return CompletionResponse(
+                content=DESCRIBED_BUT_NOT_APPLIED, usage=dict(self.usage_per_call)
+            )
+
+    reluctant = Reluctant()
+    daemon.agent_factory_for_repo = lambda rc, ws: lambda: reluctant
+
+    with open(logfile, "a") as f:
+        f.write(TRACEBACK)
+    await daemon.poll_once()
+
+    assert len(reluctant.prompts) == 2
+    assert "You changed no files" in reluctant.prompts[1]
+    assert edit.read_text() == "items = [0]\n"
+    # A real diff, so the PR is a fix rather than an analysis.
+    assert len(github.calls) == 1
+    assert "Analysis only" not in github.calls[0]["body"]
+
+
+async def test_a_fix_that_landed_first_time_is_not_asked_twice(setup, tmp_path):
+    daemon, logfile, agent, github, store, remote = setup
+    repo_config = daemon.repo_for(daemon.monitors[0])
+    repo_config.mode = "fix"
+    workspace = daemon.workspaces["owner/name"]
+    edits = FakeAgent(edit_path=workspace.path / "main.py")
+    daemon.agent_factory_for_repo = lambda rc, ws: lambda: edits
+
+    with open(logfile, "a") as f:
+        f.write(TRACEBACK)
+    await daemon.poll_once()
+
+    assert len(edits.prompts) == 1
+
+
+async def test_the_second_ask_keeps_the_first_report_when_it_answers_badly(setup):
+    """A model that edits the files and replies "done" must not cost the
+    analysis that came with the first answer."""
+    daemon, logfile, agent, github, store, remote = setup
+    repo_config = daemon.repo_for(daemon.monitors[0])
+    repo_config.mode = "fix"
+    workspace = daemon.workspaces["owner/name"]
+
+    class Terse(FakeAgent):
+        async def chat(self, message):
+            self.prompts.append(message)
+            if len(self.prompts) > 1:
+                (workspace.path / "main.py").write_text("items = [0]\n")
+                return CompletionResponse(content="Done.", usage={})
+            return CompletionResponse(
+                content=DESCRIBED_BUT_NOT_APPLIED, usage=dict(self.usage_per_call)
+            )
+
+    terse = Terse()
+    daemon.agent_factory_for_repo = lambda rc, ws: lambda: terse
+
+    with open(logfile, "a") as f:
+        f.write(TRACEBACK)
+    await daemon.poll_once()
+
+    body = github.calls[0]["body"]
+    assert "Root cause" in body
+    assert "Done." not in body
+
+
+async def test_suggest_mode_is_never_asked_for_an_edit(setup):
+    """It has no branch and no write permission; asking would be nonsense."""
+    daemon, logfile, agent, github, store, remote = setup
+    assert daemon.repo_for(daemon.monitors[0]).mode == "suggest"
+
+    with open(logfile, "a") as f:
+        f.write(TRACEBACK)
+    await daemon.poll_once()
+
+    assert len(agent.prompts) == 1
+    assert len(github.issues) == 1
