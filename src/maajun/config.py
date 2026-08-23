@@ -28,7 +28,7 @@ STARTER_CONFIG = """\
 # Maajun daemon configuration.
 
 [ai]
-provider = "deepseek"
+provider = "ox-alpha"
 # thinking_mode = true
 
 # Repositories the daemon documents errors in and opens PRs against. One
@@ -114,7 +114,7 @@ def default_data_dir() -> Path:
 
 
 class AIProviderConfig(Base):
-    provider: str = ProviderType.DEEPSEEK.value
+    provider: str = ProviderType.OX_ALPHA.value
     model: str | None = None
     api_key: str | None = None
     base_url: str | None = None

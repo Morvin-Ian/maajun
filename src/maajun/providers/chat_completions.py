@@ -31,28 +31,16 @@ NON_RETRYABLE = (AuthenticationError,)
 
 
 class ChatCompletionsProvider(AIProvider):
-    name: str = ""
-    base_url: str | None = None
-    default_model: str = ""
-    thinking_model: str = ""
+    """Any endpoint that speaks the OpenAI chat-completions protocol."""
 
     def __init__(self, config: dict[str, Any]):
         super().__init__(config)
-        self.api_key = config.get("api_key")
-        self.base_url = config.get("base_url") or self.base_url
-        configured_model = config.get("model")
-        if configured_model:
-            self.model = configured_model
-        elif config.get("thinking_mode") and self.thinking_model:
-            self.model = self.thinking_model
-        else:
-            self.model = self.default_model
         self.client: AsyncOpenAI | None = None
         self.stream_usage = True
 
     def prepared_tools(self, tools: list[ToolDefinition] | None) -> list[dict[str, Any]] | None:
-        # Deliberately uncached: memoizing on id(tools) never hit, and
-        # CPython reuses freed addresses, so it could serve stale tools.
+        # Not memoized on id(tools): CPython reuses freed addresses, so a
+        # cache could serve stale tools.
         if not tools:
             return None
         return self.prepare_tools(tools)
@@ -167,8 +155,7 @@ class ChatCompletionsProvider(AIProvider):
         except APIError as e:
             raise wrap_error(e) from e
         finally:
-            # An abandoned stream holds its connection until collected, and
-            # a watch run opens one per tool round.
+            # An abandoned stream holds its connection until collected.
             if stream is not None:
                 await close_quietly(stream)
 
@@ -181,9 +168,8 @@ class ChatCompletionsProvider(AIProvider):
         """Start a stream, asking for token usage where the endpoint allows it.
 
         Without stream_options a streamed turn reports no usage at all, so it
-        would cost real money and show as free. A gateway that doesn't
-        implement the option rejects the request naming it; that one is
-        retried plainly and the option is not offered again.
+        would spend real money and show as free. A gateway that rejects the
+        option is retried without it.
         """
         if self.stream_usage:
             try:
@@ -200,12 +186,10 @@ class ChatCompletionsProvider(AIProvider):
         return await self.retryable(self.client.chat.completions.create, **kwargs)
 
     async def validate_credentials(self) -> bool:
-        """Validate the credentials with a minimal request.
+        """Check the key with a minimal request.
 
-        Sends self.model, not default_model: with ai.model set to something
-        the account cannot reach, validating the default reported a working
-        key and then every real call failed on an inaccessible model. The
-        check should exercise what the daemon will actually send.
+        Sends self.model, not default_model: a key that cannot reach the
+        configured model should fail here, not on the first real call.
         """
         try:
             if not self.client:
@@ -221,9 +205,6 @@ class ChatCompletionsProvider(AIProvider):
         except (APIError, ProviderError):
             return False
 
-    def get_provider_name(self) -> str:
-        return self.name
-
     def clean_content(self, text: str) -> str:
         """Hook for stripping provider-specific markup from message content."""
         return text
@@ -234,8 +215,8 @@ class ChatCompletionsProvider(AIProvider):
 
         tool_calls = None
         if message.tool_calls:
-            # Left as raw JSON: the agent parses it, so malformed arguments
-            # become a tool error rather than a crash here.
+            # Arguments stay raw JSON: the agent parses them, so malformed
+            # ones become a tool error rather than a crash here.
             tool_calls = [
                 {
                     "id": tc.id,
