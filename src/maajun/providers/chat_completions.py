@@ -277,11 +277,32 @@ async def close_quietly(stream: Any) -> None:
 
 
 def usage_of(usage: Any) -> dict[str, int]:
-    return {
+    counts = {
         "prompt_tokens": usage.prompt_tokens,
         "completion_tokens": usage.completion_tokens,
         "total_tokens": usage.total_tokens,
     }
+    cached = cached_tokens_of(usage)
+    if cached is not None:
+        counts["cached_tokens"] = cached
+    return counts
+
+
+def cached_tokens_of(usage: Any) -> int | None:
+    """Prompt tokens served from the provider's prefix cache, if it says.
+
+    A thirtieth of the price on DeepSeek, and the tool loop resends the same
+    prefix every round. DeepSeek reports prompt_cache_hit_tokens, OpenAI
+    nests the count under prompt_tokens_details. Absent is charged in full.
+    """
+    hit = getattr(usage, "prompt_cache_hit_tokens", None)
+    if isinstance(hit, int):
+        return hit
+    details = getattr(usage, "prompt_tokens_details", None)
+    cached = getattr(details, "cached_tokens", None)
+    if cached is None and isinstance(details, dict):
+        cached = details.get("cached_tokens")
+    return cached if isinstance(cached, int) else None
 
 
 class ToolCallAccumulator:

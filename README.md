@@ -366,15 +366,29 @@ off part-way.
 Every incident's exact token count and cost is recorded and shown by
 `maajun incidents`, and `--dry-run` prints what an analysis *would* have cost.
 
-Costs are computed from published list prices, in USD per 1M input / output
-tokens:
+Costs are computed from published list prices, in USD per 1M tokens. Input is
+priced twice: a prompt prefix the provider has seen before is re-served from
+its cache far more cheaply than a fresh one, and maajun counts the two
+separately from the token counts the provider reports.
 
-| Model | Input | Output |
-|---|---|---|
-| `deepseek-v4-flash` | $0.14 | $0.28 |
-| `deepseek-v4-pro` | $0.435 | $0.87 |
-| `gpt-4o-mini` | $0.15 | $0.60 |
-| `gpt-4o` | $2.50 | $10.00 |
+| Model | Input (cache miss) | Input (cache hit) | Output |
+|---|---|---|---|
+| `deepseek-v4-flash` | $0.44 | $0.014 | $1.32 |
+| `deepseek-v4-flash-vision-exp` | $0.44 | $0.014 | $1.32 |
+| `deepseek-v4-pro` | $1.32 | $0.044 | $3.96 |
+| `gpt-4o-mini` | $0.15 | $0.075 | $0.60 |
+| `gpt-4o` | $2.50 | $1.25 | $10.00 |
+
+The DeepSeek rows are its **peak** rates. Off-peak it charges half of them,
+and maajun applies that automatically from the clock: peak is 01:00–04:00 and
+06:00–10:00 UTC on weekdays, and Saturday and Sunday in Beijing time (UTC+8,
+so from 16:00 UTC Friday) are off-peak all day. OpenAI has no such schedule
+and is never discounted.
+
+Because an investigation resends a growing prompt on every tool round, most
+of its input tokens are cache hits — so the same run costs a fraction of what
+the cache-miss column suggests. `maajun incidents` and `--dry-run` report what
+was actually billed.
 
 On either provider's default model a single analysis costs cents, not dollars —
 but measure your own workload with `--dry-run` rather than trusting an
@@ -382,11 +396,9 @@ estimate. Rates change; verify them against
 [DeepSeek](https://api-docs.deepseek.com/quick_start/pricing) or
 [OpenAI](https://developers.openai.com/api/docs/pricing) before relying on the
 cap. A model with no entry is costed at the most expensive rate in the table
-above, so the cap errs towards stopping early rather than overshooting.
-
-DeepSeek bills cached input at a fraction of these rates. Maajun costs every
-input token at the cache-miss rate, so a repetitive workload will report
-somewhat more than it actually spends.
+above, with no cache discount and no off-peak discount, so the cap errs
+towards stopping early rather than overshooting. The same goes for a gateway
+that reports no cache hits: every input token is charged at the miss rate.
 
 ## Security model
 

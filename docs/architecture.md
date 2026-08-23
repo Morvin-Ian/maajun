@@ -51,11 +51,28 @@ load-bearing: the [spend cap](monitoring.md#capping-spend) decides whether to
 analyze the next incident from these numbers, and an unpriced model logs a
 warning rather than silently costing at the fallback rate.
 
+Each model carries three rates, not two: a cache-miss input rate, a
+cache-hit input rate, and an output rate. Both providers re-serve a prompt
+prefix they have already seen far more cheaply than a fresh one, and every
+round of the tool loop resends a growing prefix, so on a long investigation
+the cache-hit rate is what most input tokens are actually billed at. The
+counts come from the provider — `prompt_cache_hit_tokens` on DeepSeek,
+`prompt_tokens_details.cached_tokens` on OpenAI — flattened into the usage
+dict as `cached_tokens` by `chat_completions.usage_of`. A provider that
+reports nothing is charged in full, as before.
+
+DeepSeek also prices by the clock: its published rates are peak, and
+off-peak is half of them. `is_peak` reads the two UTC windows and the
+Beijing-time weekend exemption, and `pricing_for` takes the moment as an
+argument so the rule is testable rather than wired to the wall clock.
+
 Anything the table does not recognise — including a gateway that never names
 the model it ran — is costed at the dearest entry in it, derived from the
-table rather than written down so adding a pricier model moves it too. Every
-error here rounds the same way on purpose: over-reporting pauses a daemon
-early, under-reporting lets it run past a cap the user set.
+table rather than written down so adding a pricier model moves it too, and
+with neither discount applied: both are claims about a model that could not
+be identified. Every error here rounds the same way on purpose:
+over-reporting pauses a daemon early, under-reporting lets it run past a cap
+the user set.
 
 ### Provider resilience
 
