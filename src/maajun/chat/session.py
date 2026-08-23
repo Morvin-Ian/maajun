@@ -66,7 +66,11 @@ or ask what it found last week.
 
 
 class TurnView:
-    """A spinner while the model is thinking, the answer rendered once it comes.
+    """A spinner while the model works, the answer rendered once it comes.
+
+    Only the answer is printed. Which tools ran and what they returned is the
+    model working, not something the reader asked for; the spinner names the
+    running tool and takes it back off the screen when it finishes.
 
     The spinner is a Live region and the answer is ordinary output, so the
     two are never on screen at once: anything printed stops the animation
@@ -113,13 +117,6 @@ class TurnView:
         self.console.print()
         self.opened = True
         render(self.console, markdown)
-
-    def tool(self, line: str) -> None:
-        self.quiet()
-        if self.opened:
-            self.console.print()
-        self.console.print(f"[dim]{' '.join(line.split())}[/dim]")
-        self.opened = False
 
     def close(self) -> None:
         # The last block has no blank line after it to end on.
@@ -335,9 +332,9 @@ class ChatSession:
     async def stream_reply(self, message: str) -> str:
         """Stream one reply, printing it as it arrives. Returns the text.
 
-        Reasoning is not printed. A model that thinks out loud is thinking
-        for itself, not talking to the user, and the spinner already says
-        it is working.
+        Neither reasoning nor tool results are printed: both are the model
+        working for itself rather than talking to the user, and the spinner
+        already says what it is doing.
         """
         view = self.view
         parts: list[str] = []
@@ -349,7 +346,8 @@ class ChatSession:
             elif kind == "running":
                 view.waiting(f"Running {data}")
             elif kind == "tool":
-                view.tool(data)
+                # What a tool returned is the model's working, not the
+                # answer. The spinner already said it was running.
                 view.waiting()
         return "".join(parts).strip()
 
