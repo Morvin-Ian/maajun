@@ -66,6 +66,14 @@ def implemented_providers() -> list[str]:
     return [p.value for p in ProviderFactory.get_supported_providers()]
 
 
+def provider_choices() -> list[str]:
+    """The provider names as offered, with the free one marked."""
+    return [
+        f"{name} (free)" if ProviderFactory.is_free(name) else name
+        for name in implemented_providers()
+    ]
+
+
 def configured_providers(auth: AuthManager) -> list[str]:
     return [p for p in implemented_providers() if auth.has_api_key(p)]
 

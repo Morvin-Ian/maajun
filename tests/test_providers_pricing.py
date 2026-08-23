@@ -155,11 +155,15 @@ def test_the_default_rate_is_above_every_known_model():
 
 
 def test_the_thinking_model_costs_more_than_the_default_one():
-    """If these ever invert, thinking_mode has stopped being the premium path."""
+    """If these ever invert, thinking_mode has stopped being the premium path.
+
+    Ox is exempt: one free model serves both, so there is nothing to invert.
+    """
+    from maajun.providers.anthropic import AnthropicProvider
     from maajun.providers.deepseek import DeepSeekProvider
     from maajun.providers.openai import OpenAIProvider
 
-    for provider in (DeepSeekProvider, OpenAIProvider):
+    for provider in (DeepSeekProvider, OpenAIProvider, AnthropicProvider):
         cheap = compute_cost(1_000_000, 1_000_000, provider.default_model, at=PEAK)
         premium = compute_cost(1_000_000, 1_000_000, provider.thinking_model, at=PEAK)
         assert premium > cheap, provider.name
@@ -167,13 +171,12 @@ def test_the_thinking_model_costs_more_than_the_default_one():
 
 def test_every_shipped_model_has_a_price():
     """A provider default with no entry would silently fall back to guesswork."""
-    from maajun.providers.deepseek import DeepSeekProvider
-    from maajun.providers.openai import OpenAIProvider
+    from maajun.providers.factory import ProviderFactory
     from maajun.providers.pricing import PRICING
 
-    for provider in (DeepSeekProvider, OpenAIProvider):
-        assert provider.default_model in PRICING
-        assert provider.thinking_model in PRICING
+    for provider in ProviderFactory.providers.values():
+        assert provider.default_model in PRICING, provider.name
+        assert provider.thinking_model in PRICING, provider.name
 
 
 # ---------------------------------------------------------------------------
@@ -225,11 +228,12 @@ def test_a_provider_that_reports_no_cache_is_charged_in_full():
     assert cost == compute_cost(1_000_000, 0, "deepseek-v4-flash")
 
 
-def test_every_model_has_a_cache_hit_rate_below_its_miss_rate():
+def test_every_model_has_a_cache_hit_rate_at_or_below_its_miss_rate():
+    """Equal only where both are zero — a free model."""
     from maajun.providers.pricing import PRICING
 
     for model, rates in PRICING.items():
-        assert rates["cached_input"] < rates["input"], model
+        assert rates["cached_input"] <= rates["input"], model
 
 
 # ---------------------------------------------------------------------------
@@ -299,3 +303,74 @@ def test_the_vision_model_is_priced():
         pricing_for("deepseek-v4-flash-vision-exp", PEAK)
         == PRICING["deepseek-v4-flash-vision-exp"]
     )
+
+
+# ---------------------------------------------------------------------------
+# Ox Alpha, Anthropic
+# ---------------------------------------------------------------------------
+
+
+def test_ox_alpha_costs_nothing():
+    """The whole reason it is offered first."""
+    assert compute_cost(10_000_000, 10_000_000, "stealth/ox-alpha", at=PEAK) == 0.0
+
+
+def test_a_free_model_is_still_costed_from_the_table_not_special_cased():
+    from maajun.providers.pricing import DEFAULT_PRICING, pricing_for
+
+    assert pricing_for("stealth/ox-alpha", PEAK) is not DEFAULT_PRICING
+
+
+def test_anthropic_charges_a_premium_to_write_the_cache():
+    """Reads are a tenth of a fresh token, writes 1.25x. Costing a write as
+    fresh under-reports, which is the direction the cap must not fail in."""
+    fresh = compute_cost(1_000_000, 0, "claude-haiku-4-5", at=PEAK)
+    written = compute_cost(
+        1_000_000, 0, "claude-haiku-4-5", cache_write_tokens=1_000_000, at=PEAK
+    )
+    read = compute_cost(
+        1_000_000, 0, "claude-haiku-4-5", cached_tokens=1_000_000, at=PEAK
+    )
+    assert abs(fresh - 1.00) < 0.001
+    assert abs(written - 1.25) < 0.001
+    assert abs(read - 0.10) < 0.001
+
+
+def test_a_prompt_splits_three_ways_between_fresh_cached_and_written():
+    cost = compute_cost(
+        1_000_000, 0, "claude-haiku-4-5",
+        cached_tokens=600_000, cache_write_tokens=300_000, at=PEAK,
+    )
+    expected = 0.1 * 1.00 + 0.6 * 0.10 + 0.3 * 1.25
+    assert abs(cost - expected) < 0.000_001
+
+
+def test_cache_writes_are_clamped_into_the_prompt():
+    """Cached plus written can be over-reported past the prompt total; the
+    fresh remainder must not go negative."""
+    cost = compute_cost(
+        1000, 0, "claude-haiku-4-5",
+        cached_tokens=900, cache_write_tokens=9_999, at=PEAK,
+    )
+    assert cost == compute_cost(
+        1000, 0, "claude-haiku-4-5",
+        cached_tokens=900, cache_write_tokens=100, at=PEAK,
+    )
+
+
+def test_extract_usage_reads_the_cache_write_count():
+    usage = {
+        "prompt_tokens": 1_000_000,
+        "completion_tokens": 0,
+        "cache_write_tokens": 1_000_000,
+    }
+    _, _, cost = extract_usage(usage, "claude-haiku-4-5")
+    assert cost > compute_cost(1_000_000, 0, "claude-haiku-4-5")
+
+
+def test_a_provider_with_no_cache_write_rate_pays_the_fresh_rate():
+    """Only Anthropic bills for the write; everyone else stores for nothing."""
+    from maajun.providers.pricing import PRICING
+
+    for model in ("deepseek-v4-flash", "gpt-4o", "gpt-4o-mini", "deepseek-v4-pro"):
+        assert PRICING[model]["cache_write"] == PRICING[model]["input"]

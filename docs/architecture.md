@@ -42,8 +42,24 @@ Every supported provider speaks the `/chat/completions` protocol, so
 behavior — retries, streaming, tool serialization, response parsing — and a
 vendor module is only an endpoint, a pair of model names, and any content
 quirks to strip: `deepseek.py` removes DeepSeek's DSML tool-call markup,
-`openai.py` has nothing to strip. Point `ai.base_url` at a gateway to use any
-other compatible endpoint.
+`openai.py` has nothing to strip, `ox_alpha.py` is OpenRouter's endpoint and the one
+free model. Point `ai.base_url` at a gateway to use any other compatible
+endpoint.
+
+`anthropic.py` is the exception: Claude speaks the Messages API, so it
+subclasses `AIProvider` directly and translates both ways. The system prompt
+is hoisted out of `messages` into its own parameter, assistant tool calls
+become `tool_use` blocks, and the tool results the agent emits one apiece are
+merged into the single user message Anthropic requires. Everything above the
+provider layer keeps seeing OpenAI-shaped tool calls. It also sets a
+`cache_control` breakpoint on every request — Anthropic caches only where it
+is told to, so without one each tool round re-reads the whole prompt at full
+price.
+
+`ProviderType` declares the providers in the order setup offers them,
+cheapest first, and `ProviderFactory.providers` repeats that order; setup
+defaults to the first, so the ordering is the recommendation. A provider
+class marked `free = True` is offered first and labelled as such.
 
 `providers/pricing.py` costs each response by model, matching names as
 prefixes so dated ids (`gpt-4o-2024-08-06`) resolve to their family. It is
@@ -51,15 +67,18 @@ load-bearing: the [spend cap](monitoring.md#capping-spend) decides whether to
 analyze the next incident from these numbers, and an unpriced model logs a
 warning rather than silently costing at the fallback rate.
 
-Each model carries three rates, not two: a cache-miss input rate, a
-cache-hit input rate, and an output rate. Both providers re-serve a prompt
-prefix they have already seen far more cheaply than a fresh one, and every
-round of the tool loop resends a growing prefix, so on a long investigation
-the cache-hit rate is what most input tokens are actually billed at. The
-counts come from the provider — `prompt_cache_hit_tokens` on DeepSeek,
-`prompt_tokens_details.cached_tokens` on OpenAI — flattened into the usage
-dict as `cached_tokens` by `chat_completions.usage_of`. A provider that
-reports nothing is charged in full, as before.
+Each model carries four rates: fresh input, cache-hit input, cache-write
+input, and output. Every provider re-serves a prompt prefix it has already
+seen far more cheaply than a fresh one, and every round of the tool loop
+resends a growing prefix, so on a long investigation the cache-hit rate is
+what most input tokens are actually billed at. The counts come from the
+provider — `prompt_cache_hit_tokens` on DeepSeek,
+`prompt_tokens_details.cached_tokens` on OpenAI,
+`cache_read_input_tokens` / `cache_creation_input_tokens` on Anthropic —
+flattened into the usage dict as `cached_tokens` and `cache_write_tokens` by
+each provider's `usage_of`. A provider that reports nothing is charged in
+full. Anthropic is the only one that bills for the write (1.25x fresh), which
+is why that rate is tracked rather than assumed equal to the fresh one.
 
 DeepSeek also prices by the clock: its published rates are peak, and
 off-peak is half of them. `is_peak` reads the two UTC windows and the

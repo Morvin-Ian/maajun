@@ -25,7 +25,8 @@ Nothing merges without your review, in either mode.
 ## Requirements
 
 - Python 3.11 or newer
-- An API key for DeepSeek or OpenAI — see [AI providers](#ai-providers)
+- An API key for one of Ox Alpha (free), DeepSeek, OpenAI, or Anthropic — see
+  [AI providers](#ai-providers)
 - Optional, to open issues and pull requests: GitHub access, set up with
   `maajun login` — the GitHub CLI, a token, or SSH keys
 
@@ -229,15 +230,23 @@ report — the issue says why.
 
 ## AI providers
 
-DeepSeek and OpenAI are both fully supported and interchangeable — pick either
-during `maajun setup`.
+Four are supported and interchangeable. `maajun setup` offers them in this
+order — cheapest first — and defaults to the first:
 
-| | DeepSeek | OpenAI |
-|---|---|---|
-| `ai.provider` | `deepseek` | `openai` |
-| Default model | `deepseek-v4-flash` | `gpt-4o-mini` |
-| With `ai.thinking_mode` | `deepseek-v4-pro` | `gpt-4o` |
-| API key | [platform.deepseek.com](https://platform.deepseek.com) | [platform.openai.com/api-keys](https://platform.openai.com/api-keys) |
+| | Ox Alpha **(free)** | DeepSeek | OpenAI | Anthropic |
+|---|---|---|---|---|
+| `ai.provider` | `ox-alpha` | `deepseek` | `openai` | `anthropic` |
+| Default model | `stealth/ox-alpha` | `deepseek-v4-flash` | `gpt-4o-mini` | `claude-haiku-4-5` |
+| With `ai.thinking_mode` | *(same model)* | `deepseek-v4-pro` | `gpt-4o` | `claude-opus-5` |
+| API key | [openrouter.ai](https://openrouter.ai/settings/keys) | [platform.deepseek.com](https://platform.deepseek.com) | [platform.openai.com](https://platform.openai.com/api-keys) | [console.anthropic.com](https://console.anthropic.com/settings/keys) |
+
+**Ox Alpha is free.** It is a stealth model on OpenRouter — a 1M-token
+reasoning model whose operator has not been named — offered at no charge for
+the length of its preview. You still need an OpenRouter key, but nothing is
+billed against it. It is one model with no cheap/premium split, so
+`thinking_mode` does nothing there. When the preview ends it stops being free
+without warning: watch what `maajun incidents` reports, and switch providers
+if the cost stops reading zero.
 
 Switch at any time — the key for each provider is stored separately, so moving
 back and forth costs nothing:
@@ -248,9 +257,12 @@ maajun config ai.model gpt-4o        # override the default model
 maajun provider-list                 # which providers have a key stored
 ```
 
-Both speak the same `/chat/completions` protocol, so any compatible gateway,
-proxy, or self-hosted server works too — point `ai.base_url` at it, and
-`ai.provider` still selects the request dialect and model defaults.
+Ox Alpha, DeepSeek, and OpenAI all speak `/chat/completions`, so any compatible
+gateway, proxy, or self-hosted server works too — point `ai.base_url` at it,
+and `ai.provider` still selects the request dialect and model defaults.
+Anthropic runs on the Messages API through the official SDK instead, and gets
+an explicit cache breakpoint on every request: without one Anthropic caches
+nothing, and each tool round would re-read the whole prompt at full price.
 
 ## Configuration
 
@@ -269,7 +281,7 @@ A minimal config:
 
 ```toml
 [ai]
-provider = "deepseek"         # or "openai"
+provider = "ox-alpha"         # or "deepseek", "openai", "anthropic"
 # model = "gpt-4o-mini"       # provider default if omitted
 # thinking_mode = true        # use the provider's reasoning model
 
@@ -366,18 +378,26 @@ off part-way.
 Every incident's exact token count and cost is recorded and shown by
 `maajun incidents`, and `--dry-run` prints what an analysis *would* have cost.
 
-Costs are computed from published list prices, in USD per 1M tokens. Input is
-priced twice: a prompt prefix the provider has seen before is re-served from
-its cache far more cheaply than a fresh one, and maajun counts the two
-separately from the token counts the provider reports.
+The cheapest thing you can do is run on Ox Alpha, which bills nothing at all.
+For the rest, costs are computed from published list prices, in USD per 1M
+tokens. Input is priced three ways: a prompt prefix the provider has seen
+before is re-served from its cache far more cheaply than a fresh one, and
+maajun counts each from the token counts the provider reports.
 
-| Model | Input (cache miss) | Input (cache hit) | Output |
-|---|---|---|---|
-| `deepseek-v4-flash` | $0.44 | $0.014 | $1.32 |
-| `deepseek-v4-flash-vision-exp` | $0.44 | $0.014 | $1.32 |
-| `deepseek-v4-pro` | $1.32 | $0.044 | $3.96 |
-| `gpt-4o-mini` | $0.15 | $0.075 | $0.60 |
-| `gpt-4o` | $2.50 | $1.25 | $10.00 |
+| Model | Input (fresh) | Input (cache hit) | Input (cache write) | Output |
+|---|---|---|---|---|
+| `stealth/ox-alpha` | **free** | **free** | **free** | **free** |
+| `deepseek-v4-flash` | $0.44 | $0.014 | $0.44 | $1.32 |
+| `deepseek-v4-flash-vision-exp` | $0.44 | $0.014 | $0.44 | $1.32 |
+| `deepseek-v4-pro` | $1.32 | $0.044 | $1.32 | $3.96 |
+| `gpt-4o-mini` | $0.15 | $0.075 | $0.15 | $0.60 |
+| `gpt-4o` | $2.50 | $1.25 | $2.50 | $10.00 |
+| `claude-haiku-4-5` | $1.00 | $0.10 | $1.25 | $5.00 |
+| `claude-sonnet-5` | $3.00 | $0.30 | $3.75 | $15.00 |
+| `claude-opus-5` | $5.00 | $0.50 | $6.25 | $25.00 |
+
+Anthropic is the one provider that charges to *write* the cache — 1.25x a
+fresh token — so that column is counted separately rather than assumed free.
 
 The DeepSeek rows are its **peak** rates. Off-peak it charges half of them,
 and maajun applies that automatically from the clock: peak is 01:00–04:00 and
@@ -393,8 +413,10 @@ was actually billed.
 On either provider's default model a single analysis costs cents, not dollars —
 but measure your own workload with `--dry-run` rather than trusting an
 estimate. Rates change; verify them against
-[DeepSeek](https://api-docs.deepseek.com/quick_start/pricing) or
-[OpenAI](https://developers.openai.com/api/docs/pricing) before relying on the
+[DeepSeek](https://api-docs.deepseek.com/quick_start/pricing),
+[OpenAI](https://developers.openai.com/api/docs/pricing),
+[Anthropic](https://docs.claude.com/en/docs/about-claude/pricing), or
+[OpenRouter](https://openrouter.ai/stealth/ox-alpha) before relying on the
 cap. A model with no entry is costed at the most expensive rate in the table
 above, with no cache discount and no off-peak discount, so the cap errs
 towards stopping early rather than overshooting. The same goes for a gateway

@@ -6,8 +6,12 @@ from typing import Any
 
 
 class ProviderType(Enum):
+    """Declaration order is the order they are offered in, cheapest first."""
+
+    OX_ALPHA = "ox-alpha"
     DEEPSEEK = "deepseek"
     OPENAI = "openai"
+    ANTHROPIC = "anthropic"
 
 
 class ProviderError(Exception):
@@ -43,8 +47,24 @@ StreamChunk = tuple[str, Any]
 
 
 class AIProvider(ABC):
+    name: str = ""
+    base_url: str | None = None
+    default_model: str = ""
+    thinking_model: str = ""
+    free: bool = False  # offered first, and never weighed against a paid one
+
     def __init__(self, config: dict[str, Any]):
         self.config = config
+        self.api_key = config.get("api_key")
+        self.base_url = config.get("base_url") or self.base_url
+        self.model = config.get("model") or (
+            self.thinking_model
+            if config.get("thinking_mode") and self.thinking_model
+            else self.default_model
+        )
+
+    def get_provider_name(self) -> str:
+        return self.name
 
     @abstractmethod
     async def initialize(self) -> None:
@@ -78,10 +98,6 @@ class AIProvider(ABC):
 
     @abstractmethod
     async def validate_credentials(self) -> bool:
-        pass
-
-    @abstractmethod
-    def get_provider_name(self) -> str:
         pass
 
     async def aclose(self) -> None:  # noqa: B027 - optional hook, no-op by default

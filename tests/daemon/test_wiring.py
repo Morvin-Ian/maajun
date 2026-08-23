@@ -1,3 +1,4 @@
+
 from maajun.auth import AuthManager
 from maajun.config import (
     Config,
@@ -242,7 +243,9 @@ def test_unconfigured_actions_repo_warns_about_where_it_will_be_filed(
 # ---------------------------------------------------------------------------
 
 
-def test_the_daemon_agent_can_only_read_its_own_workspace(fake_keyring, tmp_path):
+def test_the_daemon_agent_can_only_read_its_own_workspace(
+    fake_keyring, tmp_path, default_provider
+):
     """Whatever the agent opens can be quoted into a public issue or PR."""
     from pathlib import Path
     from types import SimpleNamespace
@@ -250,7 +253,7 @@ def test_the_daemon_agent_can_only_read_its_own_workspace(fake_keyring, tmp_path
     from maajun.daemon.wiring import DaemonDeps
 
     auth = AuthManager()
-    auth.set_api_key("deepseek", "sk-test")
+    auth.set_api_key(default_provider, "sk-test")
     auth.set_github_token("ghp_stored")
     config = make_config()
     config.daemon.workdir = str(tmp_path)
