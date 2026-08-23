@@ -228,8 +228,21 @@ maajun/
 4. **Check the report** — a blank answer, or one with none of the report's
    sections, is asked for once more and then abandoned: no issue, no PR,
    the incident marked failed. An empty artifact costs the reader more than
-   it gives and hides that the run went wrong.
-5. **Publish** — depends on the repo's [mode](monitoring.md#modes). In
+   it gives and hides that the run went wrong. A report with no one-line
+   summary earns the same re-ask but never the abandonment: that is
+   `headline_problem`, soft where `report_problem` is a gate, because a good
+   analysis is worth more than a missing heading.
+5. **Title it from the finding** — `reports.artifact_title` reads the
+   report's own first heading and titles the issue, the pull request, and
+   the commit with it, falling back to the raw error only when there is no
+   usable heading. The alternative, titling from the log line, names the
+   symptom: an exception surfaces at one file and line while the defect that
+   has to change is at another, so the title would point a reader at the
+   wrong place. A heading that is the unfilled template, or one that is just
+   a section name because the model skipped the summary, is treated as
+   absent. The commit subject is built from the same headline, so `git log`
+   and the pull request cannot disagree.
+6. **Publish** — depends on the repo's [mode](monitoring.md#modes). In
    `suggest` mode the report is filed as a GitHub **issue**: no branch, no
    commit, no push, because there is no diff to review. In `fix` mode the
    repo's `test_command` (if set) is run in the workspace first and its
@@ -245,7 +258,7 @@ maajun/
    runs in [local mode](monitoring.md#1-configure) instead: steps 1–3 are
    unchanged, but the report is written to `<workdir>/reports/` and no git
    or GitHub operation runs at all.
-6. **Record** — the incident is marked processed with its PR URL, token
+7. **Record** — the incident is marked processed with its PR URL, token
    counts, and USD cost. If any step fails, the incident is marked failed
    and the daemon moves on; one bad incident never kills the loop.
 
