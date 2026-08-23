@@ -17,7 +17,9 @@ Nothing merges without your review, in either mode.
 
 **Contents** — [Requirements](#requirements) · [Installation](#installation) ·
 [Quick start](#quick-start) · [How it works](#how-it-works) ·
-[Chat](#chat) · [Modes](#modes) · [AI providers](#ai-providers) ·
+[Chat](#chat) · [Modes](#modes) ·
+[Errors that are not bugs](#errors-that-are-not-bugs) ·
+[AI providers](#ai-providers) ·
 [Configuration](#configuration) · [Commands](#commands) ·
 [Cost control](#cost-control) · [Security model](#security-model) ·
 [Documentation](#documentation)
@@ -124,11 +126,15 @@ detected and analyzed, but each report is written to
 2. **Deduplicate** — each error is fingerprinted. The same error is never
    reported twice; repeat sightings bump a counter on the existing incident.
    One that goes quiet and comes back is reported again, as a regression.
-3. **Analyze** — the agent reads the relevant source in a clone under
+3. **Triage** — an error that is a guard doing its job is passed over. A
+   rejected login, input that failed validation, a rate limiter returning
+   429: the code did what it was built to do, and there is nothing to fix.
+   See [Errors that are not bugs](#errors-that-are-not-bugs).
+4. **Analyze** — the agent reads the relevant source in a clone under
    `daemon.workdir` and produces a *what happened / root cause / suggested fix*
    report, including the commit that likely introduced the bug and how the app
    runs where it broke (folder, port, docker or systemd).
-4. **Report** — an issue in `suggest` mode, or a branch, a test run, and a pull
+5. **Report** — an issue in `suggest` mode, or a branch, a test run, and a pull
    request in `fix` mode. Always one or the other, and never empty: a report
    that comes back blank is re-asked once, then abandoned as a failed
    incident rather than filed as an empty issue.
@@ -181,46 +187,49 @@ verdict at the top of the body.
 A failing suite (`❌ Tests fail (exit 1)`) still opens the PR — a fix that
 breaks the tests is exactly what a reviewer needs to see.
 
+## Errors that are not bugs
 
-Each incident records its token count and cost, viewable with
-`maajun incidents`.
+Plenty of logged errors are the software working. A validator refusing a
+malformed email, a 401 for a bad password, a rate limiter returning 429, a
+404 for a row that was never there — every one is a guard doing exactly what
+it was built to do. Filing a GitHub issue for those buries the errors that
+are real, so maajun does not.
 
-### Example report
+Two passes decide, and neither one deletes anything:
 
-The shape of a filed issue, abridged:
+**Signatures, before any AI call.** An error named after its own intent —
+`ValidationError`, `PermissionDenied`, `403 Forbidden`, `RateLimitExceeded`,
+`CSRF`, `429 Too Many Requests`, `404 Not Found` — is closed without being
+analyzed, so it costs nothing. Deliberately narrow: it can only recognise
+errors that announce what they refused.
 
-> ### \[maajun] cart/totals.py assumes promotions.apply() always writes a discount
->
-> **What happened** — Checkout raised an unhandled `KeyError` for carts created
-> before a promotion was attached. 41 requests hit it in 12 minutes; every one
-> returned a 500 at the payment step.
->
-> **Root cause** — `cart/totals.py:88` reads `cart["discount"]` directly. The
-> key is only written by `promotions.apply()` (`cart/promotions.py:23`), which
-> returns early when no promotion matches — so the key is absent rather than
-> zero.
->
-> **Likely cause commit** — `4f1c9ab` *"only apply promotions when one
-> matches"*, which added that early return.
->
-> **Suggested fix**
->
-> ```python
-> -    discount = cart["discount"]
-> +    discount = cart.get("discount", Decimal("0"))
-> ```
->
-> Source: `logfile:/var/log/shop/error.log` · First seen:
-> `2026-08-03T03:14:22Z` · Fingerprint: `9f3c1ab77e02d418`
+**The agent's verdict, after reading the code.** Every report opens with
+`defect` or `by design`. That is what catches a guard specific to your
+application — a paywall, a quota, a feature flag — which no shipped pattern
+could know about. A `by design` verdict is not published: no issue, no PR,
+no commit. A report that does not say, or says it cannot tell, is filed as a
+defect. Silence never suppresses a report.
 
-In `fix` mode the same analysis arrives as a pull request: the applied diff, the
-report committed as `docs/incidents/<fingerprint>.md`, and your test suite's
-verdict at the top of the body.
+Both are visible and reversible:
 
-> ✅ **Tests pass** — `pytest -q`
+```bash
+maajun incidents --ignored     # what was passed over, and why
+```
 
-A failing suite (`❌ Tests fail (exit 1)`) still opens the PR — a fix that
-breaks the tests is exactly what a reviewer needs to see.
+```toml
+[monitor]
+ignore_by_design = false                    # analyze everything, however obvious
+ignore_patterns = ["PaywallError", "QuotaExceeded"]   # your own guards
+```
+
+`ignore_patterns` are regexes matched against the raw error, tried before the
+shipped signatures. A pattern that does not compile is logged and skipped
+rather than stopping the daemon.
+
+A guard that fires on input that *should* have been accepted is a defect, and
+so is one whose refusal escapes as an unhandled 500 — the check was intended,
+crashing on it was not. The prompt says so explicitly, so "by design" is not
+an exit from a hard investigation.
 
 ## Chat
 

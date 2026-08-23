@@ -9,7 +9,7 @@ from pathlib import Path
 
 from maajun.agent.core import PermissionCallback, accumulate_usage
 from maajun.config import Config, RepoConfig
-from maajun.daemon import reports
+from maajun.daemon import reports, triage
 from maajun.daemon.prompts import (
     ANALYZE_PROMPT,
     DEPLOYMENT_SECTION,
@@ -22,6 +22,7 @@ from maajun.daemon.prompts import (
     RETRY_SUFFIX,
 )
 from maajun.daemon.store import (
+    ARTIFACT_IGNORED,
     ARTIFACT_ISSUE,
     ARTIFACT_PR,
     ARTIFACT_REPORT,
@@ -222,6 +223,8 @@ class Daemon:
         self.handled_this_cycle = 0
         # One slot is enough: incidents are handled one at a time.
         self.last_artifact_kind: str | None = None
+        self.last_ignored_reason = ""
+        self.ignore_patterns = triage.compile_extra(config.monitor.ignore_patterns)
         # Per-daemon: a global one stays set, so a second Daemon in the same
         # process returned from run() without polling anything.
         self.shutdown = asyncio.Event()
@@ -319,6 +322,7 @@ class Daemon:
         ARTIFACT_PR: "PR opened",
         ARTIFACT_ISSUE: "Issue opened",
         ARTIFACT_REPORT: "Report written",
+        ARTIFACT_IGNORED: "Not filed — working as intended",
     }
 
     @staticmethod
@@ -330,6 +334,19 @@ class Daemon:
         opened" would send the reader looking for one that does not exist.
         """
         return Daemon.ARTIFACT_LABELS.get(kind or "", "Handled")
+
+    def working_as_intended(self, event: ErrorEvent) -> str:
+        """Why this error is a guard doing its job, or "" if it is a defect.
+
+        The cheap pass: signatures only, no model. The expensive one is the
+        agent's own verdict on the finished report, which is what catches a
+        guard specific to the application.
+        """
+        return triage.by_design(
+            event.details,
+            self.ignore_patterns,
+            self.config.monitor.ignore_by_design,
+        )
 
     def repo_for(self, monitor: Monitor) -> RepoConfig:
         """The repo a monitor's errors belong to."""
@@ -471,6 +488,18 @@ class Daemon:
                     event.fingerprint, label,
                 )
                 continue
+            intended = self.working_as_intended(event)
+            if intended:
+                # Nothing is billed and nothing is filed, but the row stays
+                # so `maajun incidents --ignored` can show the call.
+                log.info(
+                    "not a defect fp=%s repo=%s: %s",
+                    event.fingerprint, label, intended,
+                )
+                self.store.mark_ignored(
+                    event.fingerprint, event.repo, reason=intended
+                )
+                continue
             log.info(
                 "new error fp=%s repo=%s: %s",
                 event.fingerprint, label, event.message,
@@ -490,6 +519,11 @@ class Daemon:
                         f"for {label}: "
                         f"{destination}",
                         "success",
+                    )
+                elif self.last_artifact_kind == ARTIFACT_IGNORED:
+                    self.notice(
+                        f"Not filed for {label} — {self.last_ignored_reason}",
+                        "info",
                     )
             except Exception as exc:
                 log.exception("incident fp=%s repo=%s failed", event.fingerprint, label)
@@ -690,6 +724,13 @@ class Daemon:
             report, subject_fallback, commit_prefix
         )
 
+        if reports.verdict(report) == reports.BY_DESIGN:
+            return self.close_as_intended(
+                event, report, (prompt_tokens, completion_tokens, cost),
+                dry_run=dry_run, dry_run_header=dry_run_header,
+                repo_config=repo_config,
+            )
+
         problem = report_problem(report)
         if problem and not dry_run:
             # Nothing is published: an issue or PR with no findings costs the
@@ -779,6 +820,47 @@ class Daemon:
             prompt_tokens, completion_tokens,
         )
         return url
+
+    def close_as_intended(
+        self,
+        event: ErrorEvent,
+        report: str,
+        usage: tuple[int, int, float],
+        *,
+        dry_run: bool,
+        dry_run_header: str,
+        repo_config: RepoConfig,
+    ) -> str:
+        """Close an incident the agent judged to be working as designed.
+
+        Nothing is published: an issue saying "the validator rejected invalid
+        input" costs a reader more than it gives. The analysis is kept on the
+        incident so the call can be reviewed, and what it cost is banked —
+        the round was billed either way.
+        """
+        reason = reports.by_design_reason(report)
+        prompt_tokens, completion_tokens, cost = usage
+        self.last_artifact_kind = ARTIFACT_IGNORED
+        self.last_ignored_reason = reason
+        log.info(
+            "not a defect fp=%s repo=%s: %s", event.fingerprint,
+            self.repo_label(repo_config), reason,
+        )
+        if dry_run:
+            reports.print_dry_run(
+                dry_run_header, self.repo_label(repo_config), report, usage,
+                title="(not filed — working as intended)",
+            )
+            self.store.forget(event.fingerprint, event.repo)
+            return ""
+        self.store.add_spend(
+            event.fingerprint, event.repo,
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            cost_usd=cost,
+        )
+        self.store.mark_ignored(event.fingerprint, event.repo, reason=reason)
+        return ""
 
     def save_local_report(
         self,

@@ -25,7 +25,7 @@ REPORT_HEADINGS = ("what happened", "root cause", "suggested fix")
 # match here means the summary is missing and a section was read instead.
 SECTION_HEADINGS = REPORT_HEADINGS + (
     "how to reproduce", "blast radius", "likely cause commit", "applied fix",
-    "error details",
+    "error details", "verdict",
 )
 
 HEADING_RE = re.compile(r"^\s{0,3}#{1,3}\s+(.+?)\s*#*\s*$", re.MULTILINE)
@@ -68,6 +68,48 @@ def commit_subject(report: str, fallback: str, prefix: str) -> str:
     """The commit subject, naming the same defect as the title."""
     summary = truncate(headline(report) or fallback, MAX_COMMIT_SUBJECT_CHARS)
     return f"{prefix} {summary}"
+
+
+# What the report concluded the error is. "by design" means the code did what
+# it is built to do and there is nothing to fix.
+BY_DESIGN = "by design"
+DEFECT = "defect"
+
+# The line under the heading, but never the next heading: a verdict section
+# left empty must read as absent rather than as whatever follows it.
+VERDICT_RE = re.compile(
+    r"^\s{0,3}#{1,3}\s*verdict\s*:?\s*$\n+(?!\s{0,3}#)(.+?)$",
+    re.MULTILINE | re.IGNORECASE,
+)
+
+
+def verdict(report: str) -> str:
+    """BY_DESIGN, DEFECT, or "" when the report did not say.
+
+    The signatures in triage.py can only recognise an error named after its
+    own intent. This is the pass that catches a guard particular to the
+    application — a paywall, a quota, a feature flag — because the agent has
+    read the code that raised it. An absent or unreadable verdict is not
+    by-design: silence must not suppress a report.
+    """
+    match = VERDICT_RE.search(report or "")
+    if not match:
+        return ""
+    line = strip_markdown(match.group(1)).lower()
+    if line.startswith(BY_DESIGN) or line.startswith("by-design"):
+        return BY_DESIGN
+    if line.startswith(DEFECT):
+        return DEFECT
+    return ""
+
+
+def by_design_reason(report: str) -> str:
+    """The report's one-line justification, for the incident record."""
+    match = VERDICT_RE.search(report or "")
+    if not match:
+        return BY_DESIGN
+    line = strip_markdown(match.group(1))
+    return truncate(line, MAX_TITLE_CHARS) or BY_DESIGN
 
 
 def provenance(event: ErrorEvent) -> str:
