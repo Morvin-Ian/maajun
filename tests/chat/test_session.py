@@ -667,20 +667,24 @@ def test_the_spinner_can_change_phase_while_it_is_running(session_factory):
     view.close()
 
 
-def test_a_tool_call_is_announced_before_it_runs(session_factory):
+def test_only_the_answer_is_printed_not_the_work_behind_it(session_factory):
+    """Which tools ran and what they returned is the model working. The
+    spinner says so while it happens and takes it back off the screen."""
     class Worker(ScriptedAgent):
         async def chat_stream(self, message):
             self.prompts.append(message)
             yield "running", "run_maajun_command"
-            yield "tool", "🔧 run_maajun_command → done"
+            yield "tool", "🔧 run_maajun_command → add-repo Add a repository"
             yield "content", "Ready."
 
     session = session_factory(["is it ready?"], agent=Worker())
     session.loop()
 
     output = printed(session)
-    assert "run_maajun_command" in output
     assert "Ready." in output
+    assert "🔧" not in output
+    assert "run_maajun_command" not in output
+    assert "Add a repository" not in output
 
 
 # ---------------------------------------------------------------------------
