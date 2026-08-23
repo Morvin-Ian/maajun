@@ -26,6 +26,7 @@ from maajun.progress import WorkingStatus
 from maajun.providers.base import ProviderError
 from maajun.providers.factory import ProviderFactory
 from maajun.providers.pricing import extract_usage
+from maajun.render import MarkdownStream, render
 from maajun.utils import truncate, utc_day_start_iso
 
 log = logging.getLogger(__name__)
@@ -65,11 +66,15 @@ or ask what it found last week.
 
 
 class TurnView:
-    """A spinner while the model is thinking, plain text once it answers.
+    """A spinner while the model is thinking, the answer rendered once it comes.
 
     The spinner is a Live region and the answer is ordinary output, so the
     two are never on screen at once: anything printed stops the animation
     first, and a question waiting for input is never drawn over.
+
+    The answer is markdown, so it is released a block at a time rather than a
+    token at a time — a list or a fenced block cannot be rendered until it is
+    finished. One TurnView per turn, so the buffer never outlives its reply.
     """
 
     def __init__(self, console: Console):
@@ -77,6 +82,7 @@ class TurnView:
         self.live: Live | None = None
         self.status: WorkingStatus | None = None
         self.opened = False
+        self.stream = MarkdownStream()
 
     def waiting(self, phase: str = "Thinking") -> None:
         # Held here: Live.renderable hands back its own wrapper, not ours.
@@ -99,11 +105,14 @@ class TurnView:
             self.status = None
 
     def text(self, chunk: str) -> None:
+        for block in self.stream.write(chunk):
+            self.block(block)
+
+    def block(self, markdown: str) -> None:
         self.quiet()
-        if not self.opened:
-            self.console.print()
-            self.opened = True
-        self.console.out(chunk, end="", highlight=False)
+        self.console.print()
+        self.opened = True
+        render(self.console, markdown)
 
     def tool(self, line: str) -> None:
         self.quiet()
@@ -113,9 +122,10 @@ class TurnView:
         self.opened = False
 
     def close(self) -> None:
+        # The last block has no blank line after it to end on.
+        for block in self.stream.close():
+            self.block(block)
         self.quiet()
-        if self.opened:
-            self.console.print()
 
 
 class ChatSession:
