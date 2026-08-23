@@ -126,6 +126,30 @@ def test_a_turn_reaches_the_agent_and_prints_the_answer(session_factory):
     assert "Two repos are configured." in printed(session)
 
 
+def test_an_answer_is_printed_as_markdown_not_as_its_source(session_factory):
+    """A reply saying **Read** should show Read in bold, not the asterisks."""
+    reply = "Use **Read** for that, or `grep`.\n\n- one\n- two\n"
+    agent = ScriptedAgent([CompletionResponse(content=reply)])
+    session = session_factory(["how?"], agent=agent)
+    session.loop()
+
+    out = printed(session)
+    assert "**" not in out and "`" not in out
+    assert "Read" in out and "grep" in out
+    assert "•" in out
+
+
+def test_the_last_block_of_an_answer_is_not_left_in_the_buffer(session_factory):
+    """It has no blank line after it, so only close() releases it."""
+    agent = ScriptedAgent([CompletionResponse(content="first\n\nlast line")])
+    session = session_factory(["hi"], agent=agent)
+    session.loop()
+
+    out = printed(session)
+    assert "first" in out
+    assert "last line" in out
+
+
 def test_both_sides_of_a_turn_are_recorded(session_factory):
     agent = ScriptedAgent([CompletionResponse(content="the answer")])
     session = session_factory(["the question"], agent=agent)
