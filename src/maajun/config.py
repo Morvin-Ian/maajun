@@ -28,7 +28,7 @@ STARTER_CONFIG = """\
 # Maajun daemon configuration.
 
 [ai]
-provider = "deepseek"
+provider = "ox-alpha"
 # thinking_mode = true
 
 # Repositories the daemon documents errors in and opens PRs against. One
@@ -114,7 +114,7 @@ def default_data_dir() -> Path:
 
 
 class AIProviderConfig(Base):
-    provider: str = ProviderType.DEEPSEEK.value
+    provider: str = ProviderType.OX_ALPHA.value
     model: str | None = None
     api_key: str | None = None
     base_url: str | None = None
@@ -268,6 +268,10 @@ class GitHubConfig(Base):
 class MonitorConfig(Base):
     log_files: list[str] = Field(default_factory=list)
     error_pattern: str = DEFAULT_ERROR_PATTERN
+    # A guard that refused bad input is not a bug. Off means every logged
+    # error is analyzed, however obviously intended it looks.
+    ignore_by_design: bool = True
+    ignore_patterns: list[str] = Field(default_factory=list)
     poll_interval: float = 30.0
 
     # Log-line detection, applied to every logfile monitor.
@@ -414,6 +418,8 @@ class Config(Base):
             "traceback_headers",
             "burst_threshold",
             "burst_window_seconds",
+            "ignore_by_design",
+            "ignore_patterns",
         ):
             set_if_customized(monitor, self.monitor, name)
         if self.monitor.github_actions_repos:

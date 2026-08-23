@@ -36,6 +36,7 @@ classifiers = [
 ]
 dependencies = [
     "openai>=1.0.0",
+    "anthropic>=1.0.0",
     "pydantic>=2.13.4",
     "keyring>=25.0.0",
     "rich>=13.0.0",

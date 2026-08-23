@@ -30,6 +30,7 @@ CREATE TABLE IF NOT EXISTS incidents (
     artifact_kind TEXT NOT NULL DEFAULT '',
     reopened_at TEXT NOT NULL DEFAULT '',
     previous_url TEXT NOT NULL DEFAULT '',
+    ignored_reason TEXT NOT NULL DEFAULT '',
     PRIMARY KEY (fingerprint, repo)
 )
 """
@@ -40,17 +41,18 @@ INCIDENT_COLUMNS: tuple[str, ...] = (
     "fingerprint", "repo", "source", "message", "first_seen", "last_seen",
     "count", "status", "branch", "pr_url", "cost_usd", "prompt_tokens",
     "completion_tokens", "attempts", "report_text", "artifact_kind",
-    "reopened_at", "previous_url",
+    "reopened_at", "previous_url", "ignored_reason",
 )
 
 # Bumped with every MIGRATIONS entry. Databases predating this sit at 0.
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 # What an incident produced. Recorded, not inferred from `branch != ""`,
 # which cannot tell a suggest-mode issue from a local-mode report.
 ARTIFACT_PR = "pr"
 ARTIFACT_ISSUE = "issue"
 ARTIFACT_REPORT = "report"
+ARTIFACT_IGNORED = "ignored"  # intended behaviour: nothing published
 
 NO_REPO = ""  # local mode
 
@@ -264,8 +266,17 @@ def migrate_to_5(conn: sqlite3.Connection) -> None:
 
 
 # Index i applies to a database at user_version i, taking it to i + 1.
+def migrate_to_6(conn: sqlite3.Connection) -> None:
+    """Record why an incident was left alone rather than reported."""
+    if "ignored_reason" not in columns_of(conn, "incidents"):
+        conn.execute(
+            "ALTER TABLE incidents ADD COLUMN ignored_reason TEXT NOT NULL DEFAULT ''"
+        )
+
+
 MIGRATIONS = (
     migrate_to_1, migrate_to_2, migrate_to_3, migrate_to_4, migrate_to_5,
+    migrate_to_6,
 )
 
 # Incident lifecycle: new -> processed, or new -> failed -> new (retried) ->
@@ -535,6 +546,31 @@ class IncidentStore:
             "DELETE FROM incidents WHERE fingerprint = ? AND repo = ?", (fp, repo)
         )
         self.conn.commit()
+
+    def mark_ignored(self, fp: str, repo: str = NO_REPO, *, reason: str) -> None:
+        """Close an incident as intended behaviour rather than a bug.
+
+        Not `forget`: the row stays so the same error is not re-analyzed on
+        every poll, and so `maajun incidents --ignored` can show what was
+        passed over and why.
+        """
+        self.conn.execute(
+            "UPDATE incidents SET status = 'ignored', ignored_reason = ?"
+            " WHERE fingerprint = ? AND repo = ?",
+            (reason, fp, repo),
+        )
+        self.conn.commit()
+
+    def ignored(self, limit: int = 20, repo: str | None = None) -> list[dict]:
+        """Incidents closed as working-as-intended, newest first."""
+        query = "SELECT * FROM incidents WHERE status = 'ignored'"
+        params: list = []
+        if repo is not None:
+            query += " AND repo = ?"
+            params.append(repo)
+        query += " ORDER BY last_seen DESC LIMIT ?"
+        params.append(limit)
+        return [dict(row) for row in self.conn.execute(query, params).fetchall()]
 
     def mark_failed(self, fp: str, repo: str = NO_REPO) -> None:
         """Mark an attempt as failed and count it toward the retry limit."""

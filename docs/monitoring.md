@@ -636,12 +636,56 @@ That drops maajun's record of it, so the next occurrence is treated as new.
 A partial fingerprint is enough, and `--repo` settles it when two
 repositories share one.
 
+## Errors that are not bugs
+
+A logged error is not automatically a defect. A validator refusing bad
+input, a 401 for a wrong password, a rate limiter returning 429 — the code
+did what it is built to do. maajun closes those as `ignored` instead of
+filing them, in two passes:
+
+1. **Signatures**, matched against the raw error before any AI call, so an
+   obvious guard costs nothing. They cover errors named after their own
+   intent: `ValidationError`, `AuthenticationFailed`, `PermissionDenied`,
+   `403 Forbidden`, `CSRF`, `RateLimitExceeded`, `429 Too Many Requests`,
+   `404 Not Found`.
+2. **The agent's verdict**, read from the `## Verdict` line of the report.
+   This is the one that recognises a guard specific to your application,
+   because the agent has read the code that raised it. A report with no
+   verdict, or one that says it cannot tell, is filed as a defect.
+
+```bash
+maajun incidents --ignored     # what was passed over, and why
+```
+
+Nothing is deleted: the incident row stays, which is also what keeps the
+same error from being re-examined on every poll. Tune it in `[monitor]`:
+
+| Setting | Default | Effect |
+|---|---|---|
+| `ignore_by_design` | `true` | `false` analyzes every logged error |
+| `ignore_patterns` | `[]` | Extra regexes, tried before the shipped ones |
+
+```bash
+maajun config monitor.ignore_by_design false
+```
+
+An error the signatures wrongly pass over shows up in `--ignored` rather than
+vanishing, so a bad match is visible. If one is wrong for your codebase,
+narrow it with `ignore_by_design = false` and lean on the agent's verdict
+instead.
+
 ## Cost tracking
 
 Each processed incident records the prompt/completion token counts and
 the USD cost of its analysis in `incidents.db` (`prompt_tokens`,
 `completion_tokens`, `cost_usd` columns), priced by the model that
-actually ran. The cost is also logged when the PR opens, and `--dry-run`
+actually ran. Prompt tokens the provider served from its prefix cache are
+priced at its cache-hit rate rather than in full — most of an
+investigation's input, since every tool round resends a growing prefix —
+tokens Anthropic stored into its cache at the write rate, and DeepSeek's
+off-peak half price applied from the clock. The `prompt_tokens` column is the
+total either way; only `cost_usd` reflects the split. On Ox Alpha every row
+records zero, because nothing is billed. The cost is also logged when the PR opens, and `--dry-run`
 logs what an analysis would have cost. To audit spend:
 
 ```bash

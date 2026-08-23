@@ -3,6 +3,7 @@ import pytest
 from maajun.agent.core import (
     MAX_HISTORY_MESSAGES,
     MAX_REQUEST_CHARS,
+    TRIM_TARGET_CHARS,
     Agent,
     trim_request_messages,
 )
@@ -199,3 +200,26 @@ def test_trim_counts_tool_call_arguments_toward_the_budget():
     ]
     trim_request_messages(messages)
     assert len(messages) < 5
+
+
+def test_trim_cuts_back_past_the_ceiling_not_just_under_it():
+    """Trimming to the line means the next round pushes over it again and
+    drops one more message, so the provider's cached prefix is invalidated
+    every round. One deeper cut keeps it stable for several rounds."""
+    filler = "z" * 20_000
+    messages = [msg("system", "sys")] + [
+        msg("user" if i % 2 == 0 else "assistant", filler) for i in range(12)
+    ]
+    trim_request_messages(messages)
+    assert sum(len(m["content"]) for m in messages) <= TRIM_TARGET_CHARS
+
+
+def test_a_request_between_the_target_and_the_ceiling_is_left_alone():
+    """Only crossing MAX_REQUEST_CHARS trims; below it the prefix is kept
+    byte-identical so the cache still hits."""
+    filler = "z" * 10_000
+    messages = [msg("system", "sys")] + [msg("user", filler) for _ in range(14)]
+    assert TRIM_TARGET_CHARS < 140_000 <= MAX_REQUEST_CHARS
+    before = list(messages)
+    trim_request_messages(messages)
+    assert messages == before

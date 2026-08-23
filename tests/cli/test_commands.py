@@ -132,8 +132,10 @@ def test_watch_fails_without_api_key(fake_keyring, tmp_path):
     assert "No API key" in result.output
 
 
-def test_watch_fails_when_a_repo_is_set_but_no_token(fake_keyring, tmp_path, monkeypatch):
-    AuthManager().set_api_key("deepseek", "sk-test")
+def test_watch_fails_when_a_repo_is_set_but_no_token(
+    fake_keyring, tmp_path, monkeypatch, default_provider
+):
+    AuthManager().set_api_key(default_provider, "sk-test")
     config_path = tmp_path / "config.toml"
     config_path.write_text('[[github.repos]]\nrepo = "owner/name"\n')
     result = runner.invoke(app, ["watch", "--config", str(config_path)])
@@ -141,9 +143,11 @@ def test_watch_fails_when_a_repo_is_set_but_no_token(fake_keyring, tmp_path, mon
     assert "no GitHub token" in result.output
 
 
-def test_watch_without_a_repo_runs_in_local_mode(fake_keyring, tmp_path, monkeypatch):
+def test_watch_without_a_repo_runs_in_local_mode(
+    fake_keyring, tmp_path, monkeypatch, default_provider
+):
     """GitHub is optional: with no repo, errors are analyzed into local reports."""
-    AuthManager().set_api_key("deepseek", "sk-test")
+    AuthManager().set_api_key(default_provider, "sk-test")
     log_file = tmp_path / "app.log"
     log_file.write_text("")
     config_path = tmp_path / "config.toml"
@@ -260,14 +264,16 @@ def test_add_repo_appends_to_the_list(tmp_path):
     assert bad.exit_code == 1
 
 
-def test_reset_removes_everything(fake_keyring, tmp_path, monkeypatch):
+def test_reset_removes_everything(
+    fake_keyring, tmp_path, monkeypatch, default_provider
+):
     cfg_home = tmp_path / "cfg"
     data_home = tmp_path / "data"
     monkeypatch.setenv("XDG_CONFIG_HOME", str(cfg_home))
     monkeypatch.setenv("XDG_DATA_HOME", str(data_home))
 
     auth = AuthManager()
-    auth.set_api_key("deepseek", "sk-test")
+    auth.set_api_key(default_provider, "sk-test")
     auth.set_github_token("ghp_test")
 
     (cfg_home / "maajun").mkdir(parents=True)

@@ -12,7 +12,9 @@ from maajun.daemon.core import LOCAL_REPO_LABEL
 from maajun.daemon.store import MAX_ATTEMPTS, IncidentStore, StoreError
 from maajun.utils import truncate, utc_day_start_iso
 
-STATUS_STYLES = {"processed": "green", "failed": "red", "new": "yellow"}
+STATUS_STYLES = {
+    "processed": "green", "failed": "red", "new": "yellow", "ignored": "blue",
+}
 
 
 def format_links(url: str | None) -> str:
@@ -34,6 +36,10 @@ def incidents(
     limit: int = typer.Option(20, "--limit", "-n", help="How many to show"),
     failed: bool = typer.Option(
         False, "--failed", help="Only incidents that failed and are no longer retried"
+    ),
+    ignored: bool = typer.Option(
+        False, "--ignored",
+        help="Only errors passed over as intended behaviour, and why",
     ),
     repo: str | None = typer.Option(
         None, "--repo", "-r", help="Only incidents attributed to this repo (owner/name)"
@@ -69,12 +75,17 @@ def incidents(
             if known:
                 console.print(f"[dim]Repos with incidents: {', '.join(known)}[/dim]")
             return
-        rows = store.exhausted() if failed else store.all(repo)
-        if failed and repo is not None:
-            rows = [row for row in rows if row["repo"] == repo]
+        if failed:
+            rows = store.exhausted()
+            if repo is not None:
+                rows = [row for row in rows if row["repo"] == repo]
+        elif ignored:
+            rows = store.ignored(limit, repo)
+        else:
+            rows = store.all(repo)
         # After the --repo filter, and for --failed too, which ignored it.
         rows = rows[:limit]
-        render_incidents(store, rows, config, failed=failed)
+        render_incidents(store, rows, config, failed=failed, ignored=ignored)
     finally:
         store.close()
 
@@ -123,15 +134,23 @@ def forget_incident(store: IncidentStore, fingerprint: str, repo: str | None) ->
 
 
 def render_incidents(
-    store: IncidentStore, rows: list[dict], config: Config, *, failed: bool
+    store: IncidentStore,
+    rows: list[dict],
+    config: Config,
+    *,
+    failed: bool,
+    ignored: bool = False,
 ) -> None:
     title = "Exhausted incidents" if failed else "Incidents"
+    if ignored:
+        title = "Errors passed over as intended behaviour"
     if not rows:
-        message = (
-            f"[green]No incidents have failed {MAX_ATTEMPTS} times.[/green]"
-            if failed
-            else "[dim]No incidents recorded yet.[/dim]"
-        )
+        if failed:
+            message = f"[green]No incidents have failed {MAX_ATTEMPTS} times.[/green]"
+        elif ignored:
+            message = "[dim]Nothing has been passed over as intended.[/dim]"
+        else:
+            message = "[dim]No incidents recorded yet.[/dim]"
         console.print(message)
         if not failed:
             return
@@ -165,8 +184,11 @@ def render_incidents(
             cells.append(f"[{style}]{label}[/{style}]")
             if show_source:
                 cells.append(caught_by(row["source"]))
+            message = truncate(row["message"], 60, "…")
+            if row["status"] == "ignored" and row["ignored_reason"]:
+                message += f"\n[dim]{truncate(row['ignored_reason'], 60, '…')}[/dim]"
             cells.extend([
-                truncate(row["message"], 60, "…"),
+                message,
                 str(row["count"]),
                 f"${row['cost_usd']:.4f}" if row["cost_usd"] else "—",
                 format_links(row["pr_url"]),

@@ -15,6 +15,7 @@ from maajun.cli.shared import app, console, load_config, pick_repo, split_list
 from maajun.cli.status_checks import build_status, gather_github
 from maajun.config import RepoConfig
 from maajun.daemon import build_daemon, build_daemon_for_report, service
+from maajun.daemon.store import ARTIFACT_IGNORED
 from maajun.discovery import probe_source
 from maajun.progress import working
 from maajun.utils import is_valid_repo, qualify, truncate
@@ -375,9 +376,19 @@ def report(
         else:
             with working(console, "Preparing workspace") as status:
                 result = asyncio.run(run_report(status.set))
-            # What was published: fix mode that changed nothing files an issue.
-            label = daemon.artifact_label(daemon.last_artifact_kind)
-            console.print(f"\n[green]✓ {label}:[/green] {result}")
+            if not result and daemon.last_artifact_kind == ARTIFACT_IGNORED:
+                console.print(
+                    f"\n[yellow]○ Not filed[/yellow] — {daemon.last_ignored_reason}"
+                )
+                console.print(
+                    "[dim]The code did what it is built to do, so there is "
+                    "nothing to fix. See it with 'maajun incidents "
+                    "--ignored'.[/dim]"
+                )
+            else:
+                # What was published: fix mode that changed nothing files an issue.
+                label = daemon.artifact_label(daemon.last_artifact_kind)
+                console.print(f"\n[green]✓ {label}:[/green] {result}")
     except KeyboardInterrupt:
         console.print("\n[dim]Cancelled.[/dim]")
     except Exception as e:
