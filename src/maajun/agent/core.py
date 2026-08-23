@@ -26,6 +26,11 @@ MAX_HISTORY_MESSAGES = 40
 # MAX_HISTORY_MESSAGES alone does not bound a request. ~40k tokens.
 MAX_REQUEST_CHARS = 160_000
 
+# What a trim cuts back to. Trimming to the ceiling instead would drop one
+# more message every round, invalidating the provider's cached prefix each
+# time; cutting deeper once keeps it stable for several rounds.
+TRIM_TARGET_CHARS = 120_000
+
 # Floor, so one huge tool result cannot erase the question it answered.
 MIN_REQUEST_MESSAGES = 4
 
@@ -76,13 +81,18 @@ def message_size(message: dict[str, Any]) -> int:
 def trim_request_messages(messages: list[dict[str, Any]]) -> None:
     """Drop the oldest rounds in place until the request fits the budget.
 
+    Nothing is dropped below MAX_REQUEST_CHARS; past it the request is cut
+    back to TRIM_TARGET_CHARS in one go, so the cached prefix survives.
+
     messages[0] is the system prompt and is never dropped. Everything else is
     removed oldest-first, except that a "tool" message is never left at the
     front: it belongs to the assistant message that requested it, and the API
     rejects a tool result with no matching tool call ahead of it.
     """
     total = sum(message_size(message) for message in messages)
-    while total > MAX_REQUEST_CHARS and len(messages) > MIN_REQUEST_MESSAGES:
+    if total <= MAX_REQUEST_CHARS:
+        return
+    while total > TRIM_TARGET_CHARS and len(messages) > MIN_REQUEST_MESSAGES:
         total -= message_size(messages.pop(1))
         while len(messages) > MIN_REQUEST_MESSAGES and messages[1].get("role") == "tool":
             total -= message_size(messages.pop(1))
