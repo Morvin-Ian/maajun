@@ -3,8 +3,11 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+from rich.console import Console
+
 from maajun.config import RepoConfig
 from maajun.monitors import ErrorEvent
+from maajun.render import render
 from maajun.utils import truncate
 from maajun.vcs import CommandResult
 
@@ -247,7 +250,10 @@ def print_dry_run(
     if title:
         print(f"Would be titled: {title}")
     print(f"{bar}\n")
-    print(report)
+    # The report is markdown. Rendered, because this is the copy a person
+    # reads to decide whether to file it — the file on disk and the issue
+    # body keep the source.
+    render(Console(), report)
     print(f"\n{bar}")
     print(
         f"Cost: {prompt_tokens} prompt + {completion_tokens} "
