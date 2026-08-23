@@ -141,10 +141,27 @@ def regression_note(previous_url: str) -> str:
     )
 
 
-def issue_body(event: ErrorEvent, report: str, previous_url: str = "") -> str:
-    """Suggest mode's artifact: the analysis plus the raw error."""
+def issue_body(
+    event: ErrorEvent,
+    report: str,
+    previous_url: str = "",
+    *,
+    unfixed: bool = False,
+) -> str:
+    """The analysis plus the raw error.
+
+    Suggest mode's only artifact, and fix mode's when the investigation found
+    nothing in the repository to change — `unfixed` says which, so a reader
+    knows the fix was attempted rather than never asked for.
+    """
+    note = (
+        "> **No code change.** Fix mode investigated this and found nothing "
+        "in the repository to change; the analysis is below.\n\n"
+        if unfixed else ""
+    )
     return (
         regression_note(previous_url)
+        + note
         + f"{report}\n\n---\n\n"
         f"## Error details\n\n```\n{event.details[:MAX_DETAILS_IN_BODY]}\n```\n\n"
         f"{provenance(event)}"
@@ -157,27 +174,19 @@ def pr_body(
     report: str,
     verification: CommandResult | None = None,
     *,
-    code_changed: bool = True,
     previous_url: str = "",
 ) -> str:
-    """Fix mode's artifact: the analysis, the test verdict, and provenance."""
-    if code_changed:
-        summary = "This PR contains the applied fix and the incident report."
-        verdict = verification_section(repo_config, verification)
-    else:
-        # Still a pull request, so the finding is reviewed in one place —
-        # but the reader has to know the diff is the report, not a fix.
-        summary = (
-            "⚠️ **Analysis only — no code change.** The investigation is "
-            "below and in the report file; the fix still has to be written.\n"
-            "The suggested fix section says what to change."
-        )
-        verdict = ""
+    """Fix mode's artifact: the analysis, the test verdict, and provenance.
+
+    Only ever built for a run that changed code. One that changed none files
+    an issue instead — a pull request with no diff looks like a fix until the
+    Files tab says otherwise.
+    """
     return (
         regression_note(previous_url)
         + f"{report}\n\n---\n"
-        f"{summary}\n\n"
-        f"{verdict}"
+        "This PR contains the applied fix and the incident report.\n\n"
+        f"{verification_section(repo_config, verification)}"
         f"{provenance(event)}"
     )
 

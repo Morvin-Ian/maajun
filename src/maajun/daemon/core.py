@@ -20,6 +20,7 @@ from maajun.daemon.prompts import (
     REGRESSION_SECTION,
     REPORT_FORMAT,
     RETRY_SUFFIX,
+    UNAPPLIED_FIX_SUFFIX,
 )
 from maajun.daemon.store import (
     ARTIFACT_IGNORED,
@@ -664,6 +665,8 @@ class Daemon:
         run the agent, then print (dry run), write a local report, file an
         issue (suggest mode), or commit/push/open a PR (fix mode)."""
         opens_pull_request = repo_config.mode == "fix"
+        # A dry run and local mode never branch, so there is no diff to want.
+        applies_a_fix = opens_pull_request and not dry_run and not self.local_mode
         if not dry_run and not self.local_mode:
             progress("Preparing workspace")
             # The agent reads code from the clone either way; only fix mode
@@ -705,6 +708,10 @@ class Daemon:
                 response = await agent.chat(RETRY_SUFFIX.format(problem=problem))
                 accumulate_usage(spent, response.usage)
                 report = response.content.strip()
+            if applies_a_fix and not await workspace.has_changes():
+                report = await self.insist_on_the_edit(
+                    agent, workspace, report, spent, progress
+                )
         except BaseException:
             # There is no response to read the usage off, and the rounds it
             # did make were billed. Bank them before the failure propagates.
@@ -758,18 +765,18 @@ class Daemon:
         # change, so afterwards the answer is always yes.
         code_changed = opens_pull_request and await workspace.has_changes()
         if opens_pull_request and not code_changed:
+            # Asked twice and still nothing to merge, so the finding is a
+            # finding: an issue says that, a pull request with no diff in it
+            # only looks like a fix until you open the Files tab.
             log.info(
-                "fix mode changed no code for fp=%s in repo=%s; the pull "
-                "request carries the analysis alone",
+                "fix mode changed no code for fp=%s in repo=%s; filing the "
+                "analysis as an issue instead of an empty pull request",
                 event.fingerprint, repo_config.repo,
             )
+            opens_pull_request = False
 
         if opens_pull_request:
-            # Only a diff is worth testing; an analysis-only PR changed no code.
-            verification = (
-                await self.verify(repo_config, workspace, progress)
-                if code_changed else None
-            )
+            verification = await self.verify(repo_config, workspace, progress)
             progress("Opening PR")
             reports.write_report_file(
                 workspace.path / "docs" / "incidents", event, report
@@ -783,7 +790,6 @@ class Daemon:
                 title=title,
                 body=reports.pr_body(
                     repo_config, event, report, verification,
-                    code_changed=code_changed,
                     previous_url=previous["url"] if previous else "",
                 ),
             )
@@ -795,7 +801,9 @@ class Daemon:
                 repo_config.repo,
                 title=title,
                 body=reports.issue_body(
-                    event, report, previous_url=previous["url"] if previous else ""
+                    event, report,
+                    previous_url=previous["url"] if previous else "",
+                    unfixed=repo_config.mode == "fix",
                 ),
             )
             recorded_branch = ""
@@ -820,6 +828,35 @@ class Daemon:
             prompt_tokens, completion_tokens,
         )
         return url
+
+    async def insist_on_the_edit(
+        self,
+        agent,
+        workspace: GitWorkspace,
+        report: str,
+        spent: dict[str, int],
+        progress: ProgressCallback,
+    ) -> str:
+        """Ask once more for the edit fix mode was supposed to make.
+
+        A report that only describes the change opens a pull request with
+        nothing to review. The usual cause is the escape hatch in
+        FIX_PROMPT_SUFFIX being taken for a finding that does have an in-repo
+        fix — anything about an environment variable especially.
+
+        The answer replaces the report only if it is usable: a model that
+        edits the files and replies "done" should not cost the analysis.
+        """
+        log.info("fix mode changed nothing; asking once for the edit")
+        progress("Asking for the edit")
+        response = await agent.chat(
+            UNAPPLIED_FIX_SUFFIX.format(workspace=workspace.path)
+        )
+        accumulate_usage(spent, response.usage)
+        second = response.content.strip()
+        if report_problem(second):
+            return report
+        return second
 
     def close_as_intended(
         self,

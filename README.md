@@ -182,6 +182,13 @@ In `fix` mode the same analysis arrives as a pull request: the applied diff, the
 report committed as `docs/incidents/<fingerprint>.md`, and your test suite's
 verdict at the top of the body.
 
+A fix-mode run that writes the report but changes no code is asked once more
+for the edit. If it still finds nothing in the repository that should differ,
+the analysis is filed as an **issue** rather than a pull request with no diff
+in it — a PR that looks like a fix until you open the Files tab wastes a
+review. The issue says the fix was attempted, so it is not mistaken for
+suggest mode.
+
 > ✅ **Tests pass** — `pytest -q`
 
 A failing suite (`❌ Tests fail (exit 1)`) still opens the PR — a fix that
