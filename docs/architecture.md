@@ -234,14 +234,29 @@ maajun/
    [multi-repo](monitoring.md#multiple-repositories) config each monitor
    is bound to a repo, so its errors are analyzed against — and open PRs
    on — the right one, each with its own clone, branch, and mode.
-5. **Check the report** — a blank answer, or one with none of the report's
+5. **Insist on the edit** — fix mode that produced a report and no diff is
+   asked once more. A pull request with nothing in it publishes nothing
+   anyone can review, and the usual cause is the escape hatch in
+   `FIX_PROMPT_SUFFIX` — "the right fix is outside this repository" — being
+   taken for a finding that does have an in-repo fix. An environment
+   variable no settings module defaults and no example env file documents is
+   a change to the repository, not an exemption from one. The second answer
+   replaces the report only if it is usable, so a model that edits the files
+   and replies "done" does not cost the analysis. Suggest mode, dry runs and
+   local mode are never asked: none of them has a branch to diff. A run that
+   still changes nothing files an **issue** instead of a pull request — the
+   report file used to be committed so there was always a diff to review, but
+   that shipped pull requests that look like fixes until the Files tab says
+   otherwise. `issue_body(unfixed=True)` marks it so it is not read as
+   suggest mode.
+6. **Check the report** — a blank answer, or one with none of the report's
    sections, is asked for once more and then abandoned: no issue, no PR,
    the incident marked failed. An empty artifact costs the reader more than
    it gives and hides that the run went wrong. A report with no one-line
    summary earns the same re-ask but never the abandonment: that is
    `headline_problem`, soft where `report_problem` is a gate, because a good
    analysis is worth more than a missing heading.
-6. **Read the verdict** — every report opens with `defect` or `by design`.
+7. **Read the verdict** — every report opens with `defect` or `by design`.
    `reports.verdict` parses it, and `by design` stops the run: nothing is
    published, the incident is closed as `ignored` with the agent's own
    reason, and what the analysis cost is banked with `add_spend` because the
@@ -249,7 +264,7 @@ maajun/
    particular to the codebase, since the agent has read the code that
    raised. An absent or unparseable verdict is treated as a defect — silence
    must never suppress a report.
-7. **Title it from the finding** — `reports.artifact_title` reads the
+8. **Title it from the finding** — `reports.artifact_title` reads the
    report's own first heading and titles the issue, the pull request, and
    the commit with it, falling back to the raw error only when there is no
    usable heading. The alternative, titling from the log line, names the
@@ -259,7 +274,7 @@ maajun/
    a section name because the model skipped the summary, is treated as
    absent. The commit subject is built from the same headline, so `git log`
    and the pull request cannot disagree.
-8. **Publish** — depends on the repo's [mode](monitoring.md#modes). In
+9. **Publish** — depends on the repo's [mode](monitoring.md#modes). In
    `suggest` mode the report is filed as a GitHub **issue**: no branch, no
    commit, no push, because there is no diff to review. In `fix` mode the
    repo's `test_command` (if set) is run in the workspace first and its
@@ -275,7 +290,7 @@ maajun/
    runs in [local mode](monitoring.md#1-configure) instead: steps 1–3 are
    unchanged, but the report is written to `<workdir>/reports/` and no git
    or GitHub operation runs at all.
-9. **Record** — the incident is marked processed with its PR URL, token
+10. **Record** — the incident is marked processed with its PR URL, token
    counts, and USD cost. If any step fails, the incident is marked failed
    and the daemon moves on; one bad incident never kills the loop.
 

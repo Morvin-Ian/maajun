@@ -1380,11 +1380,12 @@ def fix_mode_daemon(tmp_path, remote):
 # ---------------------------------------------------------------------------
 
 
-async def test_fix_mode_always_opens_a_pull_request(setup):
-    """Fix mode's artifact is a PR, even when the analysis changed no code.
-
-    The report file is committed either way, so there is always a diff to
-    review and one place the finding lives.
+async def test_fix_mode_with_no_diff_files_an_issue_not_an_empty_pull_request(setup):
+    """Fix mode used to open a PR either way, on the reasoning that the
+    committed report file was itself a diff to review. In practice that
+    shipped pull requests that look like fixes until you open the Files tab.
+    Asked twice and still nothing to merge means the finding is a finding,
+    and a finding is an issue.
     """
     daemon, logfile, agent, github, store, remote = setup
     daemon.repo_for(daemon.monitors[0]).mode = "fix"  # agent edits nothing
@@ -1393,15 +1394,16 @@ async def test_fix_mode_always_opens_a_pull_request(setup):
         f.write(TRACEBACK)
     fp = (await daemon.poll_once())[0]
 
-    assert github.issues == []
-    assert len(github.calls) == 1
+    assert github.calls == []
+    assert len(github.issues) == 1
     row = store.get(fp, "owner/name")
-    assert row["artifact_kind"] == ARTIFACT_PR
-    assert row["branch"] == f"maajun/incident-{fp}"
+    assert row["artifact_kind"] == ARTIFACT_ISSUE
+    assert row["branch"] == ""
 
 
-async def test_a_pull_request_with_no_fix_says_so(setup):
-    """Reviewing it as a fix would waste the review; the diff is the report."""
+async def test_an_issue_from_fix_mode_says_the_fix_was_attempted(setup):
+    """Otherwise it reads as suggest mode, and nobody knows an edit was
+    tried and found unnecessary."""
     daemon, logfile, agent, github, store, remote = setup
     daemon.repo_for(daemon.monitors[0]).mode = "fix"
 
@@ -1409,9 +1411,20 @@ async def test_a_pull_request_with_no_fix_says_so(setup):
         f.write(TRACEBACK)
     await daemon.poll_once()
 
-    body = github.calls[0]["body"]
-    assert "Analysis only" in body
+    body = github.issues[0]["body"]
+    assert "No code change" in body
     assert "Root cause" in body  # the analysis is still there
+
+
+async def test_an_issue_from_suggest_mode_claims_no_attempt(setup):
+    daemon, logfile, agent, github, store, remote = setup
+    assert daemon.repo_for(daemon.monitors[0]).mode == "suggest"
+
+    with open(logfile, "a") as f:
+        f.write(TRACEBACK)
+    await daemon.poll_once()
+
+    assert "No code change" not in github.issues[0]["body"]
 
 
 async def test_a_pull_request_with_a_fix_does_not_say_analysis_only(setup):
@@ -1425,9 +1438,25 @@ async def test_a_pull_request_with_a_fix_does_not_say_analysis_only(setup):
     assert "Analysis only" not in github.calls[0]["body"]
 
 
-async def test_fix_mode_pushes_a_branch_even_with_no_code_change(setup):
+async def test_no_branch_is_pushed_when_there_is_nothing_to_merge(setup):
+    """An orphan branch per unfixable incident is litter in the repo."""
     daemon, logfile, agent, github, store, remote = setup
     daemon.repo_for(daemon.monitors[0]).mode = "fix"
+
+    with open(logfile, "a") as f:
+        f.write(TRACEBACK)
+    await daemon.poll_once()
+
+    branches = subprocess.run(
+        ["git", "branch", "-a"], cwd=str(remote),
+        capture_output=True, text=True, check=True,
+    ).stdout
+    assert "maajun/incident-" not in branches
+
+
+async def test_a_branch_is_pushed_when_there_is_a_fix(setup):
+    daemon, logfile, agent, github, store, remote = setup
+    fix_mode(daemon, agent)
 
     with open(logfile, "a") as f:
         f.write(TRACEBACK)
@@ -1930,3 +1959,117 @@ async def test_a_report_with_no_verdict_is_still_filed(setup):
 
     assert len(github.issues) == 1
     assert store.ignored() == []
+
+
+# ---------------------------------------------------------------------------
+# Fix mode has to actually fix
+# ---------------------------------------------------------------------------
+
+DESCRIBED_BUT_NOT_APPLIED = """# settings inherit a wildcard in production
+
+## Root cause
+`config/settings/base.py:58` falls back to "*" when the env var is unset.
+
+## Suggested fix
+Pin it in production.py.
+
+## Applied fix
+Not yet applied — this report documents the gap and the concrete patch.
+"""
+
+
+async def test_fix_mode_that_only_described_the_fix_is_asked_again(setup, tmp_path):
+    """A pull request with no diff publishes nothing anyone can review. The
+    escape hatch for fixes that live outside the repo gets taken for findings
+    that do have an in-repo fix — an environment variable especially."""
+    daemon, logfile, agent, github, store, remote = setup
+    repo_config = daemon.repo_for(daemon.monitors[0])
+    repo_config.mode = "fix"
+    workspace = daemon.workspaces["owner/name"]
+    edit = workspace.path / "main.py"
+
+    class Reluctant(FakeAgent):
+        """Describes the fix, then applies it only when pushed."""
+
+        async def chat(self, message):
+            self.prompts.append(message)
+            if len(self.prompts) > 1:
+                edit.write_text("items = [0]\n")
+                return CompletionResponse(
+                    content=REPORT, usage=dict(self.usage_per_call)
+                )
+            return CompletionResponse(
+                content=DESCRIBED_BUT_NOT_APPLIED, usage=dict(self.usage_per_call)
+            )
+
+    reluctant = Reluctant()
+    daemon.agent_factory_for_repo = lambda rc, ws: lambda: reluctant
+
+    with open(logfile, "a") as f:
+        f.write(TRACEBACK)
+    await daemon.poll_once()
+
+    assert len(reluctant.prompts) == 2
+    assert "You changed no files" in reluctant.prompts[1]
+    assert edit.read_text() == "items = [0]\n"
+    # A real diff, so the PR is a fix rather than an analysis.
+    assert len(github.calls) == 1
+    assert "Analysis only" not in github.calls[0]["body"]
+
+
+async def test_a_fix_that_landed_first_time_is_not_asked_twice(setup, tmp_path):
+    daemon, logfile, agent, github, store, remote = setup
+    repo_config = daemon.repo_for(daemon.monitors[0])
+    repo_config.mode = "fix"
+    workspace = daemon.workspaces["owner/name"]
+    edits = FakeAgent(edit_path=workspace.path / "main.py")
+    daemon.agent_factory_for_repo = lambda rc, ws: lambda: edits
+
+    with open(logfile, "a") as f:
+        f.write(TRACEBACK)
+    await daemon.poll_once()
+
+    assert len(edits.prompts) == 1
+
+
+async def test_the_second_ask_keeps_the_first_report_when_it_answers_badly(setup):
+    """A model that edits the files and replies "done" must not cost the
+    analysis that came with the first answer."""
+    daemon, logfile, agent, github, store, remote = setup
+    repo_config = daemon.repo_for(daemon.monitors[0])
+    repo_config.mode = "fix"
+    workspace = daemon.workspaces["owner/name"]
+
+    class Terse(FakeAgent):
+        async def chat(self, message):
+            self.prompts.append(message)
+            if len(self.prompts) > 1:
+                (workspace.path / "main.py").write_text("items = [0]\n")
+                return CompletionResponse(content="Done.", usage={})
+            return CompletionResponse(
+                content=DESCRIBED_BUT_NOT_APPLIED, usage=dict(self.usage_per_call)
+            )
+
+    terse = Terse()
+    daemon.agent_factory_for_repo = lambda rc, ws: lambda: terse
+
+    with open(logfile, "a") as f:
+        f.write(TRACEBACK)
+    await daemon.poll_once()
+
+    body = github.calls[0]["body"]
+    assert "Root cause" in body
+    assert "Done." not in body
+
+
+async def test_suggest_mode_is_never_asked_for_an_edit(setup):
+    """It has no branch and no write permission; asking would be nonsense."""
+    daemon, logfile, agent, github, store, remote = setup
+    assert daemon.repo_for(daemon.monitors[0]).mode == "suggest"
+
+    with open(logfile, "a") as f:
+        f.write(TRACEBACK)
+    await daemon.poll_once()
+
+    assert len(agent.prompts) == 1
+    assert len(github.issues) == 1

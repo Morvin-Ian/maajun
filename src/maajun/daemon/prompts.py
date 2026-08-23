@@ -144,9 +144,13 @@ edit is a wasted run.
 - Add or extend a test that fails before your change and passes after, in
   whichever test directory this project already uses.
 - Do not reformat untouched code, bump dependencies, or rename anything.
-- If the right fix is genuinely outside this repository (an environment
-  variable, a dependency bug, infrastructure), make no edit and say so under
-  "## Applied fix".
+- "## Suggested fix" describes the change you made, not one you are proposing.
+  You are the one applying it — there is nobody downstream to hand it to.
+- If the right fix is genuinely outside this repository, make no edit and say
+  so under "## Applied fix" — but only when no file here should differ. An
+  environment variable that no settings module defaults, no example env file
+  documents and no compose file passes is a change to this repository, not an
+  exemption from one. The test that would have caught it is one too.
 - If the verdict is "by design", change nothing. There is no bug to fix, and
   an edit that silences a working guard is a regression.
 
@@ -183,4 +187,28 @@ Your previous answer was not a usable report: {problem}
 Answer again with the full markdown report described above, filled in from
 the code you read, starting with the one-line summary that names the defect
 and its file. Do not apologize or explain — output the report only.
+"""
+
+
+# Sent when fix mode produced a report and no diff. The escape hatch in
+# FIX_PROMPT_SUFFIX gets taken for findings that do have an in-repo fix —
+# anything about an environment variable especially — so the run asks once
+# more rather than publishing a pull request with nothing to review.
+UNAPPLIED_FIX_SUFFIX = """
+
+You changed no files. This run opens a pull request from your edits, so a
+report with no edit publishes nothing anyone can review or merge.
+
+Apply the change now, with edit_file or write_file, inside {workspace}. If
+you can name a file whose contents should differ, that is a change you can
+make: a default in a settings module, an example env file, a compose file, a
+template, a docs page, the regression test that would have caught this.
+"The real fix is an environment variable" is not an exemption — change what
+the repository can control, and say what has to be set outside it.
+
+Only if no file in this repository should differ at all, leave it alone and
+say exactly that under "## Applied fix".
+
+Then output the full report again, with "## Applied fix" naming every file
+you changed.
 """
