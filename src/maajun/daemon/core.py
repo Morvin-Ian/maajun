@@ -765,18 +765,18 @@ class Daemon:
         # change, so afterwards the answer is always yes.
         code_changed = opens_pull_request and await workspace.has_changes()
         if opens_pull_request and not code_changed:
+            # Asked twice and still nothing to merge, so the finding is a
+            # finding: an issue says that, a pull request with no diff in it
+            # only looks like a fix until you open the Files tab.
             log.info(
-                "fix mode changed no code for fp=%s in repo=%s; the pull "
-                "request carries the analysis alone",
+                "fix mode changed no code for fp=%s in repo=%s; filing the "
+                "analysis as an issue instead of an empty pull request",
                 event.fingerprint, repo_config.repo,
             )
+            opens_pull_request = False
 
         if opens_pull_request:
-            # Only a diff is worth testing; an analysis-only PR changed no code.
-            verification = (
-                await self.verify(repo_config, workspace, progress)
-                if code_changed else None
-            )
+            verification = await self.verify(repo_config, workspace, progress)
             progress("Opening PR")
             reports.write_report_file(
                 workspace.path / "docs" / "incidents", event, report
@@ -790,7 +790,6 @@ class Daemon:
                 title=title,
                 body=reports.pr_body(
                     repo_config, event, report, verification,
-                    code_changed=code_changed,
                     previous_url=previous["url"] if previous else "",
                 ),
             )
@@ -802,7 +801,9 @@ class Daemon:
                 repo_config.repo,
                 title=title,
                 body=reports.issue_body(
-                    event, report, previous_url=previous["url"] if previous else ""
+                    event, report,
+                    previous_url=previous["url"] if previous else "",
+                    unfixed=repo_config.mode == "fix",
                 ),
             )
             recorded_branch = ""

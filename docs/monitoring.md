@@ -505,7 +505,7 @@ updates the existing `maajun/report-<fingerprint>` branch and PR).
 
 | | `suggest` (default) | `fix` |
 |---|---|---|
-| Artifact | A GitHub **issue**, always | A **pull request**, always |
+| Artifact | A GitHub **issue**, always | A **pull request** with the diff |
 | Agent file access | Read-only | May edit files, but only inside its own clone |
 | Agent shell access | None | None |
 | Contains | Incident report + suggested fix | Applied fix + incident report |
@@ -516,10 +516,16 @@ Suggest mode files an **issue**, not a pull request: an analysis with no
 diff is an issue, and it is cheaper — the repo is cloned to read, but no
 branch is created and nothing is pushed.
 
-Fix mode always ends in a **pull request**. When the agent concludes no
-code change is warranted, the PR carries the incident report alone and says
-so at the top — so the finding is still in one reviewable place, rather
-than the mode quietly producing something else.
+Fix mode ends in a **pull request that contains the fix**. A run that writes
+the report but edits nothing is asked once more for the edit; the escape
+hatch for fixes that live outside the repo is easy to over-apply, and an
+environment variable no settings default, example env file or compose file
+covers is a change to the repository rather than an exemption from one.
+
+If it still finds nothing that should differ, the analysis is filed as an
+**issue** — no branch, no push, no pull request with an empty diff. The issue
+says the fix was attempted, so it is not mistaken for suggest mode. A
+fix-mode PR therefore always has something to merge.
 
 **Nothing is ever filed empty.** A report that comes back blank, or with
 none of its sections filled in, is asked for once more; if it is still

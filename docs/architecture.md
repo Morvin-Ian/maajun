@@ -243,7 +243,12 @@ maajun/
    a change to the repository, not an exemption from one. The second answer
    replaces the report only if it is usable, so a model that edits the files
    and replies "done" does not cost the analysis. Suggest mode, dry runs and
-   local mode are never asked: none of them has a branch to diff.
+   local mode are never asked: none of them has a branch to diff. A run that
+   still changes nothing files an **issue** instead of a pull request — the
+   report file used to be committed so there was always a diff to review, but
+   that shipped pull requests that look like fixes until the Files tab says
+   otherwise. `issue_body(unfixed=True)` marks it so it is not read as
+   suggest mode.
 6. **Check the report** — a blank answer, or one with none of the report's
    sections, is asked for once more and then abandoned: no issue, no PR,
    the incident marked failed. An empty artifact costs the reader more than
