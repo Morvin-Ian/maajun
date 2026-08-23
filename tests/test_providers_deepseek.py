@@ -508,3 +508,63 @@ async def test_an_abandoned_stream_is_still_closed():
     await stream.aclose()
 
     assert closed == [True]
+
+
+# ---------------------------------------------------------------------------
+# Cached prompt tokens
+# ---------------------------------------------------------------------------
+
+
+def test_usage_carries_deepseek_cache_hits():
+    """DeepSeek bills a resent prefix at a thirtieth of a fresh one, so the
+    hit count has to survive into the usage dict the cost is worked out from."""
+    from maajun.providers.chat_completions import usage_of
+
+    usage = SimpleNamespace(
+        prompt_tokens=1000,
+        completion_tokens=10,
+        total_tokens=1010,
+        prompt_cache_hit_tokens=960,
+        prompt_cache_miss_tokens=40,
+    )
+    assert usage_of(usage)["cached_tokens"] == 960
+
+
+def test_usage_carries_openai_cache_hits():
+    """OpenAI nests the same number under prompt_tokens_details."""
+    from maajun.providers.chat_completions import usage_of
+
+    usage = SimpleNamespace(
+        prompt_tokens=1000,
+        completion_tokens=10,
+        total_tokens=1010,
+        prompt_tokens_details=SimpleNamespace(cached_tokens=512),
+    )
+    assert usage_of(usage)["cached_tokens"] == 512
+
+
+def test_usage_omits_cache_hits_when_the_provider_reports_none():
+    """Absent is not zero: a gateway that says nothing must not be recorded
+    as having cached nothing, and both are charged in full anyway."""
+    from maajun.providers.chat_completions import usage_of
+
+    usage = SimpleNamespace(prompt_tokens=1, completion_tokens=2, total_tokens=3)
+    assert "cached_tokens" not in usage_of(usage)
+
+
+def test_a_cached_round_costs_less_than_an_uncached_one():
+    from maajun.providers.chat_completions import usage_of
+    from maajun.providers.pricing import extract_usage
+
+    plain = SimpleNamespace(
+        prompt_tokens=100_000, completion_tokens=100, total_tokens=100_100
+    )
+    cached = SimpleNamespace(
+        prompt_tokens=100_000,
+        completion_tokens=100,
+        total_tokens=100_100,
+        prompt_cache_hit_tokens=99_000,
+    )
+    _, _, full = extract_usage(usage_of(plain), DEFAULT_MODEL)
+    _, _, discounted = extract_usage(usage_of(cached), DEFAULT_MODEL)
+    assert discounted < full

@@ -42,8 +42,24 @@ Every supported provider speaks the `/chat/completions` protocol, so
 behavior — retries, streaming, tool serialization, response parsing — and a
 vendor module is only an endpoint, a pair of model names, and any content
 quirks to strip: `deepseek.py` removes DeepSeek's DSML tool-call markup,
-`openai.py` has nothing to strip. Point `ai.base_url` at a gateway to use any
-other compatible endpoint.
+`openai.py` has nothing to strip, `ox_alpha.py` is OpenRouter's endpoint and the one
+free model. Point `ai.base_url` at a gateway to use any other compatible
+endpoint.
+
+`anthropic.py` is the exception: Claude speaks the Messages API, so it
+subclasses `AIProvider` directly and translates both ways. The system prompt
+is hoisted out of `messages` into its own parameter, assistant tool calls
+become `tool_use` blocks, and the tool results the agent emits one apiece are
+merged into the single user message Anthropic requires. Everything above the
+provider layer keeps seeing OpenAI-shaped tool calls. It also sets a
+`cache_control` breakpoint on every request — Anthropic caches only where it
+is told to, so without one each tool round re-reads the whole prompt at full
+price.
+
+`ProviderType` declares the providers in the order setup offers them,
+cheapest first, and `ProviderFactory.providers` repeats that order; setup
+defaults to the first, so the ordering is the recommendation. A provider
+class marked `free = True` is offered first and labelled as such.
 
 `providers/pricing.py` costs each response by model, matching names as
 prefixes so dated ids (`gpt-4o-2024-08-06`) resolve to their family. It is
@@ -51,11 +67,31 @@ load-bearing: the [spend cap](monitoring.md#capping-spend) decides whether to
 analyze the next incident from these numbers, and an unpriced model logs a
 warning rather than silently costing at the fallback rate.
 
+Each model carries four rates: fresh input, cache-hit input, cache-write
+input, and output. Every provider re-serves a prompt prefix it has already
+seen far more cheaply than a fresh one, and every round of the tool loop
+resends a growing prefix, so on a long investigation the cache-hit rate is
+what most input tokens are actually billed at. The counts come from the
+provider — `prompt_cache_hit_tokens` on DeepSeek,
+`prompt_tokens_details.cached_tokens` on OpenAI,
+`cache_read_input_tokens` / `cache_creation_input_tokens` on Anthropic —
+flattened into the usage dict as `cached_tokens` and `cache_write_tokens` by
+each provider's `usage_of`. A provider that reports nothing is charged in
+full. Anthropic is the only one that bills for the write (1.25x fresh), which
+is why that rate is tracked rather than assumed equal to the fresh one.
+
+DeepSeek also prices by the clock: its published rates are peak, and
+off-peak is half of them. `is_peak` reads the two UTC windows and the
+Beijing-time weekend exemption, and `pricing_for` takes the moment as an
+argument so the rule is testable rather than wired to the wall clock.
+
 Anything the table does not recognise — including a gateway that never names
 the model it ran — is costed at the dearest entry in it, derived from the
-table rather than written down so adding a pricier model moves it too. Every
-error here rounds the same way on purpose: over-reporting pauses a daemon
-early, under-reporting lets it run past a cap the user set.
+table rather than written down so adding a pricier model moves it too, and
+with neither discount applied: both are claims about a model that could not
+be identified. Every error here rounds the same way on purpose:
+over-reporting pauses a daemon early, under-reporting lets it run past a cap
+the user set.
 
 ### Provider resilience
 
@@ -177,7 +213,16 @@ maajun/
    Before each incident the daemon also checks the
    [daily spend cap](monitoring.md#capping-spend) and the per-cycle limit;
    anything deferred is forgotten so a later poll picks it up.
-3. **Analyze** — for a new fingerprint, the daemon syncs an isolated
+3. **Triage** — `triage.by_design` matches the raw error against signatures
+   for guards that name their own intent (`ValidationError`,
+   `PermissionDenied`, `429 Too Many Requests`, …) plus anything in
+   `monitor.ignore_patterns`. A match closes the incident as `ignored` with
+   its reason and never reaches the agent, so it costs nothing. The pass is
+   narrow on purpose: anything needing to know the application belongs to
+   the verdict in step 6, not here. `monitor.ignore_by_design = false` turns
+   it off. Nothing is deleted — the row stays, which is also what stops the
+   same error being re-examined on every poll.
+4. **Analyze** — for a new fingerprint, the daemon syncs an isolated
    clone of the event's repo, creates a branch
    `maajun/incident-<fingerprint>`, and asks the agent to investigate.
    The agent reads the code with its safe tools and writes a structured
@@ -189,11 +234,32 @@ maajun/
    [multi-repo](monitoring.md#multiple-repositories) config each monitor
    is bound to a repo, so its errors are analyzed against — and open PRs
    on — the right one, each with its own clone, branch, and mode.
-4. **Check the report** — a blank answer, or one with none of the report's
+5. **Check the report** — a blank answer, or one with none of the report's
    sections, is asked for once more and then abandoned: no issue, no PR,
    the incident marked failed. An empty artifact costs the reader more than
-   it gives and hides that the run went wrong.
-5. **Publish** — depends on the repo's [mode](monitoring.md#modes). In
+   it gives and hides that the run went wrong. A report with no one-line
+   summary earns the same re-ask but never the abandonment: that is
+   `headline_problem`, soft where `report_problem` is a gate, because a good
+   analysis is worth more than a missing heading.
+6. **Read the verdict** — every report opens with `defect` or `by design`.
+   `reports.verdict` parses it, and `by design` stops the run: nothing is
+   published, the incident is closed as `ignored` with the agent's own
+   reason, and what the analysis cost is banked with `add_spend` because the
+   round was billed either way. This is the pass that recognises a guard
+   particular to the codebase, since the agent has read the code that
+   raised. An absent or unparseable verdict is treated as a defect — silence
+   must never suppress a report.
+7. **Title it from the finding** — `reports.artifact_title` reads the
+   report's own first heading and titles the issue, the pull request, and
+   the commit with it, falling back to the raw error only when there is no
+   usable heading. The alternative, titling from the log line, names the
+   symptom: an exception surfaces at one file and line while the defect that
+   has to change is at another, so the title would point a reader at the
+   wrong place. A heading that is the unfilled template, or one that is just
+   a section name because the model skipped the summary, is treated as
+   absent. The commit subject is built from the same headline, so `git log`
+   and the pull request cannot disagree.
+8. **Publish** — depends on the repo's [mode](monitoring.md#modes). In
    `suggest` mode the report is filed as a GitHub **issue**: no branch, no
    commit, no push, because there is no diff to review. In `fix` mode the
    repo's `test_command` (if set) is run in the workspace first and its
@@ -209,7 +275,7 @@ maajun/
    runs in [local mode](monitoring.md#1-configure) instead: steps 1–3 are
    unchanged, but the report is written to `<workdir>/reports/` and no git
    or GitHub operation runs at all.
-6. **Record** — the incident is marked processed with its PR URL, token
+9. **Record** — the incident is marked processed with its PR URL, token
    counts, and USD cost. If any step fails, the incident is marked failed
    and the daemon moves on; one bad incident never kills the loop.
 

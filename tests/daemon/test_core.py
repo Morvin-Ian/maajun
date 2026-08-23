@@ -459,7 +459,9 @@ async def test_manual_report_opens_pr_and_reports_progress(setup):
     assert phases == ["Preparing workspace", "Analyzing with AI", "Filing issue"]
     assert url.endswith("/issues/1")
     assert "Checkout button" in agent.prompts[0]
-    assert "Checkout button" in github.issues[0]["title"]
+    # Titled from the report's finding, not from how the issue was described:
+    # what the analysis says to fix is what the issue is called.
+    assert github.issues[0]["title"] == "[maajun] IndexError in handler"
 
 
 async def test_manual_report_dry_run_only_analyzes(setup):
@@ -1781,3 +1783,150 @@ async def test_an_error_that_never_stopped_is_not_filed_twice(setup):
 
     assert handled == []
     assert len(github.issues) == 1
+
+
+# ---------------------------------------------------------------------------
+# Errors that are the code working
+# ---------------------------------------------------------------------------
+
+# One line, the way a monitor sees it: the level marker and the guard's own
+# name have to share a line to arrive as one event. The INFO line after it is
+# what releases the error from the traceback lookahead.
+VALIDATION_ERROR = (
+    "ERROR 2026-08-23 10:01:02 django.request: ValidationError on /api/signup: "
+    "{'email': ['Enter a valid email address.']}\n"
+    "INFO 2026-08-23 10:01:02 django.server: 400 in 4ms\n"
+)
+
+BY_DESIGN_REPORT = """# the signup serializer rejects a malformed email
+
+## Verdict
+by design — the serializer is meant to refuse this and the view returns 400.
+
+## What happened
+A user typed an invalid email and got a 400 back.
+
+## Root cause
+None. `api/serializers.py:31` validates the field on purpose.
+
+## Suggested fix
+None — working as intended.
+"""
+
+
+async def test_a_guard_firing_as_designed_is_never_analyzed(setup):
+    """The signature pass runs before the model, so it costs nothing."""
+    daemon, logfile, agent, github, store, remote = setup
+
+    with open(logfile, "a") as f:
+        f.write(VALIDATION_ERROR)
+
+    handled = await daemon.poll_once()
+
+    assert handled == []
+    assert agent.prompts == []  # never asked
+    assert github.issues == []
+    row = store.ignored()[0]
+    assert row["status"] == "ignored"
+    assert "validation" in row["ignored_reason"]
+    assert row["cost_usd"] in (0, None)
+
+
+async def test_an_ignored_error_is_not_re_analyzed_when_it_recurs(setup):
+    """The row stays so every later poll is free too."""
+    daemon, logfile, agent, github, store, remote = setup
+
+    for _ in range(3):
+        with open(logfile, "a") as f:
+            f.write(VALIDATION_ERROR)
+        await daemon.poll_once()
+
+    assert agent.prompts == []
+    assert len(store.ignored()) == 1
+    assert store.ignored()[0]["count"] == 3
+
+
+async def test_the_signature_pass_can_be_turned_off(setup):
+    """For a codebase where a validation error really is a bug."""
+    daemon, logfile, agent, github, store, remote = setup
+    daemon.config.monitor.ignore_by_design = False
+
+    with open(logfile, "a") as f:
+        f.write(VALIDATION_ERROR)
+    handled = await daemon.poll_once()
+
+    assert len(handled) == 1
+    assert agent.prompts != []
+
+
+async def test_a_codebase_can_add_its_own_signature(setup):
+    """A paywall is not something the shipped patterns can know about."""
+    from maajun.daemon import triage
+
+    daemon, logfile, agent, github, store, remote = setup
+    daemon.ignore_patterns = triage.compile_extra([r"PaywallError"])
+
+    with open(logfile, "a") as f:
+        f.write("ERROR PaywallError: exports need a paid plan\n")
+    handled = await daemon.poll_once()
+
+    assert handled == []
+    assert agent.prompts == []
+
+
+async def test_a_real_defect_still_gets_filed(setup):
+    """The whole point: the filter must not swallow a genuine error."""
+    daemon, logfile, agent, github, store, remote = setup
+
+    with open(logfile, "a") as f:
+        f.write(TRACEBACK)
+    handled = await daemon.poll_once()
+
+    assert len(handled) == 1
+    assert len(github.issues) == 1
+    assert store.ignored() == []
+
+
+async def test_the_agent_can_call_an_error_intended_after_reading_the_code(setup):
+    """The signatures cannot recognise an app's own guard; the agent can."""
+    daemon, logfile, agent, github, store, remote = setup
+    agent.report = BY_DESIGN_REPORT
+
+    with open(logfile, "a") as f:
+        f.write(TRACEBACK)
+    handled = await daemon.poll_once()
+
+    assert agent.prompts != []  # it was analyzed...
+    assert github.issues == []  # ...and then not filed
+    assert len(handled) == 1
+    row = store.ignored()[0]
+    assert row["status"] == "ignored"
+    assert "serializer" in row["ignored_reason"]
+
+
+async def test_what_a_by_design_analysis_cost_is_still_banked(setup):
+    """The round was billed whether or not anything was published."""
+    daemon, logfile, agent, github, store, remote = setup
+    agent.report = BY_DESIGN_REPORT
+    agent.usage_per_call = {"prompt_tokens": 1_000_000, "completion_tokens": 0}
+
+    with open(logfile, "a") as f:
+        f.write(TRACEBACK)
+    await daemon.poll_once()
+
+    row = store.ignored()[0]
+    assert row["prompt_tokens"] == 1_000_000
+    assert row["cost_usd"] >= 0
+
+
+async def test_a_report_with_no_verdict_is_still_filed(setup):
+    """Silence must not suppress a report."""
+    daemon, logfile, agent, github, store, remote = setup
+    agent.report = REPORT  # has no Verdict section
+
+    with open(logfile, "a") as f:
+        f.write(TRACEBACK)
+    await daemon.poll_once()
+
+    assert len(github.issues) == 1
+    assert store.ignored() == []

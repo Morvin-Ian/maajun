@@ -132,6 +132,18 @@ class FakeProvider:
 
 
 @pytest.fixture
+def default_provider() -> str:
+    """The provider setup picks when the user says nothing.
+
+    A fixture rather than a constant to import: `tests` is not a package, so
+    `from tests.conftest import ...` only resolves when the repo root happens
+    to be on sys.path — true under `python -m pytest`, false under the
+    `pytest` console script CI runs.
+    """
+    return AIProviderConfig().provider
+
+
+@pytest.fixture
 def fake_provider():
     return FakeProvider()
 

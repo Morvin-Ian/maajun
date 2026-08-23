@@ -17,7 +17,9 @@ Nothing merges without your review, in either mode.
 
 **Contents** — [Requirements](#requirements) · [Installation](#installation) ·
 [Quick start](#quick-start) · [How it works](#how-it-works) ·
-[Chat](#chat) · [Modes](#modes) · [AI providers](#ai-providers) ·
+[Chat](#chat) · [Modes](#modes) ·
+[Errors that are not bugs](#errors-that-are-not-bugs) ·
+[AI providers](#ai-providers) ·
 [Configuration](#configuration) · [Commands](#commands) ·
 [Cost control](#cost-control) · [Security model](#security-model) ·
 [Documentation](#documentation)
@@ -25,7 +27,8 @@ Nothing merges without your review, in either mode.
 ## Requirements
 
 - Python 3.11 or newer
-- An API key for DeepSeek or OpenAI — see [AI providers](#ai-providers)
+- An API key for one of Ox Alpha (free), DeepSeek, OpenAI, or Anthropic — see
+  [AI providers](#ai-providers)
 - Optional, to open issues and pull requests: GitHub access, set up with
   `maajun login` — the GitHub CLI, a token, or SSH keys
 
@@ -123,14 +126,26 @@ detected and analyzed, but each report is written to
 2. **Deduplicate** — each error is fingerprinted. The same error is never
    reported twice; repeat sightings bump a counter on the existing incident.
    One that goes quiet and comes back is reported again, as a regression.
-3. **Analyze** — the agent reads the relevant source in a clone under
+3. **Triage** — an error that is a guard doing its job is passed over. A
+   rejected login, input that failed validation, a rate limiter returning
+   429: the code did what it was built to do, and there is nothing to fix.
+   See [Errors that are not bugs](#errors-that-are-not-bugs).
+4. **Analyze** — the agent reads the relevant source in a clone under
    `daemon.workdir` and produces a *what happened / root cause / suggested fix*
    report, including the commit that likely introduced the bug and how the app
    runs where it broke (folder, port, docker or systemd).
-4. **Report** — an issue in `suggest` mode, or a branch, a test run, and a pull
+5. **Report** — an issue in `suggest` mode, or a branch, a test run, and a pull
    request in `fix` mode. Always one or the other, and never empty: a report
    that comes back blank is re-asked once, then abandoned as a failed
    incident rather than filed as an empty issue.
+
+The issue, the pull request, and the commit are all titled from the report's
+own one-line finding — not from the log line that triggered the run. An
+exception surfaces in one place and the defect is regularly in another, so
+`KeyError: 'discount'` would send a reader to the file that raised rather
+than the file that has to change. Titling from the analysis keeps the name of
+a bug and the fix for it pointing at the same thing. `--dry-run` prints the
+title it would file, so a mismatch is visible before anything is published.
 
 Each incident records its token count and cost, viewable with
 `maajun incidents`.
@@ -139,7 +154,7 @@ Each incident records its token count and cost, viewable with
 
 The shape of a filed issue, abridged:
 
-> ### \[maajun] KeyError: 'discount'
+> ### \[maajun] cart/totals.py assumes promotions.apply() always writes a discount
 >
 > **What happened** — Checkout raised an unhandled `KeyError` for carts created
 > before a promotion was attached. 41 requests hit it in 12 minutes; every one
@@ -171,6 +186,50 @@ verdict at the top of the body.
 
 A failing suite (`❌ Tests fail (exit 1)`) still opens the PR — a fix that
 breaks the tests is exactly what a reviewer needs to see.
+
+## Errors that are not bugs
+
+Plenty of logged errors are the software working. A validator refusing a
+malformed email, a 401 for a bad password, a rate limiter returning 429, a
+404 for a row that was never there — every one is a guard doing exactly what
+it was built to do. Filing a GitHub issue for those buries the errors that
+are real, so maajun does not.
+
+Two passes decide, and neither one deletes anything:
+
+**Signatures, before any AI call.** An error named after its own intent —
+`ValidationError`, `PermissionDenied`, `403 Forbidden`, `RateLimitExceeded`,
+`CSRF`, `429 Too Many Requests`, `404 Not Found` — is closed without being
+analyzed, so it costs nothing. Deliberately narrow: it can only recognise
+errors that announce what they refused.
+
+**The agent's verdict, after reading the code.** Every report opens with
+`defect` or `by design`. That is what catches a guard specific to your
+application — a paywall, a quota, a feature flag — which no shipped pattern
+could know about. A `by design` verdict is not published: no issue, no PR,
+no commit. A report that does not say, or says it cannot tell, is filed as a
+defect. Silence never suppresses a report.
+
+Both are visible and reversible:
+
+```bash
+maajun incidents --ignored     # what was passed over, and why
+```
+
+```toml
+[monitor]
+ignore_by_design = false                    # analyze everything, however obvious
+ignore_patterns = ["PaywallError", "QuotaExceeded"]   # your own guards
+```
+
+`ignore_patterns` are regexes matched against the raw error, tried before the
+shipped signatures. A pattern that does not compile is logged and skipped
+rather than stopping the daemon.
+
+A guard that fires on input that *should* have been accepted is a defect, and
+so is one whose refusal escapes as an unhandled 500 — the check was intended,
+crashing on it was not. The prompt says so explicitly, so "by design" is not
+an exit from a hard investigation.
 
 ## Chat
 
@@ -229,15 +288,23 @@ report — the issue says why.
 
 ## AI providers
 
-DeepSeek and OpenAI are both fully supported and interchangeable — pick either
-during `maajun setup`.
+Four are supported and interchangeable. `maajun setup` offers them in this
+order — cheapest first — and defaults to the first:
 
-| | DeepSeek | OpenAI |
-|---|---|---|
-| `ai.provider` | `deepseek` | `openai` |
-| Default model | `deepseek-v4-flash` | `gpt-4o-mini` |
-| With `ai.thinking_mode` | `deepseek-v4-pro` | `gpt-4o` |
-| API key | [platform.deepseek.com](https://platform.deepseek.com) | [platform.openai.com/api-keys](https://platform.openai.com/api-keys) |
+| | Ox Alpha **(free)** | DeepSeek | OpenAI | Anthropic |
+|---|---|---|---|---|
+| `ai.provider` | `ox-alpha` | `deepseek` | `openai` | `anthropic` |
+| Default model | `stealth/ox-alpha` | `deepseek-v4-flash` | `gpt-4o-mini` | `claude-haiku-4-5` |
+| With `ai.thinking_mode` | *(same model)* | `deepseek-v4-pro` | `gpt-4o` | `claude-opus-5` |
+| API key | [openrouter.ai](https://openrouter.ai/settings/keys) | [platform.deepseek.com](https://platform.deepseek.com) | [platform.openai.com](https://platform.openai.com/api-keys) | [console.anthropic.com](https://console.anthropic.com/settings/keys) |
+
+**Ox Alpha is free.** It is a stealth model on OpenRouter — a 1M-token
+reasoning model whose operator has not been named — offered at no charge for
+the length of its preview. You still need an OpenRouter key, but nothing is
+billed against it. It is one model with no cheap/premium split, so
+`thinking_mode` does nothing there. When the preview ends it stops being free
+without warning: watch what `maajun incidents` reports, and switch providers
+if the cost stops reading zero.
 
 Switch at any time — the key for each provider is stored separately, so moving
 back and forth costs nothing:
@@ -248,9 +315,12 @@ maajun config ai.model gpt-4o        # override the default model
 maajun provider-list                 # which providers have a key stored
 ```
 
-Both speak the same `/chat/completions` protocol, so any compatible gateway,
-proxy, or self-hosted server works too — point `ai.base_url` at it, and
-`ai.provider` still selects the request dialect and model defaults.
+Ox Alpha, DeepSeek, and OpenAI all speak `/chat/completions`, so any compatible
+gateway, proxy, or self-hosted server works too — point `ai.base_url` at it,
+and `ai.provider` still selects the request dialect and model defaults.
+Anthropic runs on the Messages API through the official SDK instead, and gets
+an explicit cache breakpoint on every request: without one Anthropic caches
+nothing, and each tool round would re-read the whole prompt at full price.
 
 ## Configuration
 
@@ -269,7 +339,7 @@ A minimal config:
 
 ```toml
 [ai]
-provider = "deepseek"         # or "openai"
+provider = "ox-alpha"         # or "deepseek", "openai", "anthropic"
 # model = "gpt-4o-mini"       # provider default if omitted
 # thinking_mode = true        # use the provider's reasoning model
 
@@ -366,27 +436,49 @@ off part-way.
 Every incident's exact token count and cost is recorded and shown by
 `maajun incidents`, and `--dry-run` prints what an analysis *would* have cost.
 
-Costs are computed from published list prices, in USD per 1M input / output
-tokens:
+The cheapest thing you can do is run on Ox Alpha, which bills nothing at all.
+For the rest, costs are computed from published list prices, in USD per 1M
+tokens. Input is priced three ways: a prompt prefix the provider has seen
+before is re-served from its cache far more cheaply than a fresh one, and
+maajun counts each from the token counts the provider reports.
 
-| Model | Input | Output |
-|---|---|---|
-| `deepseek-v4-flash` | $0.14 | $0.28 |
-| `deepseek-v4-pro` | $0.435 | $0.87 |
-| `gpt-4o-mini` | $0.15 | $0.60 |
-| `gpt-4o` | $2.50 | $10.00 |
+| Model | Input (fresh) | Input (cache hit) | Input (cache write) | Output |
+|---|---|---|---|---|
+| `stealth/ox-alpha` | **free** | **free** | **free** | **free** |
+| `deepseek-v4-flash` | $0.44 | $0.014 | $0.44 | $1.32 |
+| `deepseek-v4-flash-vision-exp` | $0.44 | $0.014 | $0.44 | $1.32 |
+| `deepseek-v4-pro` | $1.32 | $0.044 | $1.32 | $3.96 |
+| `gpt-4o-mini` | $0.15 | $0.075 | $0.15 | $0.60 |
+| `gpt-4o` | $2.50 | $1.25 | $2.50 | $10.00 |
+| `claude-haiku-4-5` | $1.00 | $0.10 | $1.25 | $5.00 |
+| `claude-sonnet-5` | $3.00 | $0.30 | $3.75 | $15.00 |
+| `claude-opus-5` | $5.00 | $0.50 | $6.25 | $25.00 |
+
+Anthropic is the one provider that charges to *write* the cache — 1.25x a
+fresh token — so that column is counted separately rather than assumed free.
+
+The DeepSeek rows are its **peak** rates. Off-peak it charges half of them,
+and maajun applies that automatically from the clock: peak is 01:00–04:00 and
+06:00–10:00 UTC on weekdays, and Saturday and Sunday in Beijing time (UTC+8,
+so from 16:00 UTC Friday) are off-peak all day. OpenAI has no such schedule
+and is never discounted.
+
+Because an investigation resends a growing prompt on every tool round, most
+of its input tokens are cache hits — so the same run costs a fraction of what
+the cache-miss column suggests. `maajun incidents` and `--dry-run` report what
+was actually billed.
 
 On either provider's default model a single analysis costs cents, not dollars —
 but measure your own workload with `--dry-run` rather than trusting an
 estimate. Rates change; verify them against
-[DeepSeek](https://api-docs.deepseek.com/quick_start/pricing) or
-[OpenAI](https://developers.openai.com/api/docs/pricing) before relying on the
+[DeepSeek](https://api-docs.deepseek.com/quick_start/pricing),
+[OpenAI](https://developers.openai.com/api/docs/pricing),
+[Anthropic](https://docs.claude.com/en/docs/about-claude/pricing), or
+[OpenRouter](https://openrouter.ai/stealth/ox-alpha) before relying on the
 cap. A model with no entry is costed at the most expensive rate in the table
-above, so the cap errs towards stopping early rather than overshooting.
-
-DeepSeek bills cached input at a fraction of these rates. Maajun costs every
-input token at the cache-miss rate, so a repetitive workload will report
-somewhat more than it actually spends.
+above, with no cache discount and no off-peak discount, so the cap errs
+towards stopping early rather than overshooting. The same goes for a gateway
+that reports no cache hits: every input token is charged at the miss rate.
 
 ## Security model
 

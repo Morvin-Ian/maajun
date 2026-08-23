@@ -20,7 +20,23 @@ a dependency version) rather than inventing a cause.
 REPORT_FORMAT = """\
 Respond with ONLY a markdown report in this format, and nothing else:
 
-# <one-line summary: the exception and where it happens>
+# <one line: the defect and the file it is in>
+
+## Verdict
+<`defect` or `by design`, then one line saying why.
+
+"by design" means the code did exactly what it was built to do and there is
+nothing to fix: input that failed validation, a login that was refused, a
+rate limiter or a quota or a paywall turning a request away, a guard clause
+rejecting a state it is meant to reject. The error is how that refusal is
+reported, not evidence of a bug. Read the code that raised it — if the
+refusal is deliberate and the caller is handling it, say so and stop.
+
+Say "defect" when the guard itself is wrong, when nothing was meant to catch
+this, or when you cannot tell. A guard that fires on input that should have
+been accepted is a defect. So is one whose refusal escapes as an unhandled
+500 — the check was intended, crashing on it was not. Do not use "by design"
+to avoid a hard investigation.>
 
 ## What happened
 <what a user of this app experienced, and what the code did. 2-4 sentences.>
@@ -40,7 +56,27 @@ written. One or two lines.>
 ## Suggested fix
 <the change, as a diff or code block against the real file. Minimal and
 targeted — no refactoring, no unrelated cleanup. Add the regression test
-that would have caught it.>
+that would have caught it. Write "None — working as intended" when the
+verdict is "by design".>
+
+A "by design" report is not filed anywhere — the sections below still get
+filled in, but briefly, and the run stops at the verdict.
+
+The first line becomes the title of the issue or pull request, so it has to
+name the same defect as "Root cause" and the same file as "Suggested fix" —
+not the exception in the log, when the two are in different places. A reader
+who sees only the title should already know what the change is.
+
+Write it as the defect, not the symptom:
+
+- "KeyError on cart totals when no promotion matched" — no. That is the log
+  line; it says nothing about what to change.
+- "cart/totals.py assumes promotions.apply() always writes a discount key" —
+  yes. It names the wrong assumption and the file the fix lands in.
+
+If the fix turns out to be outside the code, title it that way — "SMTP_HOST
+is unset in the production environment" — rather than by the traceback it
+surfaced as.
 """
 
 ANALYZE_PROMPT = """\
@@ -111,6 +147,8 @@ edit is a wasted run.
 - If the right fix is genuinely outside this repository (an environment
   variable, a dependency bug, infrastructure), make no edit and say so under
   "## Applied fix".
+- If the verdict is "by design", change nothing. There is no bug to fix, and
+  an edit that silences a working guard is a regression.
 
 Finish with the report, plus:
 
@@ -143,5 +181,6 @@ RETRY_SUFFIX = """
 Your previous answer was not a usable report: {problem}
 
 Answer again with the full markdown report described above, filled in from
-the code you read. Do not apologize or explain — output the report only.
+the code you read, starting with the one-line summary that names the defect
+and its file. Do not apologize or explain — output the report only.
 """

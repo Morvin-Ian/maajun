@@ -1,26 +1,38 @@
+from datetime import UTC, datetime
+
 from maajun.providers.pricing import compute_cost, extract_usage
+
+# DeepSeek bills by the clock, so every cost assertion pins the hour.
+# 2026-08-20 is a Thursday; 2026-08-22 a Saturday.
+PEAK = datetime(2026, 8, 20, 2, 0, tzinfo=UTC)
+OFF_PEAK = datetime(2026, 8, 20, 12, 0, tzinfo=UTC)
 
 
 def test_compute_cost_deepseek_v4_flash():
     cost = compute_cost(
-        prompt_tokens=1_000_000, completion_tokens=1_000_000, model="deepseek-v4-flash"
+        prompt_tokens=1_000_000, completion_tokens=1_000_000,
+        model="deepseek-v4-flash", at=PEAK,
     )
-    # $0.14 input + $0.28 output = $0.42
-    assert abs(cost - 0.42) < 0.001
+    # $0.44 input + $1.32 output = $1.76
+    assert abs(cost - 1.76) < 0.001
 
 
 def test_compute_cost_deepseek_v4_pro():
     cost = compute_cost(
-        prompt_tokens=1_000_000, completion_tokens=1_000_000, model="deepseek-v4-pro"
+        prompt_tokens=1_000_000, completion_tokens=1_000_000,
+        model="deepseek-v4-pro", at=PEAK,
     )
-    # $0.435 input + $0.87 output = $1.305
-    assert abs(cost - 1.305) < 0.001
+    # $1.32 input + $3.96 output = $5.28
+    assert abs(cost - 5.28) < 0.001
 
 
 def test_compute_cost_small_amount():
-    cost = compute_cost(prompt_tokens=1000, completion_tokens=500, model="deepseek-v4-flash")
-    # (1000/1M)*0.14 + (500/1M)*0.28 = 0.00014 + 0.00014 = 0.00028
-    assert abs(cost - 0.00028) < 0.00001
+    cost = compute_cost(
+        prompt_tokens=1000, completion_tokens=500,
+        model="deepseek-v4-flash", at=PEAK,
+    )
+    # (1000/1M)*0.44 + (500/1M)*1.32 = 0.00044 + 0.00066 = 0.0011
+    assert abs(cost - 0.0011) < 0.00001
 
 
 def test_compute_cost_zero_tokens():
@@ -60,9 +72,8 @@ def test_extract_usage_uses_model_pricing():
     usage = {"prompt_tokens": 1_000_000, "completion_tokens": 1_000_000}
     _, _, flash_cost = extract_usage(usage, "deepseek-v4-flash")
     _, _, pro_cost = extract_usage(usage, "deepseek-v4-pro")
-    assert flash_cost == compute_cost(1_000_000, 1_000_000, "deepseek-v4-flash")
-    assert pro_cost == compute_cost(1_000_000, 1_000_000, "deepseek-v4-pro")
     assert pro_cost > flash_cost
+    assert pro_cost / flash_cost == 3
 
 
 def test_an_unnamed_model_is_costed_at_the_dearest_rate():
@@ -144,22 +155,222 @@ def test_the_default_rate_is_above_every_known_model():
 
 
 def test_the_thinking_model_costs_more_than_the_default_one():
-    """If these ever invert, thinking_mode has stopped being the premium path."""
+    """If these ever invert, thinking_mode has stopped being the premium path.
+
+    Ox is exempt: one free model serves both, so there is nothing to invert.
+    """
+    from maajun.providers.anthropic import AnthropicProvider
     from maajun.providers.deepseek import DeepSeekProvider
     from maajun.providers.openai import OpenAIProvider
 
-    for provider in (DeepSeekProvider, OpenAIProvider):
-        cheap = compute_cost(1_000_000, 1_000_000, provider.default_model)
-        premium = compute_cost(1_000_000, 1_000_000, provider.thinking_model)
-        assert premium > cheap
+    for provider in (DeepSeekProvider, OpenAIProvider, AnthropicProvider):
+        cheap = compute_cost(1_000_000, 1_000_000, provider.default_model, at=PEAK)
+        premium = compute_cost(1_000_000, 1_000_000, provider.thinking_model, at=PEAK)
+        assert premium > cheap, provider.name
 
 
 def test_every_shipped_model_has_a_price():
     """A provider default with no entry would silently fall back to guesswork."""
-    from maajun.providers.deepseek import DeepSeekProvider
-    from maajun.providers.openai import OpenAIProvider
+    from maajun.providers.factory import ProviderFactory
     from maajun.providers.pricing import PRICING
 
-    for provider in (DeepSeekProvider, OpenAIProvider):
-        assert provider.default_model in PRICING
-        assert provider.thinking_model in PRICING
+    for provider in ProviderFactory.providers.values():
+        assert provider.default_model in PRICING, provider.name
+        assert provider.thinking_model in PRICING, provider.name
+
+
+# ---------------------------------------------------------------------------
+# Cached prompt tokens
+# ---------------------------------------------------------------------------
+
+
+def test_cache_hits_are_billed_at_the_cache_hit_rate():
+    """A resent prefix is a thirtieth of the price on DeepSeek; costing it in
+    full made a long tool loop look several times dearer than the invoice."""
+    fresh = compute_cost(1_000_000, 0, "deepseek-v4-flash", at=PEAK)
+    cached = compute_cost(
+        1_000_000, 0, "deepseek-v4-flash", cached_tokens=1_000_000, at=PEAK
+    )
+    assert abs(fresh - 0.44) < 0.001
+    assert abs(cached - 0.014) < 0.001
+
+
+def test_a_partly_cached_prompt_splits_between_the_two_rates():
+    cost = compute_cost(
+        1_000_000, 0, "deepseek-v4-flash", cached_tokens=750_000, at=PEAK
+    )
+    assert abs(cost - (0.25 * 0.44 + 0.75 * 0.014)) < 0.000_001
+
+
+def test_more_cache_hits_than_prompt_tokens_does_not_go_negative():
+    """Believing a provider that over-reports would refund the caller."""
+    cost = compute_cost(
+        1000, 0, "deepseek-v4-flash", cached_tokens=999_999, at=PEAK
+    )
+    assert cost == compute_cost(
+        1000, 0, "deepseek-v4-flash", cached_tokens=1000, at=PEAK
+    )
+    assert cost > 0
+
+
+def test_extract_usage_reads_the_providers_cache_hit_count():
+    plain = {"prompt_tokens": 1_000_000, "completion_tokens": 0}
+    hit = {**plain, "cached_tokens": 1_000_000}
+    _, _, uncached_cost = extract_usage(plain, "deepseek-v4-flash")
+    _, _, cached_cost = extract_usage(hit, "deepseek-v4-flash")
+    assert cached_cost < uncached_cost
+
+
+def test_a_provider_that_reports_no_cache_is_charged_in_full():
+    """Absent is not zero, but both are billed the same: at the miss rate."""
+    usage = {"prompt_tokens": 1_000_000, "completion_tokens": 0}
+    _, _, cost = extract_usage(usage, "deepseek-v4-flash")
+    assert cost == compute_cost(1_000_000, 0, "deepseek-v4-flash")
+
+
+def test_every_model_has_a_cache_hit_rate_at_or_below_its_miss_rate():
+    """Equal only where both are zero — a free model."""
+    from maajun.providers.pricing import PRICING
+
+    for model, rates in PRICING.items():
+        assert rates["cached_input"] <= rates["input"], model
+
+
+# ---------------------------------------------------------------------------
+# Peak and off-peak
+# ---------------------------------------------------------------------------
+
+
+def test_deepseek_off_peak_is_half_price():
+    peak = compute_cost(1_000_000, 1_000_000, "deepseek-v4-flash", at=PEAK)
+    off = compute_cost(1_000_000, 1_000_000, "deepseek-v4-flash", at=OFF_PEAK)
+    assert abs(off - peak / 2) < 0.000_001
+
+
+def test_the_peak_windows_are_read_in_utc():
+    from maajun.providers.pricing import is_peak
+
+    thursday = datetime(2026, 8, 20, tzinfo=UTC)
+    peak_hours = {hour for hour in range(24) if is_peak(thursday.replace(hour=hour))}
+    assert peak_hours == {1, 2, 3, 6, 7, 8, 9}
+
+
+def test_weekends_are_off_peak_all_day():
+    """Saturday and Sunday are exempt, even inside a peak window."""
+    from maajun.providers.pricing import is_peak
+
+    saturday = datetime(2026, 8, 22, 2, 0, tzinfo=UTC)
+    assert is_peak(saturday.replace(day=20))  # the Thursday before, same hour
+    assert not is_peak(saturday)
+
+
+def test_the_weekend_is_read_in_beijing_time_not_utc():
+    """DeepSeek states the exemption in UTC+8, which starts 16:00 UTC Friday."""
+    from maajun.providers.pricing import is_peak
+
+    # Monday 00:30 Beijing is still Sunday 16:30 UTC: off-peak.
+    assert not is_peak(datetime(2026, 8, 23, 16, 30, tzinfo=UTC))
+    # Monday 10:00 Beijing is Monday 02:00 UTC: a peak hour on a weekday.
+    assert is_peak(datetime(2026, 8, 24, 2, 0, tzinfo=UTC))
+
+
+def test_a_naive_timestamp_is_read_as_utc():
+    from maajun.providers.pricing import is_peak
+
+    assert is_peak(datetime(2026, 8, 20, 2, 0))
+
+
+def test_openai_is_not_discounted_off_peak():
+    """The schedule is DeepSeek's; applying it to OpenAI would under-report."""
+    peak = compute_cost(1_000_000, 1_000_000, "gpt-4o", at=PEAK)
+    off = compute_cost(1_000_000, 1_000_000, "gpt-4o", at=OFF_PEAK)
+    assert peak == off
+
+
+def test_an_unknown_model_is_never_discounted_off_peak():
+    """Both the discount and the cache rate are claims about a model we could
+    not identify; the cap must not take either on trust."""
+    peak = compute_cost(1_000_000, 1_000_000, "who-knows", at=PEAK)
+    off = compute_cost(1_000_000, 1_000_000, "who-knows", at=OFF_PEAK)
+    assert peak == off
+
+
+def test_the_vision_model_is_priced():
+    from maajun.providers.pricing import DEFAULT_PRICING, PRICING, pricing_for
+
+    assert pricing_for("deepseek-v4-flash-vision-exp", PEAK) is not DEFAULT_PRICING
+    assert (
+        pricing_for("deepseek-v4-flash-vision-exp", PEAK)
+        == PRICING["deepseek-v4-flash-vision-exp"]
+    )
+
+
+# ---------------------------------------------------------------------------
+# Ox Alpha, Anthropic
+# ---------------------------------------------------------------------------
+
+
+def test_ox_alpha_costs_nothing():
+    """The whole reason it is offered first."""
+    assert compute_cost(10_000_000, 10_000_000, "stealth/ox-alpha", at=PEAK) == 0.0
+
+
+def test_a_free_model_is_still_costed_from_the_table_not_special_cased():
+    from maajun.providers.pricing import DEFAULT_PRICING, pricing_for
+
+    assert pricing_for("stealth/ox-alpha", PEAK) is not DEFAULT_PRICING
+
+
+def test_anthropic_charges_a_premium_to_write_the_cache():
+    """Reads are a tenth of a fresh token, writes 1.25x. Costing a write as
+    fresh under-reports, which is the direction the cap must not fail in."""
+    fresh = compute_cost(1_000_000, 0, "claude-haiku-4-5", at=PEAK)
+    written = compute_cost(
+        1_000_000, 0, "claude-haiku-4-5", cache_write_tokens=1_000_000, at=PEAK
+    )
+    read = compute_cost(
+        1_000_000, 0, "claude-haiku-4-5", cached_tokens=1_000_000, at=PEAK
+    )
+    assert abs(fresh - 1.00) < 0.001
+    assert abs(written - 1.25) < 0.001
+    assert abs(read - 0.10) < 0.001
+
+
+def test_a_prompt_splits_three_ways_between_fresh_cached_and_written():
+    cost = compute_cost(
+        1_000_000, 0, "claude-haiku-4-5",
+        cached_tokens=600_000, cache_write_tokens=300_000, at=PEAK,
+    )
+    expected = 0.1 * 1.00 + 0.6 * 0.10 + 0.3 * 1.25
+    assert abs(cost - expected) < 0.000_001
+
+
+def test_cache_writes_are_clamped_into_the_prompt():
+    """Cached plus written can be over-reported past the prompt total; the
+    fresh remainder must not go negative."""
+    cost = compute_cost(
+        1000, 0, "claude-haiku-4-5",
+        cached_tokens=900, cache_write_tokens=9_999, at=PEAK,
+    )
+    assert cost == compute_cost(
+        1000, 0, "claude-haiku-4-5",
+        cached_tokens=900, cache_write_tokens=100, at=PEAK,
+    )
+
+
+def test_extract_usage_reads_the_cache_write_count():
+    usage = {
+        "prompt_tokens": 1_000_000,
+        "completion_tokens": 0,
+        "cache_write_tokens": 1_000_000,
+    }
+    _, _, cost = extract_usage(usage, "claude-haiku-4-5")
+    assert cost > compute_cost(1_000_000, 0, "claude-haiku-4-5")
+
+
+def test_a_provider_with_no_cache_write_rate_pays_the_fresh_rate():
+    """Only Anthropic bills for the write; everyone else stores for nothing."""
+    from maajun.providers.pricing import PRICING
+
+    for model in ("deepseek-v4-flash", "gpt-4o", "gpt-4o-mini", "deepseek-v4-pro"):
+        assert PRICING[model]["cache_write"] == PRICING[model]["input"]

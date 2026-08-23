@@ -25,6 +25,7 @@ from maajun.cli.shared import (
     implemented_providers,
     load_config,
     prompt_mode,
+    provider_choices,
 )
 from maajun.cli.status_checks import build_status
 from maajun.config import Config, RepoConfig, default_config_path
@@ -36,8 +37,10 @@ from maajun.utils import is_valid_repo, qualify
 from maajun.vcs.gh import account_login, gh_account, ssh_works
 
 PROVIDER_SIGNUP_URLS = {
+    "ox-alpha": "https://openrouter.ai/settings/keys",
     "deepseek": "https://platform.deepseek.com",
     "openai": "https://platform.openai.com/api-keys",
+    "anthropic": "https://console.anthropic.com/settings/keys",
 }
 
 GITHUB_TOKEN_URL = "https://github.com/settings/personal-access-tokens"
@@ -94,7 +97,7 @@ def setup_provider(
         )
         raise typer.Exit(1)
     if len(implemented) > 1 and not requested:
-        provider = ask.text(f"AI provider ({'/'.join(implemented)})", provider)
+        provider = ask.text(f"AI provider ({'/'.join(provider_choices())})", provider)
         if provider not in implemented:
             console.print(f"[red]✗ Unknown provider {provider!r}.[/red]")
             raise typer.Exit(1)
@@ -105,6 +108,11 @@ def setup_provider(
 
     say_where_credentials_go()
 
+    if ProviderFactory.is_free(provider):
+        console.print(
+            "  [dim]This model is free — the key is only how OpenRouter "
+            "identifies you.[/dim]"
+        )
     signup = PROVIDER_SIGNUP_URLS.get(provider)
     if signup:
         console.print(f"  [dim]Get a key at {signup}[/dim]")
