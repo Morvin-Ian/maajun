@@ -641,7 +641,12 @@ repositories share one.
 Each processed incident records the prompt/completion token counts and
 the USD cost of its analysis in `incidents.db` (`prompt_tokens`,
 `completion_tokens`, `cost_usd` columns), priced by the model that
-actually ran. The cost is also logged when the PR opens, and `--dry-run`
+actually ran. Prompt tokens the provider served from its prefix cache are
+priced at its cache-hit rate rather than in full — most of an
+investigation's input, since every tool round resends a growing prefix —
+and DeepSeek's off-peak half price is applied from the clock. The
+`prompt_tokens` column is the total either way; only `cost_usd` reflects
+the split. The cost is also logged when the PR opens, and `--dry-run`
 logs what an analysis would have cost. To audit spend:
 
 ```bash
