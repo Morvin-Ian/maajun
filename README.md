@@ -133,6 +133,14 @@ detected and analyzed, but each report is written to
    that comes back blank is re-asked once, then abandoned as a failed
    incident rather than filed as an empty issue.
 
+The issue, the pull request, and the commit are all titled from the report's
+own one-line finding — not from the log line that triggered the run. An
+exception surfaces in one place and the defect is regularly in another, so
+`KeyError: 'discount'` would send a reader to the file that raised rather
+than the file that has to change. Titling from the analysis keeps the name of
+a bug and the fix for it pointing at the same thing. `--dry-run` prints the
+title it would file, so a mismatch is visible before anything is published.
+
 Each incident records its token count and cost, viewable with
 `maajun incidents`.
 
@@ -140,7 +148,48 @@ Each incident records its token count and cost, viewable with
 
 The shape of a filed issue, abridged:
 
-> ### \[maajun] KeyError: 'discount'
+> ### \[maajun] cart/totals.py assumes promotions.apply() always writes a discount
+>
+> **What happened** — Checkout raised an unhandled `KeyError` for carts created
+> before a promotion was attached. 41 requests hit it in 12 minutes; every one
+> returned a 500 at the payment step.
+>
+> **Root cause** — `cart/totals.py:88` reads `cart["discount"]` directly. The
+> key is only written by `promotions.apply()` (`cart/promotions.py:23`), which
+> returns early when no promotion matches — so the key is absent rather than
+> zero.
+>
+> **Likely cause commit** — `4f1c9ab` *"only apply promotions when one
+> matches"*, which added that early return.
+>
+> **Suggested fix**
+>
+> ```python
+> -    discount = cart["discount"]
+> +    discount = cart.get("discount", Decimal("0"))
+> ```
+>
+> Source: `logfile:/var/log/shop/error.log` · First seen:
+> `2026-08-03T03:14:22Z` · Fingerprint: `9f3c1ab77e02d418`
+
+In `fix` mode the same analysis arrives as a pull request: the applied diff, the
+report committed as `docs/incidents/<fingerprint>.md`, and your test suite's
+verdict at the top of the body.
+
+> ✅ **Tests pass** — `pytest -q`
+
+A failing suite (`❌ Tests fail (exit 1)`) still opens the PR — a fix that
+breaks the tests is exactly what a reviewer needs to see.
+
+
+Each incident records its token count and cost, viewable with
+`maajun incidents`.
+
+### Example report
+
+The shape of a filed issue, abridged:
+
+> ### \[maajun] cart/totals.py assumes promotions.apply() always writes a discount
 >
 > **What happened** — Checkout raised an unhandled `KeyError` for carts created
 > before a promotion was attached. 41 requests hit it in 12 minutes; every one

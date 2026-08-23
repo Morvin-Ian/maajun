@@ -20,7 +20,7 @@ a dependency version) rather than inventing a cause.
 REPORT_FORMAT = """\
 Respond with ONLY a markdown report in this format, and nothing else:
 
-# <one-line summary: the exception and where it happens>
+# <one line: the defect and the file it is in>
 
 ## What happened
 <what a user of this app experienced, and what the code did. 2-4 sentences.>
@@ -41,6 +41,22 @@ written. One or two lines.>
 <the change, as a diff or code block against the real file. Minimal and
 targeted — no refactoring, no unrelated cleanup. Add the regression test
 that would have caught it.>
+
+The first line becomes the title of the issue or pull request, so it has to
+name the same defect as "Root cause" and the same file as "Suggested fix" —
+not the exception in the log, when the two are in different places. A reader
+who sees only the title should already know what the change is.
+
+Write it as the defect, not the symptom:
+
+- "KeyError on cart totals when no promotion matched" — no. That is the log
+  line; it says nothing about what to change.
+- "cart/totals.py assumes promotions.apply() always writes a discount key" —
+  yes. It names the wrong assumption and the file the fix lands in.
+
+If the fix turns out to be outside the code, title it that way — "SMTP_HOST
+is unset in the production environment" — rather than by the traceback it
+surfaced as.
 """
 
 ANALYZE_PROMPT = """\
@@ -143,5 +159,6 @@ RETRY_SUFFIX = """
 Your previous answer was not a usable report: {problem}
 
 Answer again with the full markdown report described above, filled in from
-the code you read. Do not apologize or explain — output the report only.
+the code you read, starting with the one-line summary that names the defect
+and its file. Do not apologize or explain — output the report only.
 """

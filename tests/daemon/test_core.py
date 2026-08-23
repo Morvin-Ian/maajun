@@ -459,7 +459,9 @@ async def test_manual_report_opens_pr_and_reports_progress(setup):
     assert phases == ["Preparing workspace", "Analyzing with AI", "Filing issue"]
     assert url.endswith("/issues/1")
     assert "Checkout button" in agent.prompts[0]
-    assert "Checkout button" in github.issues[0]["title"]
+    # Titled from the report's finding, not from how the issue was described:
+    # what the analysis says to fix is what the issue is called.
+    assert github.issues[0]["title"] == "[maajun] IndexError in handler"
 
 
 async def test_manual_report_dry_run_only_analyzes(setup):
