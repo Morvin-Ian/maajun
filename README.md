@@ -180,7 +180,10 @@ The shape of a filed issue, abridged:
 
 In `fix` mode the same analysis arrives as a pull request: the applied diff, the
 report committed as `docs/incidents/<fingerprint>.md`, and your test suite's
-verdict at the top of the body.
+verdict at the top of the body. A run that writes the report but changes no
+code is asked once more for the edit — a pull request with nothing in it is
+nothing to review — and only opens analysis-only when there is genuinely no
+file in the repository that should differ.
 
 > ✅ **Tests pass** — `pytest -q`
 
