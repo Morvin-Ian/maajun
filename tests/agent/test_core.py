@@ -5,6 +5,7 @@ from maajun.agent.core import (
     MAX_REQUEST_CHARS,
     TRIM_TARGET_CHARS,
     Agent,
+    message_size,
     trim_request_messages,
 )
 from maajun.config import AIProviderConfig, Config
@@ -223,3 +224,57 @@ def test_a_request_between_the_target_and_the_ceiling_is_left_alone():
     before = list(messages)
     trim_request_messages(messages)
     assert messages == before
+
+
+def test_trim_never_drops_the_standing_brief():
+    """The brief carries the error, the rules and the report format. Dropped
+    mid-loop, the model answers conversationally and the run pays for a
+    re-ask."""
+    brief = "Investigate this traceback. " + "b" * 5_000
+    filler = "z" * 40_000
+    calls = [{"id": "c1", "function": {"name": "grep", "arguments": "{}"}}]
+    messages = [msg("system", "sys"), msg("user", brief)]
+    for _ in range(8):
+        messages.append(msg("assistant", "", calls))
+        messages.append(msg("tool", filler))
+
+    trim_request_messages(messages)
+
+    assert messages[1]["content"] == brief
+    assert sum(message_size(m) for m in messages) <= TRIM_TARGET_CHARS
+
+
+def test_trim_keeps_the_instruction_the_round_is_answering():
+    """The re-ask, the insistence, the repair: the last user message is the
+    whole point of the request."""
+    filler = "z" * 40_000
+    calls = [{"id": "c1", "function": {"name": "grep", "arguments": "{}"}}]
+    messages = [msg("system", "sys"), msg("user", "brief")]
+    for _ in range(6):
+        messages.append(msg("assistant", "", calls))
+        messages.append(msg("tool", filler))
+    messages.append(msg("user", "Fix your own fix."))
+
+    trim_request_messages(messages)
+
+    assert messages[1]["content"] == "brief"
+    assert messages[-1]["content"] == "Fix your own fix."
+
+
+def test_trim_leaves_no_orphan_tool_result_in_the_middle():
+    """Cutting from the middle can strand a result next to a pinned message,
+    and the API rejects it just the same."""
+    filler = "z" * 45_000
+    calls = [{"id": "c1", "function": {"name": "grep", "arguments": "{}"}}]
+    messages = [msg("system", "sys"), msg("user", "brief")]
+    for _ in range(6):
+        messages.append(msg("assistant", "", calls))
+        messages.append(msg("tool", filler))
+    messages.append(msg("user", "and now?"))
+
+    trim_request_messages(messages)
+
+    for index, message in enumerate(messages):
+        if message["role"] == "tool":
+            earlier = [m for m in messages[:index] if m["role"] != "tool"]
+            assert earlier and earlier[-1].get("tool_calls")
