@@ -5,8 +5,13 @@ exception surfaces in one place and the defect is regularly in another, so an
 issue called `KeyError: 'discount'` would send a reader to the wrong file.
 """
 
-from maajun.daemon.core import headline_problem
-from maajun.daemon.reports import artifact_title, commit_subject, headline
+from maajun.daemon.reports import (
+    artifact_title,
+    commit_subject,
+    extract_patches,
+    headline,
+    headline_problem,
+)
 
 REPORT = """# cart/totals.py assumes promotions.apply() always writes a discount
 
@@ -131,3 +136,66 @@ def test_a_dry_run_shows_the_title_it_would_file(capsys):
     )
     out = capsys.readouterr().out
     assert "Would be titled: [maajun] cart/totals.py assumes" in out
+
+
+# ---------------------------------------------------------------------------
+# Reading the patch back out of the report
+# ---------------------------------------------------------------------------
+
+MAIN_PY_PATCH = """```diff
+--- a/main.py
++++ b/main.py
+@@ -1 +1 @@
+-items = []
++items = [0]
+```"""
+
+
+def test_a_tagged_diff_fence_is_extracted_whole():
+    report = REPORT + "\n\n" + MAIN_PY_PATCH
+
+    patches = extract_patches(report)
+
+    assert len(patches) == 1
+    assert patches[0].startswith("--- a/main.py")
+    # git apply wants the trailing newline a trimmed fence loses.
+    assert patches[0].endswith("+items = [0]\n")
+
+
+def test_an_untagged_patch_is_still_found():
+    block = MAIN_PY_PATCH.replace("```diff", "```")
+    assert extract_patches(REPORT + "\n" + block) != []
+
+
+def test_a_new_file_patch_is_recognized():
+    block = """```
+--- /dev/null
++++ b/handlers/cart.py
+@@ -0,0 +1 @@
++def total(cart): ...
+```"""
+    assert len(extract_patches(block)) == 1
+
+
+def test_multiple_patches_come_out_in_order():
+    second = MAIN_PY_PATCH.replace("main.py", "totals.py")
+    patches = extract_patches(MAIN_PY_PATCH + "\n" + second)
+    assert [p.splitlines()[0] for p in patches] == [
+        "--- a/main.py", "--- a/totals.py",
+    ]
+
+
+def test_prose_and_code_blocks_are_never_patches():
+    """A block that merely shows before/after lines must not reach git."""
+    prose = "```\nThe fix is to guard the access in main.py.\n```"
+    code = """```python
+-items = []
++items = [0]
+```"""
+    assert extract_patches(prose) == []
+    assert extract_patches(code) == []
+
+
+def test_a_report_without_fences_yields_nothing():
+    assert extract_patches(REPORT) == []
+    assert extract_patches("") == []
