@@ -218,53 +218,89 @@ maajun/
    `PermissionDenied`, `429 Too Many Requests`, …) plus anything in
    `monitor.ignore_patterns`. A match closes the incident as `ignored` with
    its reason and never reaches the agent, so it costs nothing. The pass is
-   narrow on purpose: anything needing to know the application belongs to
-   the verdict in step 6, not here. `monitor.ignore_by_design = false` turns
-   it off. Nothing is deleted — the row stays, which is also what stops the
-   same error being re-examined on every poll.
-4. **Analyze** — for a new fingerprint, the daemon syncs an isolated
+   narrow on purpose: it can only recognise an error named after its own
+   intent. `monitor.ignore_by_design = false` turns it off. Nothing is
+   deleted — the row stays, which is also what stops the same error being
+   re-examined on every poll.
+4. **Screen** — what the signatures cannot recognise gets one tool-less
+   question, against the provider's cheap tier: `investigate`, or
+   `by design: <reason>`. It exists because the pass that catches a guard
+   particular to *this* application — the paywall, the feature flag, the plan
+   check — used to be the agent's verdict on a finished report (step 8), and
+   reaching that costs a whole investigation, every tool round of it, to file
+   nothing at the end. `daemon.screen_errors = false` turns it off, and
+   `ai.triage_model` pins the model. It fails open in every direction: an
+   error, an unparseable answer, or any doubt in the answer itself means the
+   error is investigated. What it spends is banked against the incident
+   either way, so the daily cap sees it. Manual reports (`maajun report`) are
+   never screened — somebody took the time to describe the issue.
+5. **Analyze** — for a new fingerprint, the daemon syncs an isolated
    clone of the event's repo, creates a branch
    `maajun/incident-<fingerprint>`, and asks the agent to investigate.
    The agent reads the code with its safe tools and writes a structured
-   report (what happened / root cause / likely cause commit / suggested
-   fix) — the last few commits on the base branch are handed to it so the
+   report (what happened / root cause / likely cause commit / the fix) — the
+   last few commits on the base branch are handed to it so the
    report can name the deploy that probably introduced the error. In fix mode it
    may also edit files in the clone. The clone is synced in both modes —
    the agent reads the code from it — but only fix mode branches. In a
    [multi-repo](monitoring.md#multiple-repositories) config each monitor
    is bound to a repo, so its errors are analyzed against — and open PRs
    on — the right one, each with its own clone, branch, and mode.
-5. **Insist on the edit** — fix mode that produced a report and no diff is
+   `prompts.report_format` picks the fix section the mode calls for: suggest
+   mode is asked for "## Suggested fix", a proposal with a diff in it, and
+   fix mode for "## Applied fix" — what it already changed, in the past
+   tense, with no diff pasted back — plus "## Follow-up" for what it left
+   alone. Asking fix mode for a suggestion is what made its pull requests
+   read as suggestions, and it billed the diff twice: once as the edit, again
+   as prose, on the dearer half of the bill.
+6. **Insist on the edit** — fix mode that produced a report and no diff is
    asked once more. A pull request with nothing in it publishes nothing
    anyone can review, and the usual cause is the escape hatch in
    `FIX_PROMPT_SUFFIX` — "the right fix is outside this repository" — being
    taken for a finding that does have an in-repo fix. An environment
    variable no settings module defaults and no example env file documents is
-   a change to the repository, not an exemption from one. The second answer
-   replaces the report only if it is usable, so a model that edits the files
-   and replies "done" does not cost the analysis. Suggest mode, dry runs and
-   local mode are never asked: none of them has a branch to diff. A run that
-   still changes nothing files an **issue** instead of a pull request — the
-   report file used to be committed so there was always a diff to review, but
-   that shipped pull requests that look like fixes until the Files tab says
-   otherwise. `issue_body(unfixed=True)` marks it so it is not read as
-   suggest mode.
-6. **Check the report** — a blank answer, or one with none of the report's
+   a change to the repository, not an exemption from one.
+
+   The free attempt comes first: `reports.extract_patches` reads the unified
+   diffs out of the report and `GitWorkspace.apply_patches` applies them,
+   costing no model round at all. A model that described the change instead
+   of making it has usually left the exact patch behind, and insisting is a
+   whole round with the investigation's tool history resent — the dearest
+   ask in the run. Only a report with no patch in it earns one. The patches
+   go to a single `git apply`, as one stream, because that is what makes the
+   all-or-none real: checking them one at a time passes two fences that both
+   fit the pristine tree and then fails halfway through applying the second
+   on top of the first, which is what a fix plus its regression test looks
+   like.
+
+   The second answer replaces the report only if it is usable, so a model
+   that edits the files and replies "done" does not cost the analysis, and
+   the insistence asks for a `diff` fence if the tools keep refusing — the
+   one place a diff belongs in a fix-mode report. Suggest mode, dry runs and
+   local mode are never asked: none of them has a branch to diff. Only a run
+   with neither an edit nor an applicable patch files an **issue** instead of
+   a pull request — the report file used to be committed so there was always
+   a diff to review, but that shipped pull requests that look like fixes
+   until the Files tab says otherwise. `issue_body(unfixed=True)` marks it so
+   it is not read as suggest mode.
+7. **Check the report** — a blank answer, or one with none of the report's
    sections, is asked for once more and then abandoned: no issue, no PR,
    the incident marked failed. An empty artifact costs the reader more than
    it gives and hides that the run went wrong. A report with no one-line
    summary earns the same re-ask but never the abandonment: that is
    `headline_problem`, soft where `report_problem` is a gate, because a good
    analysis is worth more than a missing heading.
-7. **Read the verdict** — every report opens with `defect` or `by design`.
+8. **Read the verdict** — every report opens with `defect` or `by design`.
    `reports.verdict` parses it, and `by design` stops the run: nothing is
    published, the incident is closed as `ignored` with the agent's own
    reason, and what the analysis cost is banked with `add_spend` because the
-   round was billed either way. This is the pass that recognises a guard
-   particular to the codebase, since the agent has read the code that
-   raised. An absent or unparseable verdict is treated as a defect — silence
+   round was billed either way. This is the last of the three by-design
+   passes and the only one that has read the code that raised — the
+   signatures (step 3) know an error named after its intent, the screen
+   (step 4) judges what the error says about itself, and this one knows the
+   application. An absent or unparseable verdict is treated as a defect — silence
    must never suppress a report.
-8. **Title it from the finding** — `reports.artifact_title` reads the
+9. **Title it from the finding** — `reports.artifact_title` reads the
    report's own first heading and titles the issue, the pull request, and
    the commit with it, falling back to the raw error only when there is no
    usable heading. The alternative, titling from the log line, names the
@@ -274,23 +310,39 @@ maajun/
    a section name because the model skipped the summary, is treated as
    absent. The commit subject is built from the same headline, so `git log`
    and the pull request cannot disagree.
-9. **Publish** — depends on the repo's [mode](monitoring.md#modes). In
+10. **Publish** — depends on the repo's [mode](monitoring.md#modes). In
    `suggest` mode the report is filed as a GitHub **issue**: no branch, no
    commit, no push, because there is no diff to review. In `fix` mode the
    repo's `test_command` (if set) is run in the workspace first and its
    verdict is put at the top of the PR body — it comes from config, not from
-   the model, since the agent has no shell access. The report is then
-   committed as `docs/incidents/<fingerprint>.md` alongside the
-   agent's edits, the branch is pushed, and a **pull request** is opened
-   with the report as its body — reusing an existing PR for the branch
-   rather than duplicating it. Fix mode always ends in a PR: when the agent
-   changed no code, the committed report is the diff and the body says so,
-   so the finding still lands in one reviewable place. With no
+   the model, since the agent has no shell access. A suite that ran and
+   failed earns one repair round — but only a failure this run caused. The
+   agent has no shell, so it cannot tell its own breakage from a suite that
+   was already red; `blames_our_edits` asks the output instead, and a failure
+   that names none of the changed files is reported in the PR body as
+   pre-existing rather than paid for. When it is ours, the failing output is
+   pasted back with `FAILED_TESTS_SUFFIX` — tail first, because a runner
+   prints what failed last — and the command runs a second and final time, so
+   a repair that did not help ships with its failure stated honestly.
+
+   `reports.split_follow_up` then takes the "## Follow-up" section out of the
+   report: the pull request carries the change, and what the change
+   deliberately left undone is filed as its own issue, linked back to the PR.
+   In one body they compete, and a reviewer cannot tell which lines the diff
+   already covers — which is the other half of how a fix comes to read as a
+   list of suggestions. A follow-up that says "None" files nothing, and one
+   that cannot be filed is a log line: the pull request is already open and
+   it has the fix. The report is then committed as
+   `docs/incidents/<fingerprint>.md` alongside the agent's edits, the branch
+   is pushed, and a **pull request** is opened with the report as its body. Fix mode that ends with neither an edit nor
+   an applicable patch files an issue instead (step 6), because a pull
+   request with no diff only looks like a fix until the Files tab says
+   otherwise. With no
    `github.repo` configured the daemon
    runs in [local mode](monitoring.md#1-configure) instead: steps 1–3 are
    unchanged, but the report is written to `<workdir>/reports/` and no git
    or GitHub operation runs at all.
-10. **Record** — the incident is marked processed with its PR URL, token
+11. **Record** — the incident is marked processed with its PR URL, token
    counts, and USD cost. If any step fails, the incident is marked failed
    and the daemon moves on; one bad incident never kills the loop.
 

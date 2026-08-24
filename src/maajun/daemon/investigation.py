@@ -1,0 +1,623 @@
+"""One incident, from the prompt to the artifact it is published as.
+
+Split out of `daemon.core` because the two jobs are different: the daemon
+watches, deduplicates and budgets, and this runs a single incident once the
+daemon has decided it is worth running. The state that used to be threaded
+through a dozen parameters — the event, the repo, the clone, the agent, what
+it has spent, the report as it changes — lives on the object instead.
+"""
+
+from __future__ import annotations
+
+import logging
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import TYPE_CHECKING
+
+from maajun.agent.core import accumulate_usage
+from maajun.config import RepoConfig
+from maajun.daemon import reports
+from maajun.daemon.prompts import (
+    DEPLOYMENT_SECTION,
+    FAILED_TESTS_SUFFIX,
+    FIX_PROMPT_SUFFIX,
+    REGRESSION_SECTION,
+    RETRY_SUFFIX,
+    UNAPPLIED_FIX_SUFFIX,
+)
+from maajun.daemon.reports import headline_problem, report_problem
+from maajun.daemon.store import (
+    ARTIFACT_IGNORED,
+    ARTIFACT_ISSUE,
+    ARTIFACT_PR,
+    ARTIFACT_REPORT,
+)
+from maajun.monitors import ErrorEvent
+from maajun.providers.pricing import extract_usage
+from maajun.utils import truncate_tail
+from maajun.vcs import CommandResult, GitError, GitWorkspace
+
+if TYPE_CHECKING:  # imported for typing only; core imports this module
+    from maajun.daemon.core import Daemon, ProgressCallback
+
+log = logging.getLogger(__name__)
+
+# How much of a failing test run is pasted back for the repair round, taken
+# from the end — a runner prints what failed last.
+MAX_TEST_OUTPUT_IN_PROMPT = 8000
+
+
+@dataclass(frozen=True)
+class Plan:
+    """What kind of run this is: what to call things, and what to skip.
+
+    An incident and a manual report take the same pipeline and differ only in
+    these, so they are one value rather than a dozen keyword arguments.
+    """
+
+    branch: str
+    prompt: str
+    subject_fallback: str
+    commit_prefix: str
+    dry_run_header: str
+    dry_run_extra: tuple[str, ...] = ()
+    forget_on_dry_run: bool = False
+    blame_deploy: bool = False
+    dry_run: bool = False
+
+
+@dataclass
+class Investigation:
+    """Analyze one incident and publish it. `run` is the whole story.
+
+    The daemon owns the shared services — the store, the GitHub client, the
+    config — and this borrows them for the length of one incident.
+    """
+
+    daemon: Daemon
+    event: ErrorEvent
+    repo_config: RepoConfig
+    workspace: GitWorkspace
+    plan: Plan
+    progress: ProgressCallback
+
+    agent: object | None = None
+    report: str = ""
+    model: str | None = None
+    # Summed across asks: chat() reports one call, and the first is the
+    # expensive one — the cap and the recorded cost must see both.
+    spent: dict[str, int] = field(default_factory=dict)
+    usage: tuple[int, int, float] = (0, 0, 0.0)
+    title: str = ""
+    commit_message: str = ""
+    previous: dict | None = None
+    # What this run produced, for the daemon to report to the CLI.
+    artifact_kind: str | None = None
+    ignored_reason: str = ""
+
+    def __post_init__(self) -> None:
+        self.opens_pull_request = self.repo_config.mode == "fix"
+        # A dry run and local mode never branch, so there is no diff to want.
+        self.applies_a_fix = (
+            self.opens_pull_request
+            and not self.plan.dry_run
+            and not self.daemon.local_mode
+        )
+
+    # -- the run ------------------------------------------------------------
+
+    async def run(self) -> str:
+        """Returns the issue or PR URL, or "" when nothing was published."""
+        await self.prepare()
+        prompt = await self.build_prompt()
+        self.progress("Analyzing with AI")
+        self.agent = self.daemon.agent_factory_for_repo(
+            self.repo_config, self.workspace
+        )()
+        try:
+            await self.investigate(prompt)
+            return await self.publish()
+        finally:
+            # One agent per incident; a watch run would leak their pools. It
+            # lives past publishing because the repair round needs it.
+            await self.agent.aclose()
+
+    async def prepare(self) -> None:
+        """Sync the clone, and branch it when there will be a diff."""
+        if self.plan.dry_run or self.daemon.local_mode:
+            return
+        self.progress("Preparing workspace")
+        # The agent reads code from the clone either way; only fix mode
+        # needs a branch.
+        await self.workspace.sync(self.repo_config.base_branch)
+        if self.opens_pull_request:
+            await self.workspace.create_branch(
+                self.plan.branch, self.repo_config.base_branch
+            )
+
+    async def build_prompt(self) -> str:
+        """The plan's prompt, plus what this repo and this history add to it."""
+        prompt = self.plan.prompt
+        self.previous = self.previous_artifact()
+        if self.previous:
+            prompt += REGRESSION_SECTION.format(
+                reported=self.previous["when"],
+                url=self.previous["url"] or "no link recorded",
+            )
+        # After sync: there is no history to read until the clone exists.
+        if self.plan.blame_deploy:
+            prompt += await self.daemon.recent_commits_section(
+                self.repo_config, self.workspace
+            )
+        prompt += deployment_section(
+            self.repo_config, self.daemon.monitors_for(self.repo_config)
+        )
+        if self.opens_pull_request:
+            prompt += FIX_PROMPT_SUFFIX.format(workspace=self.workspace.path)
+        return prompt
+
+    def previous_artifact(self) -> dict | None:
+        """What this incident produced last time, if it is one that came back.
+
+        Read before publishing, because publishing overwrites the row it is
+        stored in.
+        """
+        row = self.daemon.store.get(self.event.fingerprint, self.event.repo)
+        if not row or not row["reopened_at"]:
+            return None
+        return {"url": row["previous_url"], "when": row["reopened_at"][:10]}
+
+    async def investigate(self, prompt: str) -> None:
+        """Ask until there is a report worth publishing, and a diff behind it.
+
+        Everything billed is banked even when a round raises: the requests
+        were made either way.
+        """
+        try:
+            response = await self.ask(prompt)
+            self.report = response.content.strip()
+            self.model = getattr(response, "model", None)
+            problem = report_problem(self.report) or headline_problem(self.report)
+            if problem:
+                # One more round rather than filing an empty artifact: the
+                # usual cause is a model that answered conversationally.
+                log.info("re-asking for a usable report: %s", problem)
+                self.progress("Re-asking for the report")
+                response = await self.ask(RETRY_SUFFIX.format(problem=problem))
+                self.report = response.content.strip()
+            if self.applies_a_fix and not await self.workspace.has_changes():
+                await self.secure_the_edit()
+        except BaseException:
+            self.bank_spend()
+            raise
+
+    async def ask(self, message: str):
+        """One turn, with what it cost added to the run's total."""
+        response = await self.agent.chat(message)
+        accumulate_usage(self.spent, response.usage)
+        return response
+
+    async def secure_the_edit(self) -> None:
+        """Get fix mode's change onto the tree, cheapest way first.
+
+        The free attempt first: a model that described the change usually left
+        the patch in the report, and `git apply` costs nothing. Insisting is a
+        whole round with the tool history resent — the dearest ask in the run.
+        """
+        if not await self.apply_reported_diff():
+            await self.insist_on_the_edit()
+
+    # -- publishing ---------------------------------------------------------
+
+    async def publish(self) -> str:
+        """File the report as whatever this run earned. Returns its URL."""
+        self.usage = extract_usage(self.spent, self.model)
+        # Titled from the report, so what the issue is called and what it says
+        # to fix are the same thing.
+        self.title = reports.artifact_title(self.report, self.plan.subject_fallback)
+        self.commit_message = reports.commit_subject(
+            self.report, self.plan.subject_fallback, self.plan.commit_prefix
+        )
+
+        if reports.verdict(self.report) == reports.BY_DESIGN:
+            return self.close_as_intended()
+
+        problem = report_problem(self.report)
+        if problem and not self.plan.dry_run:
+            # Nothing is published: an issue or PR with no findings costs the
+            # reader more than it gives, and hides that the run failed. What
+            # it cost is still banked against the incident.
+            self.bank_spend()
+            raise RuntimeError(f"the analysis produced no usable report ({problem})")
+
+        if self.plan.dry_run:
+            return self.print_dry_run()
+        if self.daemon.local_mode:
+            return self.save_local_report()
+
+        if self.opens_pull_request and not await self.has_a_diff():
+            # Asked twice and still nothing to merge, so the finding is a
+            # finding: an issue says that, a pull request with no diff in it
+            # only looks like a fix until you open the Files tab.
+            log.info(
+                "fix mode changed no code for fp=%s in repo=%s; filing the "
+                "analysis as an issue instead of an empty pull request",
+                self.event.fingerprint, self.repo_config.repo,
+            )
+            self.opens_pull_request = False
+
+        if self.opens_pull_request:
+            url, branch, kind = await self.open_pull_request(), self.plan.branch, ARTIFACT_PR
+        else:
+            url, branch, kind = await self.file_issue(), "", ARTIFACT_ISSUE
+        self.record(url, branch, kind)
+        return url
+
+    async def has_a_diff(self) -> bool:
+        """Whether there is something to review.
+
+        Asked before the report file is written — that file is itself a
+        change, so afterwards the answer is always yes.
+        """
+        if await self.workspace.has_changes():
+            return True
+        # The insisted report gets the same free attempt: asked point blank, a
+        # model that still only describes it hands the patch over while doing so.
+        return await self.apply_reported_diff()
+
+    async def open_pull_request(self) -> str:
+        """Verify, repair what this change broke, and open the PR."""
+        verification, unrelated = await self.verified_fix()
+        self.progress("Opening PR")
+        # Filed apart: a reviewer should not have to work out which lines of
+        # the report the diff already covers.
+        self.report, follow_up = reports.split_follow_up(self.report)
+        reports.write_report_file(
+            self.workspace.path / "docs" / "incidents", self.event, self.report
+        )
+        await self.workspace.commit_all(self.commit_message)
+        await self.workspace.push(self.plan.branch)
+        url = await self.daemon.github.create_pull_request(
+            self.repo_config.repo,
+            head=self.plan.branch,
+            base=self.repo_config.base_branch,
+            title=self.title,
+            body=reports.pr_body(
+                self.repo_config, self.event, self.report, verification,
+                previous_url=self.previous["url"] if self.previous else "",
+                unrelated_failure=unrelated,
+            ),
+        )
+        await self.file_follow_up(follow_up, url)
+        return url
+
+    async def file_issue(self) -> str:
+        self.progress("Filing issue")
+        return await self.daemon.github.create_issue(
+            self.repo_config.repo,
+            title=self.title,
+            body=reports.issue_body(
+                self.event, self.report,
+                previous_url=self.previous["url"] if self.previous else "",
+                unfixed=self.repo_config.mode == "fix",
+            ),
+        )
+
+    def record(self, url: str, branch: str, kind: str) -> None:
+        prompt_tokens, completion_tokens, cost = self.usage
+        self.artifact_kind = kind
+        self.daemon.store.mark_processed(
+            self.event.fingerprint,
+            self.event.repo,
+            branch=branch,
+            pr_url=url,
+            cost_usd=cost,
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            report_text=self.report,
+            artifact_kind=kind,
+        )
+        log.info(
+            "opened %s %s for fp=%s in repo=%s (cost: $%.4f, tokens: %d/%d)",
+            "PR" if kind == ARTIFACT_PR else "issue",
+            url, self.event.fingerprint, self.repo_config.repo, cost,
+            prompt_tokens, completion_tokens,
+        )
+
+    # -- the rounds that fix mode may buy -----------------------------------
+
+    async def insist_on_the_edit(self) -> None:
+        """Ask once more for the edit fix mode was supposed to make.
+
+        A report that only describes the change opens a pull request with
+        nothing to review. The usual cause is the escape hatch in
+        FIX_PROMPT_SUFFIX being taken for a finding that does have an in-repo
+        fix — anything about an environment variable especially.
+
+        The answer replaces the report only if it is usable: a model that
+        edits the files and replies "done" should not cost the analysis.
+        """
+        log.info("fix mode changed nothing; asking once for the edit")
+        self.progress("Asking for the edit")
+        response = await self.ask(
+            UNAPPLIED_FIX_SUFFIX.format(workspace=self.workspace.path)
+        )
+        self.keep_if_usable(response.content.strip())
+
+    async def apply_reported_diff(self) -> bool:
+        """Apply the diffs the report carries, when the agent never edited.
+
+        Costs no model round. A patch that no longer fits leaves the tree
+        untouched, so the issue fallback still fires.
+
+        Returns True when something landed and there is a diff to review.
+        """
+        patches = reports.extract_patches(self.report)
+        if not patches:
+            return False
+        self.progress("Applying the reported diff")
+        try:
+            await self.workspace.apply_patches(patches)
+        except GitError as err:
+            log.info(
+                "the reported patch does not apply; leaving the tree alone: %s", err
+            )
+            return False
+        log.info("applied %d patch(es) from the report", len(patches))
+        return True
+
+    async def verified_fix(self) -> tuple[CommandResult | None, bool]:
+        """The test verdict for the PR body, and whether a repair was skipped.
+
+        A suite that ran and failed earns one repair round, then runs a second
+        and final time so a repair that made things worse cannot hide.
+        """
+        verification = await self.verify()
+        if verification is None or verification.passed:
+            return verification, False
+        # Only a failure this run caused earns a repair round. A timed out or
+        # unstartable command earns none either — nothing actionable to send.
+        if verification.exit_code is None:
+            return verification, False
+        if not blames_our_edits(
+            verification.output, await self.workspace.changed_files()
+        ):
+            log.info(
+                "the failing suite for fp=%s names nothing this run changed; "
+                "skipping the repair round", self.event.fingerprint,
+            )
+            return verification, True
+        try:
+            await self.repair_failing_tests(verification)
+        except Exception:
+            log.exception(
+                "repair round failed fp=%s; publishing the fix as it stands",
+                self.event.fingerprint,
+            )
+        return await self.verify(), False
+
+    async def repair_failing_tests(self, verification: CommandResult) -> None:
+        """One round to let the agent fix its own fix before the PR ships.
+
+        The suite output is what a reviewer would paste back anyway. The
+        answer replaces the report only if it is usable, like
+        insist_on_the_edit.
+        """
+        log.info(
+            "tests failed after the edit (exit %s); asking once for a repair",
+            verification.exit_code,
+        )
+        self.progress("Repairing the failing tests")
+        response = await self.ask(
+            FAILED_TESTS_SUFFIX.format(
+                command=self.repo_config.test_command,
+                status=verification.exit_code,
+                output=truncate_tail(
+                    verification.output,
+                    MAX_TEST_OUTPUT_IN_PROMPT,
+                    "… (earlier output truncated)\n",
+                ),
+                workspace=self.workspace.path,
+            )
+        )
+        self.keep_if_usable(response.content.strip())
+
+    def keep_if_usable(self, second: str) -> None:
+        """Take a follow-up answer as the report, unless it is not one."""
+        if not report_problem(second):
+            self.report = second
+
+    async def verify(self) -> CommandResult | None:
+        """Run the repo's test_command against the agent's edits.
+
+        Not an agent capability: the command comes from config, so the model
+        cannot choose what runs. A failure is reported in the PR, not raised —
+        "the fix breaks the suite" is exactly the thing a reviewer needs to
+        see, and suppressing the PR would hide the analysis too.
+        """
+        if not self.repo_config.test_command:
+            return None
+        self.progress("Running tests")
+        result = await self.workspace.run_command(self.repo_config.test_command)
+        log.info(
+            "test_command %r exited %s in repo=%s",
+            self.repo_config.test_command, result.exit_code, self.repo_config.repo,
+        )
+        return result
+
+    async def file_follow_up(self, follow_up: str, pr_url: str) -> str:
+        """File what the fix left for later as its own issue. Returns its URL.
+
+        The sibling call site with the same bug, the hardening, the test that
+        needs a fixture this change does not build. In the PR body those read
+        as things the diff does; as an issue they read as what they are.
+
+        Never fatal — the pull request is already open and carries the fix.
+        """
+        if not reports.worth_following_up(follow_up):
+            return ""
+        self.progress("Filing follow-up issue")
+        try:
+            url = await self.daemon.github.create_issue(
+                self.repo_config.repo,
+                title=reports.follow_up_title(self.report, self.plan.subject_fallback),
+                body=reports.follow_up_body(self.event, follow_up, pr_url),
+            )
+        except Exception:
+            log.exception(
+                "could not file the follow-up for fp=%s; %s still has the fix",
+                self.event.fingerprint, pr_url,
+            )
+            return ""
+        log.info("filed follow-up %s for the fix in %s", url, pr_url)
+        return url
+
+    # -- the endings that publish nothing -----------------------------------
+
+    def close_as_intended(self) -> str:
+        """Close an incident the agent judged to be working as designed.
+
+        Nothing is published: an issue saying "the validator rejected invalid
+        input" costs a reader more than it gives. The analysis is kept on the
+        incident so the call can be reviewed, and what it cost is banked —
+        the round was billed either way.
+        """
+        self.ignored_reason = reports.by_design_reason(self.report)
+        self.artifact_kind = ARTIFACT_IGNORED
+        prompt_tokens, completion_tokens, cost = self.usage
+        log.info(
+            "not a defect fp=%s repo=%s: %s", self.event.fingerprint,
+            self.daemon.repo_label(self.repo_config), self.ignored_reason,
+        )
+        if self.plan.dry_run:
+            reports.print_dry_run(
+                self.plan.dry_run_header, self.daemon.repo_label(self.repo_config),
+                self.report, self.usage,
+                title="(not filed — working as intended)",
+            )
+            self.daemon.store.forget(self.event.fingerprint, self.event.repo)
+            return ""
+        self.daemon.store.add_spend(
+            self.event.fingerprint, self.event.repo,
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            cost_usd=cost,
+        )
+        self.daemon.store.mark_ignored(
+            self.event.fingerprint, self.event.repo, reason=self.ignored_reason
+        )
+        return ""
+
+    def print_dry_run(self) -> str:
+        reports.print_dry_run(
+            self.plan.dry_run_header, self.daemon.repo_label(self.repo_config),
+            self.report, self.usage, self.plan.dry_run_extra, title=self.title,
+        )
+        if self.plan.forget_on_dry_run:
+            self.daemon.store.forget(self.event.fingerprint, self.event.repo)
+        return ""
+
+    def save_local_report(self) -> str:
+        """Write an incident report to disk. Returns the report path.
+
+        The local-mode counterpart to opening a PR: same analysis, same
+        recorded cost, but nothing leaves the machine.
+        """
+        self.progress("Writing report")
+        self.artifact_kind = ARTIFACT_REPORT
+        prompt_tokens, completion_tokens, cost = self.usage
+        report_path = reports.write_report_file(
+            self.daemon.report_dir, self.event, self.report
+        )
+        self.daemon.store.mark_processed(
+            self.event.fingerprint,
+            self.event.repo,
+            branch="",
+            pr_url=str(report_path),
+            cost_usd=cost,
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            report_text=self.report,
+            artifact_kind=ARTIFACT_REPORT,
+        )
+        log.info(
+            "wrote local report %s for fp=%s (cost: $%.4f, tokens: %d/%d)",
+            report_path, self.event.fingerprint, cost,
+            prompt_tokens, completion_tokens,
+        )
+        return str(report_path)
+
+    def bank_spend(self) -> None:
+        bank_spend(
+            self.daemon.store, self.event, self.agent, already_counted=self.spent
+        )
+
+
+def bank_spend(store, event: ErrorEvent, agent, already_counted=None) -> None:
+    """Record what an agent spent against its incident, whatever happened.
+
+    Every round is billed, so a run that dies on the thirtieth still owes for
+    twenty-nine, and a screen that says "investigate" owes for itself. Both
+    have to reach the day's total or the cap watches the wrong number.
+
+    Best-effort: losing the cost figure is no reason to lose the original
+    exception. `already_counted` carries earlier asks in the same run, which
+    the agent has since cleared off itself.
+    """
+    try:
+        spent = dict(already_counted or {})
+        accumulate_usage(spent, agent.take_usage())
+        prompt_tokens, completion_tokens, cost = extract_usage(spent, agent.model)
+        store.add_spend(
+            event.fingerprint,
+            event.repo,
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            cost_usd=cost,
+        )
+    except Exception:
+        log.debug("could not record the spend of a failed analysis", exc_info=True)
+
+
+def blames_our_edits(output: str, changed: list[str]) -> bool:
+    """Whether a failing test run names any file this run changed.
+
+    Stands in for a baseline run, which cannot be done safely — the edit would
+    have to come off the tree and go back on. A failure the edit caused names
+    the edited file; one that names none belongs to a suite that was already
+    red, and a repo in that state would buy a repair round on every incident
+    forever.
+
+    Matched on the file name, not the path, so a runner printing relative
+    paths still counts. That errs towards paying for the round, which is the
+    old behaviour.
+    """
+    if not changed:
+        return False
+    lowered = output.lower()
+    return any(Path(path).name.lower() in lowered for path in changed)
+
+
+def deployment_section(repo_config: RepoConfig, watching: list[str]) -> str:
+    """The deployment facts for the prompt, or "" when none are recorded.
+
+    Omitted entirely rather than half-filled: a report that says "port 0" or
+    invents a folder is worse than one that does not mention the deployment.
+    `watching` is the monitors actually attached to this repo, so the prompt
+    describes what is running rather than what the config hoped for.
+    """
+    deployment = repo_config.deployment
+    facts = []
+    if deployment.path:
+        facts.append(f"- Folder on the server: {deployment.path}")
+    if deployment.port:
+        facts.append(f"- Listens on port: {deployment.port}")
+    if deployment.runs:
+        facts.append(f"- Started by: {deployment.runs}")
+    if deployment.stack:
+        facts.append(f"- Built with: {deployment.stack}")
+    if watching:
+        facts.append(f"- Errors are read from: {', '.join(watching)}")
+    if not facts:
+        return ""
+    return DEPLOYMENT_SECTION.format(facts="\n".join(facts))

@@ -119,6 +119,50 @@ class GitWorkspace:
     async def has_changes(self) -> bool:
         return bool(await self.git("status", "--porcelain"))
 
+    async def changed_files(self) -> list[str]:
+        """Every path the working tree differs from HEAD in, staged or not."""
+        lines = (await self.git("status", "--porcelain")).splitlines()
+        paths = []
+        for line in lines:
+            path = line[3:].strip().strip('"')
+            if not path:
+                continue
+            # "R  old -> new": the new name is the one on disk.
+            paths.append(path.rpartition(" -> ")[2] or path)
+        return paths
+
+    async def apply_patches(self, patches: list[str]) -> None:
+        """Apply unified diffs to the working tree, all or none.
+
+        One `git apply` over one stream, because that is what makes the
+        all-or-none real: it refuses the whole batch and leaves the tree
+        alone. Checking each patch separately does not — two fences against
+        the same file both fit the pristine tree, and the second then fails
+        on top of the first. That pair is a fix plus its regression test.
+        """
+        if not patches:
+            return
+        await asyncio.to_thread(self._apply, "".join(patches))
+
+    def _apply(self, patch: str) -> None:
+        args = ["apply", "--whitespace=nowarn", "-"]  # "-" reads it from stdin
+        try:
+            proc = subprocess.run(
+                ["git", *args],
+                input=patch,
+                capture_output=True,
+                text=True,
+                timeout=GIT_TIMEOUT,
+                cwd=str(self.path),
+                env=self.auth_env(),
+            )
+        except subprocess.TimeoutExpired as e:
+            raise GitError(f"git apply timed out after {GIT_TIMEOUT}s") from e
+        except OSError as e:
+            raise GitError(f"could not run git apply: {e}") from e
+        if proc.returncode != 0:
+            raise GitError(f"git apply failed: {proc.stderr.strip()}")
+
     async def commit_all(self, message: str) -> None:
         await self.git("add", "-A")
         await self.git(

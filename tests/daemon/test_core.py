@@ -1,228 +1,33 @@
+"""The watching loop: what reaches an investigation, and what never does.
+
+Deduplication, the spend caps, the per-cycle bound, several repos in one
+daemon, shutdown, and the two cheap by-design passes. What happens to an
+error once the daemon decides to spend on it is `test_investigation`.
+"""
+
 import asyncio
-import subprocess
 from pathlib import Path
 
 import pytest
 
+from daemon.fakes import (
+    REPORT,
+    TRACEBACK,
+    FakeAgent,
+    FakeGitHub,
+)
 from maajun.config import (
     Config,
     DaemonConfig,
-    DeploymentConfig,
     GitHubConfig,
     MonitorConfig,
     RepoConfig,
 )
-from maajun.daemon.core import (
-    Daemon,
-    LocalWorkspace,
-    make_permission_policy,
-)
+from maajun.daemon.core import Daemon, make_permission_policy
 from maajun.daemon.store import ARTIFACT_ISSUE, ARTIFACT_PR, IncidentStore
 from maajun.monitors import LogFileMonitor
 from maajun.providers.base import CompletionResponse
 from maajun.vcs import GitWorkspace
-
-TRACEBACK = """\
-Traceback (most recent call last):
-  File "/app/main.py", line 42, in handler
-    result = items[index]
-IndexError: list index out of range
-"""
-
-REPORT = """# IndexError in handler
-
-## What happened
-Requests to /items with an empty cart returned a 500. The handler indexed
-the first element of a list that can be empty.
-
-## Root cause
-`main.py:12` reads `items[0]` without checking the list. Off-by-one on an
-empty collection: the caller guarantees a list, never a non-empty one.
-
-## Suggested fix
-Guard the access and return an empty response instead.
-"""
-
-
-def git(*args, cwd):
-    subprocess.run(
-        ["git", "-c", "user.name=test", "-c", "user.email=test@test", *args],
-        cwd=str(cwd), check=True, capture_output=True, text=True,
-    )
-
-
-@pytest.fixture
-def remote(tmp_path):
-    """A bare repo standing in for GitHub, seeded with one commit on main."""
-    bare = tmp_path / "remote.git"
-    subprocess.run(
-        ["git", "init", "--bare", "-b", "main", str(bare)],
-        check=True, capture_output=True,
-    )
-    seed = tmp_path / "seed"
-    subprocess.run(
-        ["git", "init", "-b", "main", str(seed)], check=True, capture_output=True
-    )
-    (seed / "main.py").write_text("items = []\n")
-    git("add", "-A", cwd=seed)
-    git("commit", "-m", "initial", cwd=seed)
-    git("remote", "add", "origin", str(bare), cwd=seed)
-    git("push", "origin", "main", cwd=seed)
-    return bare
-
-
-class FakeAgent:
-    def __init__(self, report=REPORT, edit_path: Path | None = None):
-        self.report = report
-        self.edit_path = edit_path
-        self.prompts: list[str] = []
-        self.closed = False
-        # Set to answer differently per round, e.g. an unusable first reply.
-        self.replies: list[str] | None = None
-        self.usage_per_call = {"prompt_tokens": 1000, "completion_tokens": 100}
-
-    async def chat(self, message):
-        self.prompts.append(message)
-        if self.edit_path:
-            self.edit_path.write_text("items = [0]\n")
-        content = self.replies.pop(0) if self.replies else self.report
-        return CompletionResponse(content=content, usage=dict(self.usage_per_call))
-
-    def take_usage(self):
-        # The real agent hands over what it spent and forgets it; a fake
-        # without this loses the cost of a failed run silently.
-        return {}
-
-    @property
-    def model(self):
-        return "fake-model"
-
-    async def aclose(self):
-        self.closed = True
-
-
-class FakeGitHub:
-    def __init__(self):
-        self.calls = []
-        self.issues = []
-        self.closed = False
-
-    async def create_pull_request(self, repo, *, head, base, title, body):
-        self.calls.append(
-            {"repo": repo, "head": head, "base": base, "title": title, "body": body}
-        )
-        return f"https://github.com/{repo}/pull/{len(self.calls)}"
-
-    async def create_issue(self, repo, *, title, body):
-        self.issues.append({"repo": repo, "title": title, "body": body})
-        return f"https://github.com/{repo}/issues/{len(self.issues)}"
-
-    async def aclose(self):
-        self.closed = True
-
-
-@pytest.fixture
-def setup(tmp_path, remote):
-    logfile = tmp_path / "app.log"
-    logfile.write_text("")
-
-    repo_config = RepoConfig(repo="owner/name", base_branch="main", mode="suggest")
-    config = Config(
-        github=GitHubConfig(repos=[repo_config]),
-        monitor=MonitorConfig(log_files=[str(logfile)], poll_interval=1),
-        daemon=DaemonConfig(workdir=str(tmp_path / "work")),
-    )
-    workspace = GitWorkspace(tmp_path / "work" / "ws", "owner/name", remote_url=str(remote))
-    store = IncidentStore(tmp_path / "work" / "incidents.db")
-    agent = FakeAgent()
-    github = FakeGitHub()
-    monitor = LogFileMonitor(logfile)
-    daemon = Daemon(
-        config,
-        monitors=[monitor],
-        store=store,
-        workspaces={"owner/name": workspace},
-        monitor_to_repo={id(monitor): repo_config},
-        github=github,
-        agent_factory_for_repo=lambda rc, ws: lambda: agent,
-    )
-    return daemon, logfile, agent, github, store, remote
-
-
-async def test_suggest_mode_files_an_issue(setup):
-    """An analysis that changes no code is an issue, not an empty-diff PR."""
-    daemon, logfile, agent, github, store, remote = setup
-
-    with open(logfile, "a") as f:
-        f.write(TRACEBACK)
-
-    handled = await daemon.poll_once()
-
-    assert len(handled) == 1
-    fp = handled[0]
-
-    # Agent got the error and the workspace path
-    assert "IndexError" in agent.prompts[0]
-    workspace = daemon.workspaces["owner/name"]
-    assert str(workspace.path) in agent.prompts[0]
-
-    # An issue carries the report; no PR, no branch, no push.
-    assert github.calls == []
-    assert len(github.issues) == 1
-    issue = github.issues[0]
-    assert "IndexError" in issue["title"]
-    assert "Root cause" in issue["body"]
-    assert "IndexError: list index out of range" in issue["body"]  # error details
-    assert store.get(fp, "owner/name")["pr_url"].endswith("/issues/1")
-    assert store.get(fp, "owner/name")["branch"] == ""
-    # The incident is filed under the repo it was attributed to, not globally.
-    assert store.get(fp) is None
-
-
-async def test_suggest_mode_pushes_no_branch(setup):
-    """The whole point: no branch to review, no CI run, no empty diff."""
-    daemon, logfile, agent, github, store, remote = setup
-
-    with open(logfile, "a") as f:
-        f.write(TRACEBACK)
-    await daemon.poll_once()
-
-    branches = subprocess.run(
-        ["git", "branch", "-a"], cwd=str(remote),
-        capture_output=True, text=True, check=True,
-    ).stdout
-    assert "maajun/incident-" not in branches
-
-
-async def test_fix_mode_opens_a_pull_request_with_the_report_committed(setup):
-    """Fix mode has a real diff, so it still gets a branch and a PR."""
-    daemon, logfile, agent, github, store, remote = setup
-    fix_mode(daemon, agent)
-
-    with open(logfile, "a") as f:
-        f.write(TRACEBACK)
-    fp = (await daemon.poll_once())[0]
-
-    assert github.issues == []
-    assert len(github.calls) == 1
-    call = github.calls[0]
-    assert call["head"] == f"maajun/incident-{fp}"
-    assert call["base"] == "main"
-    assert "IndexError" in call["title"]
-    assert "Root cause" in call["body"]
-
-    # Branch with the committed report exists on the remote
-    show = subprocess.run(
-        ["git", "show", f"maajun/incident-{fp}:docs/incidents/{fp}.md"],
-        cwd=str(remote), capture_output=True, text=True,
-    )
-    assert show.returncode == 0
-    assert "Root cause" in show.stdout
-
-    row = store.get(fp, "owner/name")
-    assert row["status"] == "processed"
-    assert row["pr_url"] == "https://github.com/owner/name/pull/1"
-    assert row["branch"] == f"maajun/incident-{fp}"
 
 
 async def test_same_error_is_reported_once(setup):
@@ -255,125 +60,6 @@ async def test_failed_incident_is_marked_and_loop_survives(setup):
     assert handled == []
     row = store.all()[0]
     assert row["status"] == "failed"
-
-
-class SpendingAgent:
-    """Fails partway, having already paid for the rounds it did make.
-
-    Mirrors the real Agent: usage accumulates across tool rounds and is read
-    back with take_usage(), not off a response that a failed turn never
-    produced.
-    """
-
-    model = "deepseek-v4-flash"
-
-    def __init__(self, usage=None):
-        # `is None`, not `or`: an empty dict is a real case — a turn that died
-        # before the provider reported anything.
-        self.usage = (
-            {"prompt_tokens": 500_000, "completion_tokens": 100_000}
-            if usage is None
-            else usage
-        )
-        self.closed = False
-
-    async def chat(self, message):
-        raise RuntimeError("provider gave up on round 30")
-
-    def take_usage(self):
-        usage, self.usage = self.usage, {}
-        return usage
-
-    async def aclose(self):
-        self.closed = True
-
-
-async def test_a_failed_analysis_still_banks_what_it_spent(setup):
-    """Every tool round is a billed request. Reading the cost off the response
-    drops all of it when there is no response, and the daily cap under-counts
-    exactly the incidents that are retried hardest."""
-    daemon, logfile, agent, github, store, remote = setup
-    spender = SpendingAgent()
-    daemon.agent_factory_for_repo = lambda rc, ws: lambda: spender
-
-    with open(logfile, "a") as f:
-        f.write(TRACEBACK)
-    handled = await daemon.poll_once()
-
-    assert handled == []
-    row = store.all()[0]
-    assert row["status"] == "failed"
-    assert row["prompt_tokens"] == 500_000
-    assert row["completion_tokens"] == 100_000
-    assert row["cost_usd"] > 0
-    assert store.cost_since("1970-01-01T00:00:00Z") == row["cost_usd"]
-    assert spender.closed, "the HTTP client is still released on the failure path"
-
-
-async def test_banked_spend_from_failures_reaches_the_cap(setup):
-    """Three retries of a failing incident must eventually stop the daemon."""
-    daemon, logfile, agent, github, store, remote = setup
-    daemon.config.daemon.max_usd_per_day = 0.05
-    daemon.agent_factory_for_repo = lambda rc, ws: lambda: SpendingAgent()
-
-    with open(logfile, "a") as f:
-        f.write(TRACEBACK)
-    await daemon.poll_once()
-
-    assert daemon.over_budget(), "a failed analysis is not a free one"
-
-
-async def test_a_failure_before_the_first_response_banks_nothing(setup):
-    daemon, logfile, agent, github, store, remote = setup
-    daemon.agent_factory_for_repo = lambda rc, ws: lambda: SpendingAgent(usage={})
-
-    with open(logfile, "a") as f:
-        f.write(TRACEBACK)
-    await daemon.poll_once()
-
-    assert store.all()[0]["cost_usd"] == 0
-
-
-async def test_recording_the_spend_never_masks_the_original_failure(setup):
-    """The incident is already failing; a store that also breaks must not
-    swallow the exception that explains why."""
-    daemon, logfile, agent, github, store, remote = setup
-    daemon.agent_factory_for_repo = lambda rc, ws: lambda: SpendingAgent()
-
-    def broken(*args, **kwargs):
-        raise RuntimeError("database is locked")
-
-    store.add_spend = broken
-
-    with open(logfile, "a") as f:
-        f.write(TRACEBACK)
-    handled = await daemon.poll_once()
-
-    assert handled == []
-    assert store.all()[0]["status"] == "failed"
-
-
-async def test_fix_mode_commits_agent_changes(setup):
-    daemon, logfile, agent, github, store, remote = setup
-    # Update the repo config mode to "fix"
-    repo_config = daemon.repo_for(daemon.monitors[0])
-    repo_config.mode = "fix"
-    workspace = daemon.workspaces["owner/name"]
-    agent.edit_path = workspace.path / "main.py"
-
-    with open(logfile, "a") as f:
-        f.write(TRACEBACK)
-    handled = await daemon.poll_once()
-    fp = handled[0]
-
-    assert "Now fix it." in agent.prompts[0]
-
-    show = subprocess.run(
-        ["git", "show", f"maajun/incident-{fp}:main.py"],
-        cwd=str(remote), capture_output=True, text=True,
-    )
-    assert show.stdout == "items = [0]\n"
-    assert "applied fix" in github.calls[0]["body"]
 
 
 # ---------------------------------------------------------------------------
@@ -409,73 +95,6 @@ async def test_a_denial_tells_the_model_what_to_do_instead(tmp_path):
 
     other_tool = await approve("bash", {"command": "pytest"})
     assert "edit_file" in other_tool
-
-
-# ---------------------------------------------------------------------------
-# Dry-run mode
-# ---------------------------------------------------------------------------
-
-
-async def test_dry_run_skips_git_and_pr(setup):
-    daemon, logfile, agent, github, store, remote = setup
-
-    with open(logfile, "a") as f:
-        f.write(TRACEBACK)
-
-    handled = await daemon.poll_once(dry_run=True)
-
-    assert len(handled) == 1
-    fp = handled[0]
-
-    # Agent still analyzed the error
-    assert "IndexError" in agent.prompts[0]
-
-    # No branch was created, no PR was opened
-    assert github.calls == []
-    show = subprocess.run(
-        ["git", "branch", "--list", f"maajun/incident-{fp}"],
-        cwd=str(remote), capture_output=True, text=True,
-    )
-    assert show.stdout.strip() == ""
-
-    # Incident not persisted — a real run should still process it
-    assert store.get(fp) is None
-
-
-# ---------------------------------------------------------------------------
-# Manual reports, progress, and notices
-# ---------------------------------------------------------------------------
-
-
-async def test_manual_report_opens_pr_and_reports_progress(setup):
-    daemon, logfile, agent, github, store, remote = setup
-    repo_config = daemon.repo_for(daemon.monitors[0])
-    phases: list[str] = []
-
-    url = await daemon.handle_manual_report(
-        "Checkout button does nothing", repo_config, progress=phases.append
-    )
-
-    assert phases == ["Preparing workspace", "Analyzing with AI", "Filing issue"]
-    assert url.endswith("/issues/1")
-    assert "Checkout button" in agent.prompts[0]
-    # Titled from the report's finding, not from how the issue was described:
-    # what the analysis says to fix is what the issue is called.
-    assert github.issues[0]["title"] == "[maajun] IndexError in handler"
-
-
-async def test_manual_report_dry_run_only_analyzes(setup):
-    daemon, logfile, agent, github, store, remote = setup
-    repo_config = daemon.repo_for(daemon.monitors[0])
-    phases: list[str] = []
-
-    pr_url = await daemon.handle_manual_report(
-        "Something is broken", repo_config, dry_run=True, progress=phases.append
-    )
-
-    assert pr_url == ""
-    assert phases == ["Analyzing with AI"]  # no workspace prep / PR in dry run
-    assert github.calls == []
 
 
 async def test_notices_emitted_for_new_error_and_artifact(setup):
@@ -613,106 +232,6 @@ async def test_a_loop_without_signal_handlers_still_runs(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# Local mode: no GitHub configured
-# ---------------------------------------------------------------------------
-
-
-@pytest.fixture
-def local_setup(tmp_path):
-    """A daemon with no GitHub repo — reports go to disk instead of PRs."""
-    from maajun.daemon.core import LocalWorkspace
-
-    logfile = tmp_path / "app.log"
-    logfile.write_text("")
-    checkout = tmp_path / "checkout"
-    checkout.mkdir()
-    (checkout / "main.py").write_text("items = []\n")
-
-    repo_config = RepoConfig(mode="suggest")
-    config = Config(
-        github=GitHubConfig(),
-        monitor=MonitorConfig(log_files=[str(logfile)], poll_interval=1),
-        daemon=DaemonConfig(workdir=str(tmp_path / "work")),
-    )
-    store = IncidentStore(tmp_path / "work" / "incidents.db")
-    agent = FakeAgent()
-    monitor = LogFileMonitor(logfile)
-    daemon = Daemon(
-        config,
-        monitors=[monitor],
-        store=store,
-        workspaces={"": LocalWorkspace(checkout)},
-        monitor_to_repo={id(monitor): repo_config},
-        github=None,
-        agent_factory_for_repo=lambda rc, ws: lambda: agent,
-        repo_configs=[repo_config],
-        report_dir=tmp_path / "work" / "reports",
-        local_mode=True,
-    )
-    return daemon, logfile, agent, store, checkout
-
-
-async def test_local_mode_writes_a_report_instead_of_a_pr(local_setup):
-    daemon, logfile, agent, store, checkout = local_setup
-
-    with open(logfile, "a") as f:
-        f.write("2026-07-18 ERROR shop: order failed\n")
-        f.write(TRACEBACK)
-        f.write("INFO next\n")
-
-    handled = await daemon.poll_once()
-    assert len(handled) == 1
-
-    report_path = daemon.report_dir / f"{handled[0]}.md"
-    assert report_path.exists()
-    assert REPORT in report_path.read_text()
-    assert "IndexError" in report_path.read_text()
-
-
-async def test_local_mode_analyzes_the_local_checkout(local_setup):
-    daemon, logfile, agent, store, checkout = local_setup
-
-    with open(logfile, "a") as f:
-        f.write(TRACEBACK)
-    await daemon.poll_once()
-    await daemon.poll_once()  # flush the carried-over traceback
-
-    assert str(checkout) in agent.prompts[0]
-
-
-async def test_local_mode_records_the_incident_as_processed(local_setup):
-    daemon, logfile, agent, store, checkout = local_setup
-
-    with open(logfile, "a") as f:
-        f.write("ERROR one-off failure\nINFO next\n")
-    handled = await daemon.poll_once()
-
-    # A second sighting must not produce a second report.
-    with open(logfile, "a") as f:
-        f.write("ERROR one-off failure\nINFO next\n")
-    assert await daemon.poll_once() == []
-    assert len(handled) == 1
-
-
-async def test_local_mode_notice_says_report_not_pr(local_setup):
-    daemon, logfile, agent, store, checkout = local_setup
-    notices = []
-    daemon.on_notice = lambda message, level: notices.append((message, level))
-
-    with open(logfile, "a") as f:
-        f.write("ERROR boom\nINFO next\n")
-    await daemon.poll_once()
-
-    assert any("Report written" in message for message, _ in notices)
-    assert not any("PR opened" in message for message, _ in notices)
-
-
-async def test_local_mode_aclose_survives_no_github_client(local_setup):
-    daemon, logfile, agent, store, checkout = local_setup
-    await daemon.aclose()  # must not blow up on github=None
-
-
-# ---------------------------------------------------------------------------
 # Daily spend cap
 # ---------------------------------------------------------------------------
 
@@ -816,105 +335,6 @@ async def test_dry_run_ignores_the_cap(setup):
     assert agent.prompts  # the analysis still ran
 
 
-# ---------------------------------------------------------------------------
-# Fix verification
-# ---------------------------------------------------------------------------
-
-
-def fix_mode(daemon, agent=None, *, test_command: str = "") -> None:
-    """Switch to fix mode and let the agent actually change something.
-
-    Both halves matter now: fix mode with no code change deliberately falls
-    back to an issue, so a test about pull requests needs an agent that edits.
-    """
-    repo_config = daemon.repo_for(daemon.monitors[0])
-    repo_config.mode = "fix"
-    repo_config.test_command = test_command
-    if agent is not None:
-        agent.edit_path = daemon.workspaces[repo_config.repo].path / "main.py"
-
-
-async def test_passing_tests_are_reported_in_the_pr(setup):
-    daemon, logfile, agent, github, store, remote = setup
-    fix_mode(daemon, agent, test_command="exit 0")
-
-    with open(logfile, "a") as f:
-        f.write(TRACEBACK)
-    await daemon.poll_once()
-
-    body = github.calls[0]["body"]
-    assert "Tests pass" in body
-    assert "exit 0" in body
-
-
-async def test_failing_tests_are_reported_not_suppressed(setup):
-    """A fix that breaks the suite is exactly what a reviewer must be told."""
-    daemon, logfile, agent, github, store, remote = setup
-    fix_mode(daemon, agent, test_command="echo 'boom: 1 failed'; exit 1")
-
-    with open(logfile, "a") as f:
-        f.write(TRACEBACK)
-    handled = await daemon.poll_once()
-
-    assert len(handled) == 1  # the PR still opens
-    body = github.calls[0]["body"]
-    assert "Tests fail" in body
-    assert "exit 1" in body
-    assert "boom: 1 failed" in body
-
-
-async def test_unrunnable_test_command_does_not_abort_the_incident(setup):
-    daemon, logfile, agent, github, store, remote = setup
-    fix_mode(daemon, agent, test_command="this-command-does-not-exist-xyz")
-
-    with open(logfile, "a") as f:
-        f.write(TRACEBACK)
-    handled = await daemon.poll_once()
-
-    assert len(handled) == 1
-    assert "Tests fail" in github.calls[0]["body"]  # non-zero exit from the shell
-
-
-async def test_no_test_command_marks_the_pr_unverified(setup):
-    daemon, logfile, agent, github, store, remote = setup
-    fix_mode(daemon, agent)  # no test_command
-
-    with open(logfile, "a") as f:
-        f.write(TRACEBACK)
-    await daemon.poll_once()
-
-    assert "Unverified" in github.calls[0]["body"]
-
-
-async def test_tests_run_in_the_workspace_not_the_cwd(setup):
-    """The command must see the agent's edits, which live in the clone."""
-    daemon, logfile, agent, github, store, remote = setup
-    fix_mode(daemon, agent, test_command="pwd")
-
-    with open(logfile, "a") as f:
-        f.write(TRACEBACK)
-    await daemon.poll_once()
-
-    workspace = daemon.workspaces["owner/name"]
-    assert str(workspace.path) in github.calls[0]["body"]
-
-
-async def test_suggest_mode_does_not_run_tests(setup):
-    """There is no diff to verify, so don't spend the time."""
-    daemon, logfile, agent, github, store, remote = setup
-    repo_config = daemon.repo_for(daemon.monitors[0])
-    repo_config.test_command = "echo SHOULD_NOT_RUN"
-    phases: list[str] = []
-    daemon.progress = phases.append
-
-    with open(logfile, "a") as f:
-        f.write(TRACEBACK)
-    await daemon.poll_once()
-
-    assert "Running tests" not in phases
-    assert "SHOULD_NOT_RUN" not in github.issues[0]["body"]
-
-
 async def test_cap_warning_reports_the_configured_amount(setup):
     """A sub-cent cap must not be rounded up in the warning."""
     daemon, logfile, agent, github, store, remote = setup
@@ -930,119 +350,6 @@ async def test_cap_warning_reports_the_configured_amount(setup):
     warning = next(msg for lvl, msg in notices if lvl == "warn")
     assert "$0.005" in warning
     assert "$0.01" not in warning
-
-
-# ---------------------------------------------------------------------------
-# Deploy blame
-# ---------------------------------------------------------------------------
-
-
-async def test_prompt_describes_the_deployment(setup):
-    """A 502 from a proxy and a worker timeout only make sense against how
-    the app actually runs, which the clone cannot show."""
-    daemon, logfile, agent, github, store, remote = setup
-    deployment = daemon.repo_configs[0].deployment
-    deployment.path = "/srv/kfl"
-    deployment.port = 8000
-    deployment.runs = "docker compose"
-
-    with open(logfile, "a") as f:
-        f.write(TRACEBACK)
-    await daemon.poll_once()
-
-    prompt = agent.prompts[0]
-    assert "Folder on the server: /srv/kfl" in prompt
-    assert "Listens on port: 8000" in prompt
-    assert "Started by: docker compose" in prompt
-    assert f"Errors are read from: logfile:{logfile}" in prompt
-
-
-def test_nothing_recorded_omits_the_deployment_section():
-    """Better silent than a report that says "port 0"."""
-    from maajun.daemon.core import deployment_section
-
-    assert deployment_section(RepoConfig(repo="acme/api"), []) == ""
-
-
-def test_the_deployment_section_lists_only_what_is_known():
-    from maajun.daemon.core import deployment_section
-
-    section = deployment_section(
-        RepoConfig(repo="acme/api", deployment=DeploymentConfig(port=8000)),
-        ["docker:api-web-1"],
-    )
-
-    assert "Listens on port: 8000" in section
-    assert "Errors are read from: docker:api-web-1" in section
-    assert "Folder on the server" not in section
-
-
-async def test_prompt_offers_recent_commits_for_blame(setup):
-    """The clone is already on disk; naming the likely commit is nearly free."""
-    daemon, logfile, agent, github, store, remote = setup
-
-    with open(logfile, "a") as f:
-        f.write(TRACEBACK)
-    await daemon.poll_once()
-
-    prompt = agent.prompts[0]
-    assert "Likely cause commit" in prompt
-    assert "Recent commits on main" in prompt
-    assert "initial" in prompt  # the seed commit's subject
-
-
-async def test_local_mode_without_git_history_omits_the_section(tmp_path):
-    """A plain directory has no commits; don't invite the model to invent one."""
-    from maajun.daemon.core import LocalWorkspace
-
-    logfile = tmp_path / "app.log"
-    logfile.write_text("")
-    checkout = tmp_path / "plain"
-    checkout.mkdir()
-
-    repo_config = RepoConfig(mode="suggest")
-    config = Config(
-        monitor=MonitorConfig(log_files=[str(logfile)]),
-        daemon=DaemonConfig(workdir=str(tmp_path / "work")),
-    )
-    agent = FakeAgent()
-    monitor = LogFileMonitor(logfile)
-    daemon = Daemon(
-        config,
-        monitors=[monitor],
-        store=IncidentStore(tmp_path / "work" / "i.db"),
-        workspaces={"": LocalWorkspace(checkout)},
-        monitor_to_repo={id(monitor): repo_config},
-        github=None,
-        agent_factory_for_repo=lambda rc, ws: lambda: agent,
-        repo_configs=[repo_config],
-        report_dir=tmp_path / "work" / "reports",
-        local_mode=True,
-    )
-
-    with open(logfile, "a") as f:
-        f.write(TRACEBACK)
-    await daemon.poll_once()
-
-    assert "Recent commits" not in agent.prompts[0]
-
-
-async def test_unreadable_git_history_does_not_break_the_incident(setup):
-    """History is a nice-to-have; failing to read it must not abort analysis."""
-    daemon, logfile, agent, github, store, remote = setup
-    workspace = daemon.workspaces["owner/name"]
-
-    async def boom(limit=0):
-        raise RuntimeError("git exploded")
-
-    workspace.recent_commits = boom
-
-    with open(logfile, "a") as f:
-        f.write(TRACEBACK)
-    handled = await daemon.poll_once()
-
-    assert len(handled) == 1
-    assert "Recent commits" not in agent.prompts[0]
 
 
 # ---------------------------------------------------------------------------
@@ -1317,171 +624,6 @@ async def test_one_unwired_monitor_does_not_stop_the_others(multi_setup):
     assert any("is not usable" in message for message in notices)
 
 
-# ---------------------------------------------------------------------------
-# Recording the analysis itself
-# ---------------------------------------------------------------------------
-
-
-async def test_suggest_mode_records_the_report_and_marks_it_an_issue(setup):
-    """The analysis used to exist only in the GitHub issue; chat recalls it."""
-    daemon, logfile, agent, github, store, remote = setup
-
-    with open(logfile, "a") as f:
-        f.write(TRACEBACK)
-    fp = (await daemon.poll_once())[0]
-
-    row = store.get(fp, "owner/name")
-    assert row["artifact_kind"] == ARTIFACT_ISSUE
-    assert "Root cause" in row["report_text"]
-
-
-async def test_fix_mode_records_the_report_and_marks_it_a_pr(tmp_path, remote):
-    daemon, logfile, store = fix_mode_daemon(tmp_path, remote)
-
-    with open(logfile, "a") as f:
-        f.write(TRACEBACK)
-    fp = (await daemon.poll_once())[0]
-
-    row = store.get(fp, "owner/name")
-    assert row["artifact_kind"] == ARTIFACT_PR
-    assert "Root cause" in row["report_text"]
-
-
-def fix_mode_daemon(tmp_path, remote):
-    logfile = tmp_path / "app.log"
-    logfile.write_text("")
-    repo_config = RepoConfig(repo="owner/name", base_branch="main", mode="fix")
-    config = Config(
-        github=GitHubConfig(repos=[repo_config]),
-        monitor=MonitorConfig(log_files=[str(logfile)], poll_interval=1),
-        daemon=DaemonConfig(workdir=str(tmp_path / "work")),
-    )
-    workspace = GitWorkspace(
-        tmp_path / "work" / "ws", "owner/name", remote_url=str(remote)
-    )
-    store = IncidentStore(tmp_path / "work" / "incidents.db")
-    monitor = LogFileMonitor(logfile)
-    daemon = Daemon(
-        config,
-        monitors=[monitor],
-        store=store,
-        workspaces={"owner/name": workspace},
-        monitor_to_repo={id(monitor): repo_config},
-        github=FakeGitHub(),
-        agent_factory_for_repo=lambda rc, ws: lambda: FakeAgent(
-            edit_path=ws.path / "main.py"
-        ),
-    )
-    return daemon, logfile, store
-
-
-# ---------------------------------------------------------------------------
-# Fix mode that changes nothing
-# ---------------------------------------------------------------------------
-
-
-async def test_fix_mode_with_no_diff_files_an_issue_not_an_empty_pull_request(setup):
-    """Fix mode used to open a PR either way, on the reasoning that the
-    committed report file was itself a diff to review. In practice that
-    shipped pull requests that look like fixes until you open the Files tab.
-    Asked twice and still nothing to merge means the finding is a finding,
-    and a finding is an issue.
-    """
-    daemon, logfile, agent, github, store, remote = setup
-    daemon.repo_for(daemon.monitors[0]).mode = "fix"  # agent edits nothing
-
-    with open(logfile, "a") as f:
-        f.write(TRACEBACK)
-    fp = (await daemon.poll_once())[0]
-
-    assert github.calls == []
-    assert len(github.issues) == 1
-    row = store.get(fp, "owner/name")
-    assert row["artifact_kind"] == ARTIFACT_ISSUE
-    assert row["branch"] == ""
-
-
-async def test_an_issue_from_fix_mode_says_the_fix_was_attempted(setup):
-    """Otherwise it reads as suggest mode, and nobody knows an edit was
-    tried and found unnecessary."""
-    daemon, logfile, agent, github, store, remote = setup
-    daemon.repo_for(daemon.monitors[0]).mode = "fix"
-
-    with open(logfile, "a") as f:
-        f.write(TRACEBACK)
-    await daemon.poll_once()
-
-    body = github.issues[0]["body"]
-    assert "No code change" in body
-    assert "Root cause" in body  # the analysis is still there
-
-
-async def test_an_issue_from_suggest_mode_claims_no_attempt(setup):
-    daemon, logfile, agent, github, store, remote = setup
-    assert daemon.repo_for(daemon.monitors[0]).mode == "suggest"
-
-    with open(logfile, "a") as f:
-        f.write(TRACEBACK)
-    await daemon.poll_once()
-
-    assert "No code change" not in github.issues[0]["body"]
-
-
-async def test_a_pull_request_with_a_fix_does_not_say_analysis_only(setup):
-    daemon, logfile, agent, github, store, remote = setup
-    fix_mode(daemon, agent)
-
-    with open(logfile, "a") as f:
-        f.write(TRACEBACK)
-    await daemon.poll_once()
-
-    assert "Analysis only" not in github.calls[0]["body"]
-
-
-async def test_no_branch_is_pushed_when_there_is_nothing_to_merge(setup):
-    """An orphan branch per unfixable incident is litter in the repo."""
-    daemon, logfile, agent, github, store, remote = setup
-    daemon.repo_for(daemon.monitors[0]).mode = "fix"
-
-    with open(logfile, "a") as f:
-        f.write(TRACEBACK)
-    await daemon.poll_once()
-
-    branches = subprocess.run(
-        ["git", "branch", "-a"], cwd=str(remote),
-        capture_output=True, text=True, check=True,
-    ).stdout
-    assert "maajun/incident-" not in branches
-
-
-async def test_a_branch_is_pushed_when_there_is_a_fix(setup):
-    daemon, logfile, agent, github, store, remote = setup
-    fix_mode(daemon, agent)
-
-    with open(logfile, "a") as f:
-        f.write(TRACEBACK)
-    await daemon.poll_once()
-
-    branches = subprocess.run(
-        ["git", "branch", "-a"], cwd=str(remote),
-        capture_output=True, text=True, check=True,
-    ).stdout
-    assert "maajun/incident-" in branches
-
-
-async def test_the_notice_says_pr_when_one_was_opened(setup):
-    daemon, logfile, agent, github, store, remote = setup
-    fix_mode(daemon, agent)
-    notices = []
-    daemon.on_notice = lambda message, level: notices.append(message)
-
-    with open(logfile, "a") as f:
-        f.write(TRACEBACK)
-    await daemon.poll_once()
-
-    assert any("PR opened" in n for n in notices)
-
-
 def test_artifact_label_covers_every_kind():
     from maajun.daemon.store import ARTIFACT_REPORT
 
@@ -1530,288 +672,6 @@ async def test_first_seen_is_when_the_error_started_not_when_the_cap_lifted(setu
     fp = (await daemon.poll_once())[0]
 
     assert store.get(fp, "owner/name")["first_seen"] == started
-
-
-# ---------------------------------------------------------------------------
-# Local mode
-# ---------------------------------------------------------------------------
-
-
-def local_daemon(tmp_path, repo_path):
-    logfile = tmp_path / "app.log"
-    logfile.write_text("")
-    config = Config(
-        monitor=MonitorConfig(log_files=[str(logfile)], poll_interval=1),
-        daemon=DaemonConfig(workdir=str(tmp_path / "work")),
-    )
-    store = IncidentStore(tmp_path / "work" / "incidents.db")
-    monitor = LogFileMonitor(logfile)
-    repo_config = RepoConfig(mode="suggest")
-    agent = FakeAgent()
-    daemon = Daemon(
-        config,
-        monitors=[monitor],
-        store=store,
-        workspaces={"": LocalWorkspace(repo_path)},
-        monitor_to_repo={id(monitor): repo_config},
-        github=None,
-        agent_factory_for_repo=lambda rc, ws: lambda: agent,
-        repo_configs=[repo_config],
-        local_mode=True,
-    )
-    return daemon, logfile, agent, store
-
-
-async def test_local_mode_offers_commit_history_for_deploy_blame(tmp_path):
-    """LocalWorkspace had no recent_commits, so the section was always skipped.
-
-    The daemon probes for the method with getattr; without it, every local
-    report's "Likely cause commit" was "Unclear" even in a git checkout.
-    """
-    checkout = tmp_path / "app"
-    checkout.mkdir()
-    subprocess.run(["git", "init", "-b", "main", str(checkout)],
-                   check=True, capture_output=True)
-    (checkout / "main.py").write_text("x = 1\n")
-    git("add", "-A", cwd=checkout)
-    git("commit", "-m", "the suspicious commit", cwd=checkout)
-
-    daemon, logfile, agent, store = local_daemon(tmp_path, checkout)
-    with open(logfile, "a") as f:
-        f.write(TRACEBACK)
-    await daemon.poll_once()
-
-    assert "the suspicious commit" in agent.prompts[0]
-
-
-async def test_local_mode_does_not_name_a_branch_it_cannot_vouch_for(tmp_path):
-    """Nothing pinned the checkout to base_branch, so 'main' would be a guess."""
-    checkout = tmp_path / "app"
-    checkout.mkdir()
-    subprocess.run(["git", "init", "-b", "wip", str(checkout)],
-                   check=True, capture_output=True)
-    (checkout / "main.py").write_text("x = 1\n")
-    git("add", "-A", cwd=checkout)
-    git("commit", "-m", "only commit", cwd=checkout)
-
-    daemon, logfile, agent, store = local_daemon(tmp_path, checkout)
-    with open(logfile, "a") as f:
-        f.write(TRACEBACK)
-    await daemon.poll_once()
-
-    assert "the checked-out branch" in agent.prompts[0]
-
-
-async def test_a_local_directory_that_is_not_a_repo_omits_the_section(tmp_path):
-    """No history to offer beats the model inventing a commit."""
-    plain = tmp_path / "plain"
-    plain.mkdir()
-
-    daemon, logfile, agent, store = local_daemon(tmp_path, plain)
-    with open(logfile, "a") as f:
-        f.write(TRACEBACK)
-    await daemon.poll_once()
-
-    assert "Recent commits" not in agent.prompts[0]
-
-
-async def test_local_mode_still_writes_its_report(tmp_path):
-    """The blame lookup must not disturb the artifact."""
-    checkout = tmp_path / "app"
-    checkout.mkdir()
-
-    daemon, logfile, agent, store = local_daemon(tmp_path, checkout)
-    with open(logfile, "a") as f:
-        f.write(TRACEBACK)
-    fp = (await daemon.poll_once())[0]
-
-    row = store.get(fp, "")
-    assert row["artifact_kind"] == "report"
-    assert Path(row["pr_url"]).exists()
-
-
-# ---------------------------------------------------------------------------
-# Nothing is published without content
-# ---------------------------------------------------------------------------
-
-
-async def test_an_empty_answer_is_re_asked_before_anything_is_filed(setup):
-    """A model that answers conversationally gets one more round, rather than
-    an empty issue standing in for a finding."""
-    daemon, logfile, agent, github, store, remote = setup
-    agent.replies = ["Sure! Let me take a look.", REPORT]
-
-    with open(logfile, "a") as f:
-        f.write(TRACEBACK)
-    fp = (await daemon.poll_once())[0]
-
-    assert len(agent.prompts) == 2
-    assert "not a usable report" in agent.prompts[1]
-    assert len(github.issues) == 1
-    assert "Root cause" in store.get(fp, "owner/name")["report_text"]
-
-
-async def test_a_re_ask_does_not_lose_the_first_asks_tokens(setup):
-    """chat() reports one call, and the first is the expensive one — counting
-    only the retry would under-report the cost and under-spend the cap."""
-    daemon, logfile, agent, github, store, remote = setup
-    agent.replies = ["Sure! Let me look.", REPORT]
-
-    with open(logfile, "a") as f:
-        f.write(TRACEBACK)
-    fp = (await daemon.poll_once())[0]
-
-    row = store.get(fp, "owner/name")
-    assert row["prompt_tokens"] == 2000  # both asks, not just the second
-    assert row["completion_tokens"] == 200
-
-
-async def test_a_failed_run_banks_what_every_ask_cost(setup):
-    daemon, logfile, agent, github, store, remote = setup
-    agent.replies = ["nope", "still nope"]
-
-    with open(logfile, "a") as f:
-        f.write(TRACEBACK)
-    await daemon.poll_once()
-
-    row = store.all()[0]
-    assert row["status"] == "failed"
-    assert row["prompt_tokens"] == 2000
-
-
-async def test_a_report_that_stays_empty_files_nothing(setup):
-    """Better a failed incident, visible in `maajun incidents`, than an issue
-    that tells the reader nothing."""
-    daemon, logfile, agent, github, store, remote = setup
-    agent.replies = ["Sure!", "Still nothing useful."]
-    notices = []
-    daemon.on_notice = lambda message, level: notices.append((level, message))
-
-    with open(logfile, "a") as f:
-        f.write(TRACEBACK)
-    handled = await daemon.poll_once()
-
-    assert handled == []
-    assert github.issues == [] and github.calls == []
-    assert any(level == "error" for level, _ in notices)
-    assert [row["status"] for row in store.all()] == ["failed"]
-
-
-@pytest.mark.parametrize("report,problem", [
-    ("", "empty"),
-    ("Looks fine to me.", "characters long"),
-    ("x" * 400, "none of the report's sections"),
-])
-def test_what_counts_as_an_unusable_report(report, problem):
-    from maajun.daemon.core import report_problem
-
-    assert problem in report_problem(report)
-
-
-def test_a_filled_in_report_passes():
-    from maajun.daemon.core import report_problem
-
-    assert report_problem(REPORT) == ""
-
-
-# ---------------------------------------------------------------------------
-# Manual reports are incidents too
-# ---------------------------------------------------------------------------
-
-
-async def test_a_manual_report_lands_in_the_incident_list(setup):
-    """It was analyzed, published, and then missing from `maajun incidents`:
-    mark_processed only updates, and nothing had recorded a row."""
-    daemon, logfile, agent, github, store, remote = setup
-    repo_config = daemon.repo_for(daemon.monitors[0])
-
-    url = await daemon.handle_manual_report("Checkout 500s on empty cart", repo_config)
-
-    rows = store.all()
-    assert len(rows) == 1
-    assert rows[0]["source"] == "manual"
-    assert rows[0]["status"] == "processed"
-    assert rows[0]["pr_url"] == url
-    assert "Root cause" in rows[0]["report_text"]
-
-
-async def test_a_dry_run_report_leaves_no_incident_behind(setup):
-    """It publishes nothing, so it must not leave a row that never resolves."""
-    daemon, logfile, agent, github, store, remote = setup
-    repo_config = daemon.repo_for(daemon.monitors[0])
-
-    await daemon.handle_manual_report("Slow /search", repo_config, dry_run=True)
-
-    assert store.all() == []
-
-
-async def test_a_manual_reports_cost_is_tracked(setup):
-    """Its spend counts against the daily cap like any other incident."""
-    daemon, logfile, agent, github, store, remote = setup
-    repo_config = daemon.repo_for(daemon.monitors[0])
-
-    await daemon.handle_manual_report("Slow /search endpoint", repo_config)
-
-    assert store.total_cost() >= 0
-    assert store.all()[0]["cost_usd"] is not None
-
-
-# ---------------------------------------------------------------------------
-# A bug that comes back
-# ---------------------------------------------------------------------------
-
-
-async def test_a_returning_error_is_filed_again_and_says_so(setup):
-    """The reader's first question is whether this is new; the second is what
-    was filed last time."""
-    daemon, logfile, agent, github, store, remote = setup
-
-    with open(logfile, "a") as f:
-        f.write(TRACEBACK)
-    fp = (await daemon.poll_once())[0]
-    store.conn.execute("UPDATE incidents SET last_seen = '2020-01-01T00:00:00+00:00'")
-    store.conn.commit()
-
-    with open(logfile, "a") as f:
-        f.write(TRACEBACK)
-    handled = await daemon.poll_once()
-
-    assert handled == [fp]
-    assert len(github.issues) == 2
-    body = github.issues[1]["body"]
-    assert "reported before and has come back" in body
-    assert github.issues[0]["body"].count("come back") == 0
-
-
-async def test_the_agent_is_told_the_fix_did_not_hold(setup):
-    daemon, logfile, agent, github, store, remote = setup
-
-    with open(logfile, "a") as f:
-        f.write(TRACEBACK)
-    await daemon.poll_once()
-    store.conn.execute("UPDATE incidents SET last_seen = '2020-01-01T00:00:00+00:00'")
-    store.conn.commit()
-
-    with open(logfile, "a") as f:
-        f.write(TRACEBACK)
-    await daemon.poll_once()
-
-    assert "reported before" in agent.prompts[1]
-    assert "reported before" not in agent.prompts[0]
-
-
-async def test_an_error_that_never_stopped_is_not_filed_twice(setup):
-    daemon, logfile, agent, github, store, remote = setup
-
-    with open(logfile, "a") as f:
-        f.write(TRACEBACK)
-    await daemon.poll_once()
-    with open(logfile, "a") as f:
-        f.write(TRACEBACK)
-    handled = await daemon.poll_once()
-
-    assert handled == []
-    assert len(github.issues) == 1
 
 
 # ---------------------------------------------------------------------------
@@ -1962,114 +822,123 @@ async def test_a_report_with_no_verdict_is_still_filed(setup):
 
 
 # ---------------------------------------------------------------------------
-# Fix mode has to actually fix
+# The cheap screen, between the signatures and the investigation
 # ---------------------------------------------------------------------------
 
-DESCRIBED_BUT_NOT_APPLIED = """# settings inherit a wildcard in production
 
-## Root cause
-`config/settings/base.py:58` falls back to "*" when the env var is unset.
+class FakeScreen:
+    """A one-round, tool-less agent standing in for the cheap tier."""
 
-## Suggested fix
-Pin it in production.py.
+    model = "claude-haiku-4-5"
 
-## Applied fix
-Not yet applied — this report documents the gap and the concrete patch.
-"""
+    def __init__(self, answer="investigate", fail=False):
+        self.answer = answer
+        self.fail = fail
+        self.prompts = []
+        self.closed = False
+
+    async def chat(self, message):
+        self.prompts.append(message)
+        if self.fail:
+            raise RuntimeError("provider down")
+        return CompletionResponse(
+            content=self.answer,
+            usage={"prompt_tokens": 400, "completion_tokens": 8},
+        )
+
+    def take_usage(self):
+        return {"prompt_tokens": 400, "completion_tokens": 8}
+
+    async def aclose(self):
+        self.closed = True
 
 
-async def test_fix_mode_that_only_described_the_fix_is_asked_again(setup, tmp_path):
-    """A pull request with no diff publishes nothing anyone can review. The
-    escape hatch for fixes that live outside the repo gets taken for findings
-    that do have an in-repo fix — an environment variable especially."""
+def with_screen(daemon, screen):
+    daemon.screen_factory = lambda: screen
+    return screen
+
+
+async def test_the_screen_stops_an_application_guard_before_the_investigation(setup):
+    """A paywall is not named after its own intent, so no signature catches
+    it — and the verdict from a finished report costs the investigation."""
     daemon, logfile, agent, github, store, remote = setup
-    repo_config = daemon.repo_for(daemon.monitors[0])
-    repo_config.mode = "fix"
-    workspace = daemon.workspaces["owner/name"]
-    edit = workspace.path / "main.py"
-
-    class Reluctant(FakeAgent):
-        """Describes the fix, then applies it only when pushed."""
-
-        async def chat(self, message):
-            self.prompts.append(message)
-            if len(self.prompts) > 1:
-                edit.write_text("items = [0]\n")
-                return CompletionResponse(
-                    content=REPORT, usage=dict(self.usage_per_call)
-                )
-            return CompletionResponse(
-                content=DESCRIBED_BUT_NOT_APPLIED, usage=dict(self.usage_per_call)
-            )
-
-    reluctant = Reluctant()
-    daemon.agent_factory_for_repo = lambda rc, ws: lambda: reluctant
+    screen = with_screen(daemon, FakeScreen("by design: a plan check refused it"))
 
     with open(logfile, "a") as f:
         f.write(TRACEBACK)
-    await daemon.poll_once()
+    handled = await daemon.poll_once()
 
-    assert len(reluctant.prompts) == 2
-    assert "You changed no files" in reluctant.prompts[1]
-    assert edit.read_text() == "items = [0]\n"
-    # A real diff, so the PR is a fix rather than an analysis.
-    assert len(github.calls) == 1
-    assert "Analysis only" not in github.calls[0]["body"]
+    assert handled == []
+    assert len(screen.prompts) == 1
+    assert agent.prompts == []  # the expensive one was never asked
+    assert github.issues == []
+    assert github.calls == []
+    row = store.ignored()[0]
+    assert row["status"] == "ignored"
+    assert "plan check refused it" in row["ignored_reason"]
+    # Cheap is not free, and the day's cap has to see it.
+    assert row["cost_usd"] > 0
 
 
-async def test_a_fix_that_landed_first_time_is_not_asked_twice(setup, tmp_path):
+async def test_a_screen_that_says_investigate_costs_one_small_request(setup):
     daemon, logfile, agent, github, store, remote = setup
-    repo_config = daemon.repo_for(daemon.monitors[0])
-    repo_config.mode = "fix"
-    workspace = daemon.workspaces["owner/name"]
-    edits = FakeAgent(edit_path=workspace.path / "main.py")
-    daemon.agent_factory_for_repo = lambda rc, ws: lambda: edits
+    screen = with_screen(daemon, FakeScreen("investigate"))
 
     with open(logfile, "a") as f:
         f.write(TRACEBACK)
-    await daemon.poll_once()
+    handled = await daemon.poll_once()
 
-    assert len(edits.prompts) == 1
-
-
-async def test_the_second_ask_keeps_the_first_report_when_it_answers_badly(setup):
-    """A model that edits the files and replies "done" must not cost the
-    analysis that came with the first answer."""
-    daemon, logfile, agent, github, store, remote = setup
-    repo_config = daemon.repo_for(daemon.monitors[0])
-    repo_config.mode = "fix"
-    workspace = daemon.workspaces["owner/name"]
-
-    class Terse(FakeAgent):
-        async def chat(self, message):
-            self.prompts.append(message)
-            if len(self.prompts) > 1:
-                (workspace.path / "main.py").write_text("items = [0]\n")
-                return CompletionResponse(content="Done.", usage={})
-            return CompletionResponse(
-                content=DESCRIBED_BUT_NOT_APPLIED, usage=dict(self.usage_per_call)
-            )
-
-    terse = Terse()
-    daemon.agent_factory_for_repo = lambda rc, ws: lambda: terse
-
-    with open(logfile, "a") as f:
-        f.write(TRACEBACK)
-    await daemon.poll_once()
-
-    body = github.calls[0]["body"]
-    assert "Root cause" in body
-    assert "Done." not in body
-
-
-async def test_suggest_mode_is_never_asked_for_an_edit(setup):
-    """It has no branch and no write permission; asking would be nonsense."""
-    daemon, logfile, agent, github, store, remote = setup
-    assert daemon.repo_for(daemon.monitors[0]).mode == "suggest"
-
-    with open(logfile, "a") as f:
-        f.write(TRACEBACK)
-    await daemon.poll_once()
-
+    assert len(handled) == 1
+    assert len(screen.prompts) == 1
     assert len(agent.prompts) == 1
     assert len(github.issues) == 1
+    assert screen.closed
+
+
+async def test_a_broken_screen_never_costs_an_error_its_report(setup):
+    """If it cannot answer, the error is investigated as it always was."""
+    daemon, logfile, agent, github, store, remote = setup
+    with_screen(daemon, FakeScreen(fail=True))
+
+    with open(logfile, "a") as f:
+        f.write(TRACEBACK)
+    handled = await daemon.poll_once()
+
+    assert len(handled) == 1
+    assert len(github.issues) == 1
+
+
+async def test_an_unparseable_screen_answer_reads_as_investigate(setup):
+    daemon, logfile, agent, github, store, remote = setup
+    with_screen(daemon, FakeScreen("I think this might be by design, but..."))
+
+    with open(logfile, "a") as f:
+        f.write(TRACEBACK)
+
+    assert len(await daemon.poll_once()) == 1
+
+
+async def test_screening_can_be_turned_off(setup):
+    daemon, logfile, agent, github, store, remote = setup
+    screen = with_screen(daemon, FakeScreen("by design: whatever"))
+    daemon.config.daemon.screen_errors = False
+
+    with open(logfile, "a") as f:
+        f.write(TRACEBACK)
+    handled = await daemon.poll_once()
+
+    assert screen.prompts == []
+    assert len(handled) == 1
+
+
+async def test_the_signatures_still_run_first_and_cost_nothing(setup):
+    """The screen is a model call, so a signature match must not reach it."""
+    daemon, logfile, agent, github, store, remote = setup
+    screen = with_screen(daemon, FakeScreen("investigate"))
+
+    with open(logfile, "a") as f:
+        f.write(VALIDATION_ERROR)
+    handled = await daemon.poll_once()
+
+    assert handled == []
+    assert screen.prompts == []
