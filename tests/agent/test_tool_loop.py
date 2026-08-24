@@ -8,6 +8,7 @@ from maajun.agent.tools import WRITE_FILE, ToolRegistry, default_registry
 from maajun.agent.tools.base import Tool, json_schema
 from maajun.config import AIProviderConfig, Config
 from maajun.providers.base import CompletionResponse, ProviderError, ToolDefinition
+from maajun.providers.factory import ProviderFactory
 
 # ---------------------------------------------------------------------------
 # Fake provider that simulates tool-calling rounds
@@ -524,3 +525,97 @@ async def test_usage_is_none_when_the_provider_reports_none(config):
     response = await agent.chat("do something")
 
     assert response.usage is None
+
+
+# ---------------------------------------------------------------------------
+# One run's spend ceiling
+# ---------------------------------------------------------------------------
+
+
+class ExpensiveProvider(StreamsFromChatMixin):
+    """Calls a tool every round, and bills for it."""
+
+    model = "claude-opus-5"
+
+    def __init__(self, per_round=60_000):
+        self.calls = 0
+        self.per_round = per_round
+        self.tools_offered = []
+
+    async def chat_completion(self, messages, tools=None, **kwargs):
+        self.calls += 1
+        self.tools_offered.append(list(tools or []))
+        usage = {"prompt_tokens": self.per_round, "completion_tokens": 1_000}
+        if not tools:
+            # No tools offered: this is the report round.
+            return CompletionResponse(content="the report", usage=usage)
+        return CompletionResponse(
+            content="",
+            usage=usage,
+            tool_calls=[
+                {
+                    "id": f"call_{self.calls}",
+                    "type": "function",
+                    "function": {"name": "read_file", "arguments": '{"path": "x.txt"}'},
+                }
+            ],
+        )
+
+    async def aclose(self):
+        pass
+
+
+def expensive_agent(monkeypatch, limit):
+    provider = ExpensiveProvider()
+    monkeypatch.setattr(ProviderFactory, "create_provider", lambda *a, **k: provider)
+    agent = Agent(
+        Config(ai=AIProviderConfig(provider="anthropic", api_key="x")),
+        cost_limit_usd=limit,
+    )
+    return agent, provider
+
+
+async def test_a_run_that_spends_its_allowance_is_asked_for_the_report(monkeypatch):
+    """max_rounds bounds how many requests a run makes, not what they cost.
+    Past the ceiling the tools are withheld and the work already paid for is
+    banked as a report."""
+    agent, provider = expensive_agent(monkeypatch, limit=0.5)
+
+    response = await agent.chat("investigate")
+
+    assert response.content == "the report"
+    # $0.325 a round on opus pricing: one round fits, two clear the ceiling,
+    # and the third is the report.
+    assert provider.calls == 3
+    assert provider.tools_offered[-1] == []
+    assert agent.spent_usd() > 0.5
+
+
+async def test_a_run_inside_its_allowance_is_left_alone(monkeypatch):
+    agent, provider = expensive_agent(monkeypatch, limit=100.0)
+
+    await agent.chat("investigate")
+
+    assert all(offered for offered in provider.tools_offered)
+
+
+async def test_no_ceiling_means_no_ceiling(monkeypatch):
+    """0 is documented as "no cap", and chat sets no limit at all."""
+    agent, provider = expensive_agent(monkeypatch, limit=0.0)
+
+    await agent.chat("investigate")
+
+    assert provider.calls == agent.max_rounds
+    assert all(offered for offered in provider.tools_offered)
+
+
+async def test_spend_accumulates_across_a_run_not_just_a_turn(monkeypatch):
+    """One incident is several turns, and the ceiling is for the incident."""
+    agent, provider = expensive_agent(monkeypatch, limit=100.0)
+
+    await agent.chat("investigate")
+    first = agent.spent_usd()
+    agent.take_usage()  # the daemon banks each turn's usage as it goes
+    await agent.chat("again")
+
+    assert agent.spent_usd() > first

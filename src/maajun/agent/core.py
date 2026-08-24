@@ -14,6 +14,7 @@ from maajun.providers.base import (
     StreamChunk,
 )
 from maajun.providers.factory import ProviderFactory
+from maajun.providers.pricing import extract_usage
 
 log = logging.getLogger(__name__)
 
@@ -35,6 +36,18 @@ TRIM_TARGET_CHARS = 120_000
 MIN_REQUEST_MESSAGES = 4
 
 TOOL_RESULT_PREVIEW = 200
+
+# Sent when a run has spent its allowance. The tools are withheld with it, so
+# the round it buys can only be the answer.
+OUT_OF_BUDGET = """
+That is the whole budget for this investigation — there are no more tool
+calls available, and this is the last thing you will be asked.
+
+Write the full report now, from what you have already read. Say plainly what
+you could not determine rather than filling it in: a report with a named gap
+is worth something, and a guess dressed as a finding is worth less than
+nothing.
+"""
 
 # True approves, False denies, a string denies with a reason for the model.
 PermissionCallback = Callable[[str, dict[str, Any]], Awaitable[bool | str]]
@@ -175,6 +188,7 @@ class Agent:
         approve: PermissionCallback | None = None,
         system_prompt: str | None = None,
         max_rounds: int = MAX_TOOL_ROUNDS,
+        cost_limit_usd: float = 0.0,
     ):
         self.config = config
         self.history: list[dict[str, Any]] = []
@@ -182,6 +196,10 @@ class Agent:
         self.approve = approve
         self.max_rounds = max_rounds
         self.usage: dict[str, int] = {}
+        # Whole-life spend. `usage` is cleared every turn, and one incident is
+        # several: the analysis, a re-ask, the insistence, the repair.
+        self.total_usage: dict[str, int] = {}
+        self.cost_limit_usd = cost_limit_usd
         # The daemon and chat want different instructions, same tool loop.
         self.system_prompt = system_prompt or SYSTEM_PROMPT
         self.provider = ProviderFactory.create_provider(
@@ -197,6 +215,18 @@ class Agent:
     @property
     def model(self) -> str | None:
         return getattr(self.provider, "model", None)
+
+    def spent_usd(self) -> float:
+        """What this agent has cost so far, at the pricing table's rates."""
+        return extract_usage(self.total_usage, self.model)[2]
+
+    def exhausted(self) -> bool:
+        """Whether this agent has spent everything one run is allowed.
+
+        `max_rounds` bounds how many requests a run makes, not what they cost,
+        and every round resends a growing prefix.
+        """
+        return bool(self.cost_limit_usd) and self.spent_usd() >= self.cost_limit_usd
 
     def clear_history(self) -> None:
         self.history.clear()
@@ -237,6 +267,7 @@ class Agent:
                 trim_request_messages(messages)
                 response = await self.complete(messages, tools)
                 accumulate_usage(self.usage, response.usage)
+                accumulate_usage(self.total_usage, response.usage)
 
                 if response.thinking:
                     thinking_parts.append(response.thinking)
@@ -253,8 +284,17 @@ class Agent:
                         model=response.model,
                     )
 
+                # Free: they read local files. The requests are what bill.
                 async for _ in self.run_tools(emit, response):
                     pass
+
+                if self.exhausted():
+                    log.warning(
+                        "spent $%.4f of the $%.2f this run is allowed; asking "
+                        "for the report from what has been read already",
+                        self.spent_usd(), self.cost_limit_usd,
+                    )
+                    return await self.answer_now(messages, emit, produced)
 
             emit({"role": "assistant", "content": last_content})
             self.commit_turn(produced)
@@ -268,6 +308,30 @@ class Agent:
         except Exception:
             self.rollback_user_message()
             raise
+
+    async def answer_now(
+        self,
+        messages: list[dict[str, Any]],
+        emit: Callable[[dict[str, Any]], None],
+        produced: list[dict[str, Any]],
+    ) -> CompletionResponse:
+        """One last round with the tools withheld, to bank the work so far.
+
+        Abandoning the run instead would pay for everything and file nothing.
+        Withheld rather than discouraged, so it cannot loop again.
+        """
+        emit({"role": "user", "content": OUT_OF_BUDGET})
+        trim_request_messages(messages)
+        response = await self.complete(messages, [])
+        accumulate_usage(self.usage, response.usage)
+        accumulate_usage(self.total_usage, response.usage)
+        emit({"role": "assistant", "content": response.content})
+        self.commit_turn(produced)
+        return CompletionResponse(
+            content=response.content,
+            usage=self.usage or None,
+            model=response.model,
+        )
 
     async def chat_stream(self, message: str) -> AsyncIterator[StreamChunk]:
         """Yield ("thinking" | "content" | "running" | "tool", text) chunks.
