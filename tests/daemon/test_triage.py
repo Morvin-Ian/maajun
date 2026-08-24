@@ -1,14 +1,15 @@
 """A guard that refused bad input is not a bug worth filing.
 
-Two passes decide: the signatures here, before any model is asked, and the
-agent's own verdict on the finished report. Both have to fail open — an
-error nobody can classify is a defect until shown otherwise.
+Three passes decide: the signatures here, before any model is asked; one
+cheap tool-less question for the guards no signature can recognise; and the
+agent's own verdict on the finished report. All of them have to fail open —
+an error nobody can classify is a defect until shown otherwise.
 """
 
 import pytest
 
 from maajun.daemon.reports import BY_DESIGN, DEFECT, by_design_reason, verdict
-from maajun.daemon.triage import by_design, compile_extra
+from maajun.daemon.triage import by_design, compile_extra, screened_out
 
 # ---------------------------------------------------------------------------
 # Signatures
@@ -125,3 +126,36 @@ def test_the_reason_carried_onto_the_incident_is_the_agents_own_line():
 
 def test_a_verdict_with_no_line_still_yields_a_reason():
     assert by_design_reason("## Verdict\n\n## Root cause\nx") == BY_DESIGN
+
+
+# ---------------------------------------------------------------------------
+# Reading the screen's one line
+# ---------------------------------------------------------------------------
+
+
+def test_investigate_is_not_a_reason_to_skip():
+    assert screened_out("investigate") == ""
+
+
+def test_a_by_design_verdict_carries_its_reason():
+    assert "a rate limiter refused it" in screened_out(
+        "by design: a rate limiter refused it"
+    )
+
+
+def test_formatting_around_the_verdict_is_tolerated():
+    assert screened_out("`By Design - quota exhausted`")
+    assert screened_out("**by design**: paywall")
+
+
+def test_a_verdict_buried_in_prose_is_not_a_verdict():
+    """A screen that cannot make itself understood must not drop an error."""
+    assert screened_out("I think this is by design, but I cannot be sure") == ""
+    assert screened_out("") == ""
+    assert screened_out("hmm") == ""
+
+
+def test_a_bare_by_design_still_reads_as_one():
+    assert screened_out("by design") == (
+        "the screen read it as by design: no reason given"
+    )

@@ -5,12 +5,12 @@ Not every logged error is a bug. A rejected login, a validation failure, a
 exactly what it is meant to do, and there is nothing to fix. Filing an issue
 for one costs a reader's attention and buries the errors that are real.
 
-Two passes catch them. This module is the cheap one: signatures matched
-against the raw error before any model is asked, so an obvious guard never
-becomes a billed analysis. It is deliberately narrow — it can only recognise
-errors that are named after their own intent. The second pass is the agent's
-own verdict on the report, in `reports.verdict`, which is what catches a
-guard specific to the application: a paywall, a feature flag, a quota.
+Three passes catch them, and this module holds the two cheap ones. The
+signatures are matched against the raw error before any model is asked, and
+can only recognise an error named after its own intent. `SCREEN_PROMPT` is
+one tool-less question for the guards they cannot — a paywall, a feature
+flag, a quota. The third is the agent's own verdict on the report, in
+`reports.verdict`, which has read the code that raised.
 
 Nothing is dropped. A match is recorded against the incident with its reason
 and listed by `maajun incidents --ignored`, so a signature that turns out to
@@ -79,3 +79,52 @@ def by_design(
         if pattern.search(details):
             return reason
     return ""
+
+
+# The middle pass. Learning from a finished report that an error was a guard
+# doing its job costs the whole investigation to file nothing, so this asks
+# the same question first, of a cheap model, for the guards no signature can
+# recognise. Biased hard towards investigating: a wrong "by design" costs a
+# real bug its report.
+SCREEN_PROMPT = """\
+You are triaging one error from a running application before a full
+investigation is paid for. You have no tools and cannot read the code — judge
+only what the error itself says.
+
+Error source: {source}
+
+```
+{details}
+```
+
+Answer with one line, and nothing else:
+
+- `investigate` — this looks like a defect, or you cannot tell from the error
+  alone. Any doubt at all is this answer.
+- `by design: <reason>` — the application refused something on purpose and
+  reported the refusal as an error. Input that failed validation, a login
+  refused, a rate limit, a quota or plan check, a paywall, a feature flag off,
+  a guard clause rejecting the state it exists to reject, a 404 for a row that
+  was never there.
+
+An unhandled exception through application code is `investigate`, even when
+the value that caused it came from bad input: the check being wrong, or
+missing, is the defect. A refusal that escapes as a 500 is `investigate` too
+— the refusal was intended, crashing on it was not.
+"""
+
+BY_DESIGN_REPLY = "by design"
+
+
+def screened_out(answer: str) -> str:
+    """The screen's reason for skipping this error, or "" to investigate.
+
+    Anything unexpected reads as "investigate": a screen that cannot make
+    itself understood must not be what drops an error.
+    """
+    lines = (answer or "").strip().splitlines()
+    line = lines[0].strip().strip("`*").lower() if lines else ""
+    if not line.startswith(BY_DESIGN_REPLY):
+        return ""
+    reason = line[len(BY_DESIGN_REPLY):].lstrip(":- ").strip()
+    return f"the screen read it as by design: {reason or 'no reason given'}"
