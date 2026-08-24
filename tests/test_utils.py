@@ -4,6 +4,7 @@ from maajun.utils import (
     PLACEHOLDER_REPO,
     is_valid_repo,
     truncate,
+    truncate_tail,
     utcnow_iso,
 )
 from maajun.vcs.api import GITHUB_API_VERSION, github_headers
@@ -55,3 +56,19 @@ def test_github_headers():
     headers = github_headers("tok")
     assert headers["Authorization"] == "Bearer tok"
     assert headers["X-GitHub-Api-Version"] == GITHUB_API_VERSION
+
+
+def test_truncate_tail_keeps_the_end_of_long_output():
+    """A test runner prints what failed last. Cutting from the front spends
+    the budget on collection noise and drops the reason."""
+    output = "collecting" * 500 + "\nFAILED tests/test_cart.py::test_total"
+
+    kept = truncate_tail(output, 60)
+
+    assert kept.endswith("FAILED tests/test_cart.py::test_total")
+    assert kept.startswith("…")
+    assert len(kept) == 61
+
+
+def test_truncate_tail_leaves_short_output_alone():
+    assert truncate_tail("all good", 60) == "all good"

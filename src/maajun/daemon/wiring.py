@@ -5,7 +5,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 from maajun.agent.core import Agent
-from maajun.agent.tools import Sandbox, default_registry
+from maajun.agent.tools import Sandbox, ToolRegistry, default_registry
 from maajun.auth import AuthManager
 from maajun.config import AIProviderConfig, Config, RepoConfig
 from maajun.daemon.core import Daemon, LocalWorkspace, make_permission_policy
@@ -92,10 +92,32 @@ class DaemonDeps:
                     # agent opens can be quoted in a public issue.
                     tools=default_registry(Sandbox([workspace.path])),
                     approve=make_permission_policy(repo_config.mode, workspace.path),
+                    # The daily cap is only read between incidents; this is
+                    # what bounds one of them.
+                    cost_limit_usd=config.daemon.max_usd_per_incident,
                 )
             return factory
 
         self.agent_factory_for_repo = agent_factory_for_repo
+
+        def screen_factory() -> Agent:
+            """A cheap agent for the one-line pre-investigation verdict.
+
+            No tools, one round, and no model named — every provider's base
+            model is its cheap tier, which is the point. `ai.triage_model`
+            overrides it.
+            """
+            screen_ai = ai.model_copy(
+                update={"model": config.ai.triage_model or None,
+                        "thinking_mode": False}
+            )
+            return Agent(
+                Config(ai=AIProviderConfig(**screen_ai.model_dump())),
+                tools=ToolRegistry(),
+                max_rounds=1,
+            )
+
+        self.screen_factory = screen_factory
 
 
 def local_repo_path(config: Config) -> Path:
@@ -237,6 +259,7 @@ def build_daemon(
         monitor_to_repo=monitor_to_repo,
         github=deps.github,
         agent_factory_for_repo=deps.agent_factory_for_repo,
+        screen_factory=deps.screen_factory,
         repo_configs=deps.repos,
         report_dir=deps.report_dir,
         local_mode=deps.local_mode,

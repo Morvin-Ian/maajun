@@ -53,17 +53,12 @@ say why they fail. Name the assumption that does not hold.>
 <who else hits this: other call sites, other endpoints, data already
 written. One or two lines.>
 
-## Suggested fix
-<the change, as a diff or code block against the real file. Minimal and
-targeted — no refactoring, no unrelated cleanup. Add the regression test
-that would have caught it. Write "None — working as intended" when the
-verdict is "by design".>
-
+{fix}
 A "by design" report is not filed anywhere — the sections below still get
 filled in, but briefly, and the run stops at the verdict.
 
 The first line becomes the title of the issue or pull request, so it has to
-name the same defect as "Root cause" and the same file as "Suggested fix" —
+name the same defect as "Root cause" and the same file as the fix section —
 not the exception in the log, when the two are in different places. A reader
 who sees only the title should already know what the change is.
 
@@ -78,6 +73,54 @@ If the fix turns out to be outside the code, title it that way — "SMTP_HOST
 is unset in the production environment" — rather than by the traceback it
 surfaced as.
 """
+
+SUGGESTED_FIX_SECTION = """\
+## Suggested fix
+<the change, as a diff or code block against the real file. Minimal and
+targeted — no refactoring, no unrelated cleanup. Add the regression test
+that would have caught it. Write "None — working as intended" when the
+verdict is "by design".>
+"""
+
+# Fix mode's replacement: the section records edits already made rather than
+# proposing them, and what the change left undone moves into "Follow-up",
+# which is filed as its own issue.
+APPLIED_FIX_SECTION = """\
+## Applied fix
+<the change you made, file by file: `path/to/file.py:LINE` and what is
+different about it now, then how to verify it. Past tense, because you have
+already made these edits — this section records them, it does not propose
+them.
+
+Do not paste the diff back. The pull request shows it; a copy in the body is
+a second version for the reviewer to check the first against.
+
+Write "None — working as intended" when the verdict is "by design".>
+
+## Follow-up
+<what this change deliberately does not do, if anything: the other call sites
+from "Blast radius" that need the same treatment, hardening that belongs in a
+change of its own, a test you could not write here. One bullet each, concrete
+enough to act on without re-reading the code.
+
+This section is filed as a separate issue, so nothing in it is lost by being
+left out of the fix — and a fix that grows to cover all of it is a fix nobody
+can review. Write "None" when the change is complete.>
+"""
+
+
+def report_format(mode: str) -> str:
+    """The report template, with the fix section the mode calls for.
+
+    Suggest mode proposes a change, and a diff is the clearest way to do it.
+    Fix mode has already made it: asking for the same section gets a pull
+    request whose body proposes what its own diff does — and bills the diff
+    twice, once as the edit and again as prose.
+    """
+    return REPORT_FORMAT.format(
+        fix=APPLIED_FIX_SECTION if mode == "fix" else SUGGESTED_FIX_SECTION
+    )
+
 
 ANALYZE_PROMPT = """\
 You are maajun, investigating a live error from a running deployment. Your
@@ -144,8 +187,9 @@ edit is a wasted run.
 - Add or extend a test that fails before your change and passes after, in
   whichever test directory this project already uses.
 - Do not reformat untouched code, bump dependencies, or rename anything.
-- "## Suggested fix" describes the change you made, not one you are proposing.
-  You are the one applying it — there is nobody downstream to hand it to.
+- Leave out of the fix what the fix does not need: another call site with the
+  same bug, hardening, a wider cleanup. It goes under "## Follow-up" and is
+  filed as its own issue, which is where a reviewer can act on it.
 - If the right fix is genuinely outside this repository, make no edit and say
   so under "## Applied fix" — but only when no file here should differ. An
   environment variable that no settings module defaults, no example env file
@@ -154,10 +198,8 @@ edit is a wasted run.
 - If the verdict is "by design", change nothing. There is no bug to fix, and
   an edit that silences a working guard is a regression.
 
-Finish with the report, plus:
-
-## Applied fix
-<every file you changed and what changed in it, then how to verify it>
+Finish with the report, in the format above: "## Applied fix" records every
+file you changed, and "## Follow-up" is what you deliberately left for later.
 """
 
 MANUAL_REPORT_PROMPT = """\
@@ -206,9 +248,37 @@ template, a docs page, the regression test that would have caught this.
 "The real fix is an environment variable" is not an exemption — change what
 the repository can control, and say what has to be set outside it.
 
+If a tool call keeps failing, output the change as a unified diff in a
+```diff fence — `--- a/path`, `+++ b/path`, `@@` hunks, against the files as
+they are on disk — and it will be applied for you. That is the one place a
+diff belongs in this report, and only when the edit itself would not go
+through.
+
 Only if no file in this repository should differ at all, leave it alone and
 say exactly that under "## Applied fix".
 
 Then output the full report again, with "## Applied fix" naming every file
+you changed.
+"""
+
+# Sent once when the project's test command fails against the applied fix,
+# with the failing output pasted in. One round, then the pull request ships
+# either way — a second failure is reported in its body rather than looped on.
+FAILED_TESTS_SUFFIX = """
+
+Your change is applied, but the project's test command `{command}` exits
+{status}:
+
+```
+{output}
+```
+
+Fix your own fix, with edit_file or write_file inside {workspace}: make the
+smallest further change that makes that command pass. Do not weaken, skip,
+or delete a test to go green — a silenced test is not a fix. If the failure
+is not yours — the same test fails without your edit — change nothing and
+say so under "## Applied fix".
+
+Then output the full report again, with "## Applied fix" covering every file
 you changed.
 """

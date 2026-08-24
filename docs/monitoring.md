@@ -73,7 +73,9 @@ poll_interval = 30            # seconds between polls
 workdir = "~/.local/share/maajun"   # clones, incident DB, state
 # repo_path = "/srv/myapp"          # local checkout to analyze in local mode
 # max_usd_per_day = 5.0             # stop analyzing past this daily spend (0 = no cap)
+# max_usd_per_incident = 1.0        # ceiling for one investigation (0 = no cap)
 # max_incidents_per_cycle = 10      # bound one poll's burst (0 = unlimited)
+# screen_errors = true              # cheap "is this a defect?" pass before investigating
 
 [chat]
 # max_usd_per_day = 5.0             # `maajun chat`'s own daily budget (0 = no cap)
@@ -508,7 +510,8 @@ updates the existing `maajun/report-<fingerprint>` branch and PR).
 | Artifact | A GitHub **issue**, always | A **pull request** with the diff |
 | Agent file access | Read-only | May edit files, but only inside its own clone |
 | Agent shell access | None | None |
-| Contains | Incident report + suggested fix | Applied fix + incident report |
+| Contains | Incident report + suggested fix | The change, and a report that records it |
+| Suggestions | In the issue, with a diff | Split off into a **follow-up issue** |
 | Verified | n/a — no diff | By `test_command`, if set |
 | You review | The suggestion | The actual diff |
 
@@ -522,10 +525,24 @@ hatch for fixes that live outside the repo is easy to over-apply, and an
 environment variable no settings default, example env file or compose file
 covers is a change to the repository rather than an exemption from one.
 
-If it still finds nothing that should differ, the analysis is filed as an
-**issue** — no branch, no push, no pull request with an empty diff. The issue
-says the fix was attempted, so it is not mistaken for suggest mode. A
-fix-mode PR therefore always has something to merge.
+Before that ask, the diffs in its report are applied for free: a model that
+describes the change instead of making it usually leaves the exact patch
+behind, and `git apply` costs no round. If it still finds nothing that should
+differ, the analysis is filed as an **issue** — no branch, no push, no pull
+request with an empty diff. The issue says the fix was attempted, so it is
+not mistaken for suggest mode. A fix-mode PR therefore always has something
+to merge.
+
+**The two modes are asked for different reports.** Suggest mode writes
+"## Suggested fix" — a proposal, with the diff in it. Fix mode writes
+"## Applied fix", which records what it already changed, in the past tense,
+with no diff pasted back: the pull request shows the diff, and a copy in the
+body is a second version to check the first against. Anything it decided not
+to do goes under "## Follow-up" and is filed as a **separate issue** linked
+to the pull request — the sibling call site with the same bug, hardening that
+deserves its own change, a test that needs a fixture this change does not
+build. In the PR body those read as things the diff does; as an issue they
+read as what they are. If the change is complete, no issue is filed.
 
 **Nothing is ever filed empty.** A report that comes back blank, or with
 none of its sections filled in, is asked for once more; if it is still
@@ -552,9 +569,20 @@ maajun config github.test_command "pytest -q"
 
 Either way the PR still opens — "this fix breaks the suite" is precisely
 what a reviewer needs to know, and suppressing the PR would bury the
-analysis with it. Output is collapsed in a `<details>` block, truncated at
-3 000 characters, with a 10-minute timeout. With no `test_command` the PR is
-labelled **Unverified**.
+analysis with it. A failure **this change caused** earns one repair round:
+the failing output is pasted back to the agent — exactly what a reviewer
+would send — and the command runs a second and final time, so its verdict in
+the body reflects whatever happened last.
+
+A failure that names none of the changed files does not. The agent has no
+shell, so it cannot tell its own breakage from a suite that was already red,
+and a repo in that state would otherwise buy a repair round on every
+incident, forever, for a failure nothing in the diff can fix. The PR body
+says so instead, which is also what a reviewer needs to know.
+
+Output is collapsed in a `<details>` block, and it is the **last** 3 000
+characters — a runner prints what failed at the end — with a 10-minute
+timeout. With no `test_command` the PR is labelled **Unverified**.
 
 The command comes from your config, never from the model: the agent has no
 shell access in either mode, so verification cannot be redirected to run
@@ -647,17 +675,25 @@ repositories share one.
 A logged error is not automatically a defect. A validator refusing bad
 input, a 401 for a wrong password, a rate limiter returning 429 — the code
 did what it is built to do. maajun closes those as `ignored` instead of
-filing them, in two passes:
+filing them, in three passes, cheapest first:
 
 1. **Signatures**, matched against the raw error before any AI call, so an
    obvious guard costs nothing. They cover errors named after their own
    intent: `ValidationError`, `AuthenticationFailed`, `PermissionDenied`,
    `403 Forbidden`, `CSRF`, `RateLimitExceeded`, `429 Too Many Requests`,
    `404 Not Found`.
-2. **The agent's verdict**, read from the `## Verdict` line of the report.
-   This is the one that recognises a guard specific to your application,
-   because the agent has read the code that raised it. A report with no
-   verdict, or one that says it cannot tell, is filed as a defect.
+2. **The screen** — one tool-less question to a cheap model: is this a
+   defect at all? It catches the guards no signature can, because they are
+   named after your application rather than their intent: a plan check, a
+   feature flag, a paywall, a quota. Without it those cost a full
+   investigation to reach the same answer and file nothing. Any doubt in the
+   answer, an unparseable answer, or an error reaching the model means the
+   error is investigated.
+3. **The agent's verdict**, read from the `## Verdict` line of the report.
+   This is the one that recognises a guard specific to your application when
+   only the code can tell, because the agent has read what raised it. A
+   report with no verdict, or one that says it cannot tell, is filed as a
+   defect.
 
 ```bash
 maajun incidents --ignored     # what was passed over, and why
@@ -671,6 +707,7 @@ same error from being re-examined on every poll. Tune it in `[monitor]`:
 | `ignore_by_design` | `true` | `false` analyzes every logged error |
 | `ignore_patterns` | `[]` | Extra regexes, tried before the shipped ones |
 
+
 ```bash
 maajun config monitor.ignore_by_design false
 ```
@@ -679,6 +716,19 @@ An error the signatures wrongly pass over shows up in `--ignored` rather than
 vanishing, so a bad match is visible. If one is wrong for your codebase,
 narrow it with `ignore_by_design = false` and lean on the agent's verdict
 instead.
+
+The screen lives in `[daemon]` and `[ai]` instead, because it is a model
+call:
+
+```bash
+maajun config daemon.screen_errors false          # investigate everything
+maajun config ai.triage_model "claude-haiku-4-5"  # pin the screen's model
+```
+
+Left unset it uses your provider's own base model, which is the cheap tier
+for every provider maajun supports. What it spends is recorded against the
+incident like anything else, so `--ignored` shows both the reason and the
+price of reaching it.
 
 ## Cost tracking
 
@@ -710,6 +760,19 @@ Change or remove the ceiling:
 ```bash
 maajun config daemon.max_usd_per_day 20   # raise it
 maajun config daemon.max_usd_per_day 0    # 0 = no cap
+```
+
+The daily cap is read **between** incidents, which leaves one investigation
+unbounded: a tool loop resends a growing prefix every round, so fifty rounds
+over a large repo can cost several days' allowance while the daily cap waits
+its turn. **`max_usd_per_incident` defaults to `1.0`** and bounds that. Past
+it the tools are withheld and the agent is asked for its report from what it
+has already read — a thinner report, not a lost one, and nothing that was
+paid for is thrown away.
+
+```bash
+maajun config daemon.max_usd_per_incident 3   # deeper investigations
+maajun config daemon.max_usd_per_incident 0   # 0 = no cap
 ```
 
 `maajun chat` is budgeted separately, by `chat.max_usd_per_day` (also
@@ -807,7 +870,10 @@ log files in one shot and points at whatever is missing.
   published: either the spend cap deferred it, or the daemon stopped
   mid-analysis. Either way it is picked up the next time the error is seen.
 - **An issue where you expected a PR** — in `fix` mode, an analysis that
-  changes no code files an issue instead. The issue says so at the top.
+  ends with no edit *and* no applicable patch files an issue instead: the
+  agent was asked once for the edit, then the diffs in its report were
+  applied with `git apply` (all or none), and neither produced a diff. The
+  issue says so at the top.
 - **Nothing detected** — confirm the log path is right and your log
   format matches `error_pattern` (warnings are *not* matched by default),
   or that errors are recognized stack traces. For JSON logs, set

@@ -14,6 +14,7 @@ from maajun.providers.base import (
     StreamChunk,
 )
 from maajun.providers.factory import ProviderFactory
+from maajun.providers.pricing import extract_usage
 
 log = logging.getLogger(__name__)
 
@@ -35,6 +36,18 @@ TRIM_TARGET_CHARS = 120_000
 MIN_REQUEST_MESSAGES = 4
 
 TOOL_RESULT_PREVIEW = 200
+
+# Sent when a run has spent its allowance. The tools are withheld with it, so
+# the round it buys can only be the answer.
+OUT_OF_BUDGET = """
+That is the whole budget for this investigation — there are no more tool
+calls available, and this is the last thing you will be asked.
+
+Write the full report now, from what you have already read. Say plainly what
+you could not determine rather than filling it in: a report with a named gap
+is worth something, and a guess dressed as a finding is worth less than
+nothing.
+"""
 
 # True approves, False denies, a string denies with a reason for the model.
 PermissionCallback = Callable[[str, dict[str, Any]], Awaitable[bool | str]]
@@ -78,28 +91,47 @@ def message_size(message: dict[str, Any]) -> int:
     return size
 
 
+def pinned_indexes(messages: list[dict[str, Any]]) -> set[int]:
+    """The system prompt, the first user message, and the newest one.
+
+    The first user message is the brief — in a daemon run it carries the
+    error, the rules and the report format — and the newest is what this
+    round is answering. Dropping either makes the model answer
+    conversationally, which costs a re-ask. Both sit at the front, so pinning
+    them also keeps the cached prefix stable.
+    """
+    users = [i for i, message in enumerate(messages) if message.get("role") == "user"]
+    return {0, *users[:1], *users[-1:]}
+
+
 def trim_request_messages(messages: list[dict[str, Any]]) -> None:
     """Drop the oldest rounds in place until the request fits the budget.
 
     Nothing is dropped below MAX_REQUEST_CHARS; past it the request is cut
-    back to TRIM_TARGET_CHARS in one go, so the cached prefix survives.
-
-    messages[0] is the system prompt and is never dropped. Everything else is
-    removed oldest-first, except that a "tool" message is never left at the
-    front: it belongs to the assistant message that requested it, and the API
-    rejects a tool result with no matching tool call ahead of it.
+    back to TRIM_TARGET_CHARS in one go, so the cached prefix survives. What
+    goes is the tool rounds, oldest first, never what `pinned_indexes`
+    protects — and cutting from the middle can strand a tool result, so the
+    result is swept for orphans.
     """
     total = sum(message_size(message) for message in messages)
     if total <= MAX_REQUEST_CHARS:
         return
-    while total > TRIM_TARGET_CHARS and len(messages) > MIN_REQUEST_MESSAGES:
-        total -= message_size(messages.pop(1))
-        while len(messages) > MIN_REQUEST_MESSAGES and messages[1].get("role") == "tool":
-            total -= message_size(messages.pop(1))
-    # The floor can stop having dropped an assistant message but not its tool
-    # results. The API rejects an orphan, so the floor gives way instead.
-    while len(messages) > 1 and messages[1].get("role") == "tool":
-        total -= message_size(messages.pop(1))
+    pinned = pinned_indexes(messages)
+    dropped: set[int] = set()
+    for index, message in enumerate(messages):
+        if total <= TRIM_TARGET_CHARS:
+            break
+        # A too-big request beats one the API rejects outright.
+        if len(messages) - len(dropped) <= MIN_REQUEST_MESSAGES:
+            break
+        if index in pinned:
+            continue
+        dropped.add(index)
+        total -= message_size(message)
+    messages[:] = drop_orphan_tool_results(
+        [message for index, message in enumerate(messages) if index not in dropped]
+    )
+    total = sum(message_size(message) for message in messages)
     if total > MAX_REQUEST_CHARS:
         log.warning(
             "request is %d chars after trimming to %d messages — the provider "
@@ -113,12 +145,24 @@ def is_tool_context(message: dict[str, Any]) -> bool:
     return message.get("role") == "tool" or bool(message.get("tool_calls"))
 
 
-def drop_leading_tool_results(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """A tool result whose call has been trimmed away is rejected by the API."""
-    start = 0
-    while start < len(messages) and messages[start].get("role") == "tool":
-        start += 1
-    return messages[start:]
+def drop_orphan_tool_results(
+    messages: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Drop tool results whose requesting assistant message is not here.
+
+    The API rejects a tool result that no tool call precedes, and a trim can
+    strand one anywhere — not only at the front.
+    """
+    kept: list[dict[str, Any]] = []
+    answering = False
+    for message in messages:
+        if message.get("role") == "tool":
+            if not answering:
+                continue
+        else:
+            answering = bool(message.get("tool_calls"))
+        kept.append(message)
+    return kept
 
 
 def accumulate_usage(total: dict[str, int], usage: dict[str, int] | None) -> None:
@@ -144,6 +188,7 @@ class Agent:
         approve: PermissionCallback | None = None,
         system_prompt: str | None = None,
         max_rounds: int = MAX_TOOL_ROUNDS,
+        cost_limit_usd: float = 0.0,
     ):
         self.config = config
         self.history: list[dict[str, Any]] = []
@@ -151,6 +196,10 @@ class Agent:
         self.approve = approve
         self.max_rounds = max_rounds
         self.usage: dict[str, int] = {}
+        # Whole-life spend. `usage` is cleared every turn, and one incident is
+        # several: the analysis, a re-ask, the insistence, the repair.
+        self.total_usage: dict[str, int] = {}
+        self.cost_limit_usd = cost_limit_usd
         # The daemon and chat want different instructions, same tool loop.
         self.system_prompt = system_prompt or SYSTEM_PROMPT
         self.provider = ProviderFactory.create_provider(
@@ -166,6 +215,18 @@ class Agent:
     @property
     def model(self) -> str | None:
         return getattr(self.provider, "model", None)
+
+    def spent_usd(self) -> float:
+        """What this agent has cost so far, at the pricing table's rates."""
+        return extract_usage(self.total_usage, self.model)[2]
+
+    def exhausted(self) -> bool:
+        """Whether this agent has spent everything one run is allowed.
+
+        `max_rounds` bounds how many requests a run makes, not what they cost,
+        and every round resends a growing prefix.
+        """
+        return bool(self.cost_limit_usd) and self.spent_usd() >= self.cost_limit_usd
 
     def clear_history(self) -> None:
         self.history.clear()
@@ -206,6 +267,7 @@ class Agent:
                 trim_request_messages(messages)
                 response = await self.complete(messages, tools)
                 accumulate_usage(self.usage, response.usage)
+                accumulate_usage(self.total_usage, response.usage)
 
                 if response.thinking:
                     thinking_parts.append(response.thinking)
@@ -222,8 +284,17 @@ class Agent:
                         model=response.model,
                     )
 
+                # Free: they read local files. The requests are what bill.
                 async for _ in self.run_tools(emit, response):
                     pass
+
+                if self.exhausted():
+                    log.warning(
+                        "spent $%.4f of the $%.2f this run is allowed; asking "
+                        "for the report from what has been read already",
+                        self.spent_usd(), self.cost_limit_usd,
+                    )
+                    return await self.answer_now(messages, emit, produced)
 
             emit({"role": "assistant", "content": last_content})
             self.commit_turn(produced)
@@ -237,6 +308,30 @@ class Agent:
         except Exception:
             self.rollback_user_message()
             raise
+
+    async def answer_now(
+        self,
+        messages: list[dict[str, Any]],
+        emit: Callable[[dict[str, Any]], None],
+        produced: list[dict[str, Any]],
+    ) -> CompletionResponse:
+        """One last round with the tools withheld, to bank the work so far.
+
+        Abandoning the run instead would pay for everything and file nothing.
+        Withheld rather than discouraged, so it cannot loop again.
+        """
+        emit({"role": "user", "content": OUT_OF_BUDGET})
+        trim_request_messages(messages)
+        response = await self.complete(messages, [])
+        accumulate_usage(self.usage, response.usage)
+        accumulate_usage(self.total_usage, response.usage)
+        emit({"role": "assistant", "content": response.content})
+        self.commit_turn(produced)
+        return CompletionResponse(
+            content=response.content,
+            usage=self.usage or None,
+            model=response.model,
+        )
 
     async def chat_stream(self, message: str) -> AsyncIterator[StreamChunk]:
         """Yield ("thinking" | "content" | "running" | "tool", text) chunks.
@@ -376,7 +471,7 @@ class Agent:
     def request_messages(self) -> list[dict[str, Any]]:
         return [
             {"role": "system", "content": self.system_prompt},
-            *drop_leading_tool_results(self.history[-MAX_HISTORY_MESSAGES:]),
+            *drop_orphan_tool_results(self.history[-MAX_HISTORY_MESSAGES:]),
         ]
 
     def commit_turn(self, produced: list[dict[str, Any]]) -> None:
@@ -397,7 +492,7 @@ class Agent:
         """Drop the oldest entries once history exceeds the cap."""
         if len(self.history) > MAX_HISTORY_MESSAGES:
             del self.history[: len(self.history) - MAX_HISTORY_MESSAGES]
-        self.history = drop_leading_tool_results(self.history)
+        self.history = drop_orphan_tool_results(self.history)
 
     def rollback_user_message(self) -> None:
         if self.history and self.history[-1]["role"] == "user":

@@ -7,20 +7,16 @@ import subprocess
 from collections.abc import Callable
 from pathlib import Path
 
-from maajun.agent.core import PermissionCallback, accumulate_usage
+from maajun.agent.core import PermissionCallback
 from maajun.config import Config, RepoConfig
-from maajun.daemon import reports, triage
+from maajun.daemon import triage
+from maajun.daemon.investigation import Investigation, Plan, bank_spend
 from maajun.daemon.prompts import (
     ANALYZE_PROMPT,
-    DEPLOYMENT_SECTION,
-    FIX_PROMPT_SUFFIX,
     INVESTIGATION_RULES,
     MANUAL_REPORT_PROMPT,
     RECENT_COMMITS_SECTION,
-    REGRESSION_SECTION,
-    REPORT_FORMAT,
-    RETRY_SUFFIX,
-    UNAPPLIED_FIX_SUFFIX,
+    report_format,
 )
 from maajun.daemon.store import (
     ARTIFACT_IGNORED,
@@ -30,9 +26,8 @@ from maajun.daemon.store import (
     IncidentStore,
 )
 from maajun.monitors import ErrorEvent, Monitor
-from maajun.providers.pricing import extract_usage
 from maajun.utils import utc_day_start_iso
-from maajun.vcs import CommandResult, GitHubClient, GitWorkspace
+from maajun.vcs import GitHubClient, GitWorkspace
 
 log = logging.getLogger(__name__)
 
@@ -47,65 +42,12 @@ def no_operation(_: str) -> None:
     pass
 
 
-
-# A report shorter than this has never been a real finding — it is a refusal,
-# an apology, or a one-line guess.
-MIN_REPORT_CHARS = 200
-
-
-
-def report_problem(report: str) -> str:
-    """Why a report is not worth filing, or "" when it is.
-
-    An issue or pull request with no findings costs the reader more than it
-    gives, and hides that the run failed — so this gates publishing.
-    """
-    if not report:
-        return "it was empty"
-    if len(report) < MIN_REPORT_CHARS:
-        return f"it was {len(report)} characters long"
-    lowered = report.lower()
-    found = [h for h in reports.REPORT_HEADINGS if h in lowered]
-    if len(found) < 2:
-        return "it has none of the report's sections"
-    return ""
+# How much of an error reaches the prompt. The screen gets less: it only
+# judges what the error says about itself, which is in the first lines.
+MAX_DETAILS_IN_PROMPT = 8000
+MAX_DETAILS_IN_SCREEN = 2000
 
 
-def headline_problem(report: str) -> str:
-    """Why a report cannot be titled, or "" when it can.
-
-    Soft, unlike report_problem: it earns one re-ask but never fails an
-    incident. A good analysis is worth more than a missing heading, and the
-    fallback title is the raw error, which is where this started.
-    """
-    if not reports.headline(report):
-        return "it has no one-line summary to title the issue with"
-    return ""
-
-
-def deployment_section(repo_config: RepoConfig, watching: list[str]) -> str:
-    """The deployment facts for the prompt, or "" when none are recorded.
-
-    Omitted entirely rather than half-filled: a report that says "port 0" or
-    invents a folder is worse than one that does not mention the deployment.
-    `watching` is the monitors actually attached to this repo, so the prompt
-    describes what is running rather than what the config hoped for.
-    """
-    deployment = repo_config.deployment
-    facts = []
-    if deployment.path:
-        facts.append(f"- Folder on the server: {deployment.path}")
-    if deployment.port:
-        facts.append(f"- Listens on port: {deployment.port}")
-    if deployment.runs:
-        facts.append(f"- Started by: {deployment.runs}")
-    if deployment.stack:
-        facts.append(f"- Built with: {deployment.stack}")
-    if watching:
-        facts.append(f"- Errors are read from: {', '.join(watching)}")
-    if not facts:
-        return ""
-    return DEPLOYMENT_SECTION.format(facts="\n".join(facts))
 
 # Tools fix mode may use. Anything else gated is refused with a reason, so
 # the model reads the refusal and tries a call that works.
@@ -183,6 +125,7 @@ class Daemon:
         monitor_to_repo: dict[int, RepoConfig],
         github: GitHubClient | None,
         agent_factory_for_repo,
+        screen_factory=None,
         repo_configs: list[RepoConfig] | None = None,
         report_dir: Path | None = None,
         local_mode: bool = False,
@@ -201,6 +144,10 @@ class Daemon:
                 overwriting the other;.
             github: GitHub API client, or None in local mode
             agent_factory_for_repo: (repo_config, workspace) -> () -> Agent
+            screen_factory: () -> Agent for the cheap pre-investigation
+                screen, or None to investigate everything the signatures let
+                through. Manual reports pass None: a person who described an
+                issue is not screened.
             repo_configs: Repos to act on, already normalized by DaemonDeps
             report_dir: Where local-mode reports are written
             local_mode: No GitHub configured — analyze and write reports to
@@ -215,6 +162,7 @@ class Daemon:
         self.monitor_to_repo = monitor_to_repo
         self.github = github
         self.agent_factory_for_repo = agent_factory_for_repo
+        self.screen_factory = screen_factory
         self.repo_configs = repo_configs or config.github.get_all_repos()
         self.report_dir = report_dir or Path(config.daemon.workdir).expanduser() / "reports"
         self.local_mode = local_mode
@@ -285,17 +233,6 @@ class Daemon:
             branch=branch, commits="\n".join(commits)
         )
 
-    def previous_artifact(self, event: ErrorEvent) -> dict | None:
-        """What this incident produced last time, if it is one that came back.
-
-        Read before publishing, because publishing overwrites the row it is
-        stored in.
-        """
-        row = self.store.get(event.fingerprint, event.repo)
-        if not row or not row["reopened_at"]:
-            return None
-        return {"url": row["previous_url"], "when": row["reopened_at"][:10]}
-
     def monitors_for(self, repo_config: RepoConfig) -> list[str]:
         """Names of the monitors feeding this repo, in wiring order."""
         return [
@@ -348,6 +285,42 @@ class Daemon:
             self.ignore_patterns,
             self.config.monitor.ignore_by_design,
         )
+
+    async def screen(self, event: ErrorEvent) -> str:
+        """Why a cheap model says this is not a defect, or "" to investigate.
+
+        The middle pass: the signatures only know an error named after its own
+        intent, and the pass below — the verdict on a finished report — costs
+        the whole investigation to reach. One tool-less request instead.
+
+        Fails open. A screen that errors or cannot be parsed means the error
+        is investigated; what it spent is banked either way.
+        """
+        if self.screen_factory is None or not self.config.daemon.screen_errors:
+            return ""
+        agent = self.screen_factory()
+        try:
+            response = await agent.chat(
+                triage.SCREEN_PROMPT.format(
+                    source=event.source, details=event.details[:MAX_DETAILS_IN_SCREEN],
+                )
+            )
+        except Exception:
+            log.debug(
+                "the screen could not run for fp=%s; investigating instead",
+                event.fingerprint, exc_info=True,
+            )
+            return ""
+        finally:
+            bank_spend(self.store, event, agent)
+            await agent.aclose()
+        reason = triage.screened_out(response.content)
+        if reason:
+            log.info(
+                "screened out fp=%s before the investigation: %s",
+                event.fingerprint, reason,
+            )
+        return reason
 
     def repo_for(self, monitor: Monitor) -> RepoConfig:
         """The repo a monitor's errors belong to."""
@@ -489,7 +462,7 @@ class Daemon:
                     event.fingerprint, label,
                 )
                 continue
-            intended = self.working_as_intended(event)
+            intended = self.working_as_intended(event) or await self.screen(event)
             if intended:
                 # Nothing is billed and nothing is filed, but the row stays
                 # so `maajun incidents --ignored` can show the call.
@@ -549,33 +522,31 @@ class Daemon:
         When dry_run=True, skips git/GitHub operations and prints the analysis.
         """
         event.repo = repo_config.repo
-        prompt = ANALYZE_PROMPT.format(
-            workspace=workspace.path,
-            source=event.source,
-            timestamp=event.timestamp,
-            details=event.details[:8000],
-            rules=INVESTIGATION_RULES,
-            format=REPORT_FORMAT,
-        )
-        return await self.analyze_and_open_pr(
-            event,
-            repo_config,
-            workspace,
-            branch=f"maajun/incident-{event.fingerprint}",
-            prompt=prompt,
-            # Only a fallback: the artifact is titled with what the report
-            # concludes, and this raw log line is used when it concludes
-            # nothing nameable.
-            subject_fallback=event.message,
-            commit_prefix="maajun: incident report for",
-            dry_run_header=f"AI analysis for: {event.message[:80]}",
-            dry_run_extra=(
-                f"Source: {event.source}  |  Fingerprint: {event.fingerprint}",
+        return await self.investigate(
+            event, repo_config, workspace, progress,
+            Plan(
+                branch=f"maajun/incident-{event.fingerprint}",
+                prompt=ANALYZE_PROMPT.format(
+                    workspace=workspace.path,
+                    source=event.source,
+                    timestamp=event.timestamp,
+                    details=event.details[:MAX_DETAILS_IN_PROMPT],
+                    rules=INVESTIGATION_RULES,
+                    format=report_format(repo_config.mode),
+                ),
+                # Only a fallback: the artifact is titled with what the report
+                # concludes, and this raw log line is used when it concludes
+                # nothing nameable.
+                subject_fallback=event.message,
+                commit_prefix="maajun: incident report for",
+                dry_run_header=f"AI analysis for: {event.message[:80]}",
+                dry_run_extra=(
+                    f"Source: {event.source}  |  Fingerprint: {event.fingerprint}",
+                ),
+                forget_on_dry_run=True,
+                blame_deploy=True,
+                dry_run=dry_run,
             ),
-            forget_on_dry_run=True,
-            blame_deploy=True,
-            dry_run=dry_run,
-            progress=progress,
         )
 
     async def handle_manual_report(
@@ -597,357 +568,47 @@ class Daemon:
         # mark_processed only updates, so without a row a report was analyzed,
         # published, and then missing from `maajun incidents` entirely.
         self.store.record(event)
-        prompt = MANUAL_REPORT_PROMPT.format(
-            workspace=workspace.path,
-            description=description[:8000],
-            rules=INVESTIGATION_RULES,
-            format=REPORT_FORMAT,
-        )
-        return await self.analyze_and_open_pr(
-            event,
-            repo_config,
-            workspace,
-            branch=f"maajun/report-{event.fingerprint}",
-            prompt=prompt,
-            subject_fallback=description,
-            commit_prefix="maajun: manual report for",
-            dry_run_header="AI analysis for manual report",
-            # A dry run publishes nothing, so it should leave no incident
-            # behind either — the row exists only to be marked processed.
-            forget_on_dry_run=True,
-            dry_run=dry_run,
-            progress=progress,
+        return await self.investigate(
+            event, repo_config, workspace, progress,
+            Plan(
+                branch=f"maajun/report-{event.fingerprint}",
+                prompt=MANUAL_REPORT_PROMPT.format(
+                    workspace=workspace.path,
+                    description=description[:MAX_DETAILS_IN_PROMPT],
+                    rules=INVESTIGATION_RULES,
+                    format=report_format(repo_config.mode),
+                ),
+                subject_fallback=description,
+                commit_prefix="maajun: manual report for",
+                dry_run_header="AI analysis for manual report",
+                # A dry run publishes nothing, so it should leave no incident
+                # behind either — the row exists only to be marked processed.
+                forget_on_dry_run=True,
+                dry_run=dry_run,
+            ),
         )
 
-    def record_failed_spend(
-        self, event: ErrorEvent, agent, already_counted: dict[str, int] | None = None
-    ) -> None:
-        """Bank what an analysis spent before it failed, against its incident.
-
-        Best-effort: losing the cost figure is no reason to lose the original
-        exception. `already_counted` carries earlier asks in the same run,
-        which the agent has since cleared off itself.
-        """
-        try:
-            spent = dict(already_counted or {})
-            accumulate_usage(spent, agent.take_usage())
-            prompt_tokens, completion_tokens, cost = extract_usage(
-                spent, agent.model
-            )
-            self.store.add_spend(
-                event.fingerprint,
-                event.repo,
-                prompt_tokens=prompt_tokens,
-                completion_tokens=completion_tokens,
-                cost_usd=cost,
-            )
-        except Exception:
-            log.debug("could not record the spend of a failed analysis", exc_info=True)
-
-    async def analyze_and_open_pr(
+    async def investigate(
         self,
         event: ErrorEvent,
         repo_config: RepoConfig,
         workspace: GitWorkspace,
-        *,
-        branch: str,
-        prompt: str,
-        subject_fallback: str,
-        commit_prefix: str,
-        dry_run_header: str,
-        dry_run_extra: tuple[str, ...] = (),
-        forget_on_dry_run: bool = False,
-        blame_deploy: bool = False,
-        dry_run: bool,
         progress: ProgressCallback,
+        plan: Plan,
     ) -> str:
-        """Shared pipeline for incident and manual reports: prepare workspace,
-        run the agent, then print (dry run), write a local report, file an
-        issue (suggest mode), or commit/push/open a PR (fix mode)."""
-        opens_pull_request = repo_config.mode == "fix"
-        # A dry run and local mode never branch, so there is no diff to want.
-        applies_a_fix = opens_pull_request and not dry_run and not self.local_mode
-        if not dry_run and not self.local_mode:
-            progress("Preparing workspace")
-            # The agent reads code from the clone either way; only fix mode
-            # needs a branch.
-            await workspace.sync(repo_config.base_branch)
-            if opens_pull_request:
-                await workspace.create_branch(branch, repo_config.base_branch)
+        """Run one incident and remember what it produced.
 
-        previous = self.previous_artifact(event)
-        if previous:
-            prompt += REGRESSION_SECTION.format(
-                reported=previous["when"], url=previous["url"] or "no link recorded"
-            )
-
-        # After sync: there is no history to read until the clone exists.
-        if blame_deploy:
-            prompt += await self.recent_commits_section(repo_config, workspace)
-
-        prompt += deployment_section(repo_config, self.monitors_for(repo_config))
-
-        if repo_config.mode == "fix":
-            prompt += FIX_PROMPT_SUFFIX.format(workspace=workspace.path)
-
-        progress("Analyzing with AI")
-        agent = self.agent_factory_for_repo(repo_config, workspace)()
-        # Summed across asks: chat() reports one call, and the first is the
-        # expensive one — the cap and the recorded cost must see both.
-        spent: dict[str, int] = {}
+        The kind of artifact is read back off the investigation because the
+        CLI reports it after the run — an issue where a PR was expected is
+        the interesting case, and it is decided in there.
+        """
+        investigation = Investigation(
+            self, event, repo_config, workspace, plan, progress
+        )
         try:
-            response = await agent.chat(prompt)
-            accumulate_usage(spent, response.usage)
-            report = response.content.strip()
-            problem = report_problem(report) or headline_problem(report)
-            if problem:
-                # One more round rather than filing an empty artifact: the
-                # usual cause is a model that answered conversationally.
-                log.info("re-asking for a usable report: %s", problem)
-                progress("Re-asking for the report")
-                response = await agent.chat(RETRY_SUFFIX.format(problem=problem))
-                accumulate_usage(spent, response.usage)
-                report = response.content.strip()
-            if applies_a_fix and not await workspace.has_changes():
-                report = await self.insist_on_the_edit(
-                    agent, workspace, report, spent, progress
-                )
-        except BaseException:
-            # There is no response to read the usage off, and the rounds it
-            # did make were billed. Bank them before the failure propagates.
-            self.record_failed_spend(event, agent, already_counted=spent)
-            raise
+            return await investigation.run()
         finally:
-            # One agent per incident; a watch run would leak their pools.
-            await agent.aclose()
-        prompt_tokens, completion_tokens, cost = extract_usage(
-            spent, getattr(response, "model", None)
-        )
-
-        # Titled from the report, so what the issue is called and what it
-        # says to fix are the same thing.
-        title = reports.artifact_title(report, subject_fallback)
-        commit_message = reports.commit_subject(
-            report, subject_fallback, commit_prefix
-        )
-
-        if reports.verdict(report) == reports.BY_DESIGN:
-            return self.close_as_intended(
-                event, report, (prompt_tokens, completion_tokens, cost),
-                dry_run=dry_run, dry_run_header=dry_run_header,
-                repo_config=repo_config,
-            )
-
-        problem = report_problem(report)
-        if problem and not dry_run:
-            # Nothing is published: an issue or PR with no findings costs the
-            # reader more than it gives, and hides that the run failed. What
-            # it cost is still banked against the incident.
-            self.record_failed_spend(event, agent, already_counted=spent)
-            raise RuntimeError(f"the analysis produced no usable report ({problem})")
-
-        if dry_run:
-            reports.print_dry_run(
-                dry_run_header, self.repo_label(repo_config), report,
-                (prompt_tokens, completion_tokens, cost), dry_run_extra,
-                title=title,
-            )
-            if forget_on_dry_run:
-                self.store.forget(event.fingerprint, event.repo)
-            return ""
-
-        if self.local_mode:
-            return self.save_local_report(
-                event, report, (prompt_tokens, completion_tokens, cost), progress
-            )
-
-        # Asked before the report file is written — that file is itself a
-        # change, so afterwards the answer is always yes.
-        code_changed = opens_pull_request and await workspace.has_changes()
-        if opens_pull_request and not code_changed:
-            # Asked twice and still nothing to merge, so the finding is a
-            # finding: an issue says that, a pull request with no diff in it
-            # only looks like a fix until you open the Files tab.
-            log.info(
-                "fix mode changed no code for fp=%s in repo=%s; filing the "
-                "analysis as an issue instead of an empty pull request",
-                event.fingerprint, repo_config.repo,
-            )
-            opens_pull_request = False
-
-        if opens_pull_request:
-            verification = await self.verify(repo_config, workspace, progress)
-            progress("Opening PR")
-            reports.write_report_file(
-                workspace.path / "docs" / "incidents", event, report
-            )
-            await workspace.commit_all(commit_message)
-            await workspace.push(branch)
-            url = await self.github.create_pull_request(
-                repo_config.repo,
-                head=branch,
-                base=repo_config.base_branch,
-                title=title,
-                body=reports.pr_body(
-                    repo_config, event, report, verification,
-                    previous_url=previous["url"] if previous else "",
-                ),
-            )
-            recorded_branch = branch
-            artifact_kind = ARTIFACT_PR
-        else:
-            progress("Filing issue")
-            url = await self.github.create_issue(
-                repo_config.repo,
-                title=title,
-                body=reports.issue_body(
-                    event, report,
-                    previous_url=previous["url"] if previous else "",
-                    unfixed=repo_config.mode == "fix",
-                ),
-            )
-            recorded_branch = ""
-            artifact_kind = ARTIFACT_ISSUE
-
-        self.last_artifact_kind = artifact_kind
-        self.store.mark_processed(
-            event.fingerprint,
-            event.repo,
-            branch=recorded_branch,
-            pr_url=url,
-            cost_usd=cost,
-            prompt_tokens=prompt_tokens,
-            completion_tokens=completion_tokens,
-            report_text=report,
-            artifact_kind=artifact_kind,
-        )
-        log.info(
-            "opened %s %s for fp=%s in repo=%s (cost: $%.4f, tokens: %d/%d)",
-            "PR" if opens_pull_request else "issue",
-            url, event.fingerprint, repo_config.repo, cost,
-            prompt_tokens, completion_tokens,
-        )
-        return url
-
-    async def insist_on_the_edit(
-        self,
-        agent,
-        workspace: GitWorkspace,
-        report: str,
-        spent: dict[str, int],
-        progress: ProgressCallback,
-    ) -> str:
-        """Ask once more for the edit fix mode was supposed to make.
-
-        A report that only describes the change opens a pull request with
-        nothing to review. The usual cause is the escape hatch in
-        FIX_PROMPT_SUFFIX being taken for a finding that does have an in-repo
-        fix — anything about an environment variable especially.
-
-        The answer replaces the report only if it is usable: a model that
-        edits the files and replies "done" should not cost the analysis.
-        """
-        log.info("fix mode changed nothing; asking once for the edit")
-        progress("Asking for the edit")
-        response = await agent.chat(
-            UNAPPLIED_FIX_SUFFIX.format(workspace=workspace.path)
-        )
-        accumulate_usage(spent, response.usage)
-        second = response.content.strip()
-        if report_problem(second):
-            return report
-        return second
-
-    def close_as_intended(
-        self,
-        event: ErrorEvent,
-        report: str,
-        usage: tuple[int, int, float],
-        *,
-        dry_run: bool,
-        dry_run_header: str,
-        repo_config: RepoConfig,
-    ) -> str:
-        """Close an incident the agent judged to be working as designed.
-
-        Nothing is published: an issue saying "the validator rejected invalid
-        input" costs a reader more than it gives. The analysis is kept on the
-        incident so the call can be reviewed, and what it cost is banked —
-        the round was billed either way.
-        """
-        reason = reports.by_design_reason(report)
-        prompt_tokens, completion_tokens, cost = usage
-        self.last_artifact_kind = ARTIFACT_IGNORED
-        self.last_ignored_reason = reason
-        log.info(
-            "not a defect fp=%s repo=%s: %s", event.fingerprint,
-            self.repo_label(repo_config), reason,
-        )
-        if dry_run:
-            reports.print_dry_run(
-                dry_run_header, self.repo_label(repo_config), report, usage,
-                title="(not filed — working as intended)",
-            )
-            self.store.forget(event.fingerprint, event.repo)
-            return ""
-        self.store.add_spend(
-            event.fingerprint, event.repo,
-            prompt_tokens=prompt_tokens,
-            completion_tokens=completion_tokens,
-            cost_usd=cost,
-        )
-        self.store.mark_ignored(event.fingerprint, event.repo, reason=reason)
-        return ""
-
-    def save_local_report(
-        self,
-        event: ErrorEvent,
-        report: str,
-        usage: tuple[int, int, float],
-        progress: ProgressCallback,
-    ) -> str:
-        """Write an incident report to disk. Returns the report path.
-
-        The local-mode counterpart to opening a PR: same analysis, same
-        recorded cost, but nothing leaves the machine.
-        """
-        progress("Writing report")
-        self.last_artifact_kind = ARTIFACT_REPORT
-        prompt_tokens, completion_tokens, cost = usage
-        report_path = reports.write_report_file(self.report_dir, event, report)
-        self.store.mark_processed(
-            event.fingerprint,
-            event.repo,
-            branch="",
-            pr_url=str(report_path),
-            cost_usd=cost,
-            prompt_tokens=prompt_tokens,
-            completion_tokens=completion_tokens,
-            report_text=report,
-            artifact_kind=ARTIFACT_REPORT,
-        )
-        log.info(
-            "wrote local report %s for fp=%s (cost: $%.4f, tokens: %d/%d)",
-            report_path, event.fingerprint, cost, prompt_tokens, completion_tokens,
-        )
-        return str(report_path)
-
-    async def verify(
-        self, repo_config: RepoConfig, workspace: GitWorkspace, progress: ProgressCallback
-    ) -> CommandResult | None:
-        """Run the repo's test_command against the agent's edits.
-
-        Not an agent capability: the command comes from config, so the model
-        cannot choose what runs. A failure is reported in the PR, not raised —
-        "the fix breaks the suite" is exactly the thing a reviewer needs to
-        see, and suppressing the PR would hide the analysis too.
-        """
-        if not repo_config.test_command:
-            return None
-        progress("Running tests")
-        result = await workspace.run_command(repo_config.test_command)
-        log.info(
-            "test_command %r exited %s in repo=%s",
-            repo_config.test_command, result.exit_code, repo_config.repo,
-        )
-        return result
+            if investigation.artifact_kind:
+                self.last_artifact_kind = investigation.artifact_kind
+            if investigation.ignored_reason:
+                self.last_ignored_reason = investigation.ignored_reason
