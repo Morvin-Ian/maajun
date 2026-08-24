@@ -30,6 +30,9 @@ STARTER_CONFIG = """\
 [ai]
 provider = "ox-alpha"
 # thinking_mode = true
+# Model for the cheap pre-investigation screen (default: the provider's own
+# base model).
+# triage_model = "claude-haiku-4-5"
 
 # Repositories the daemon documents errors in and opens PRs against. One
 # [[github.repos]] entry each, added with `maajun add-repo owner/name`.
@@ -84,8 +87,15 @@ poll_interval = 30
 # repo_path = "/srv/myapp"
 # Stop analyzing once this much has been spent in a UTC day (0 = no cap).
 # max_usd_per_day = 5.0            # default: 5.0
+# Most one incident may spend before it has to report from what it has read
+# (0 = no cap). The daily cap is only read between incidents.
+# max_usd_per_incident = 1.0       # default: 1.0
 # Most incidents analyzed per poll cycle (0 = unlimited).
 # max_incidents_per_cycle = 10
+# Ask a cheap model whether each new error is a defect at all before paying
+# for the investigation. What it sets aside is listed by
+# `maajun incidents --ignored`, with the reason.
+# screen_errors = true             # default: true
 # Report an error again if it returns after this long away (0 = never).
 # reopen_after_days = 7.0
 
@@ -116,6 +126,9 @@ def default_data_dir() -> Path:
 class AIProviderConfig(Base):
     provider: str = ProviderType.OX_ALPHA.value
     model: str | None = None
+    # Model for the one-line "is this even a defect?" screen. Unset means the
+    # provider's own base model, which is the cheap tier for all of them.
+    triage_model: str | None = None
     api_key: str | None = None
     base_url: str | None = None
     temperature: float = 0.3
@@ -315,7 +328,14 @@ class DaemonConfig(Base):
     workdir: str = Field(default_factory=lambda: str(default_data_dir()))
     repo_path: str = ""
     max_usd_per_day: float = 5.0
+    # The daily cap is only checked between incidents, and one investigation
+    # can spend a whole day's allowance. Past this the tools are withheld and
+    # the report is asked for, so what was paid for still lands.
+    max_usd_per_incident: float = 1.0
     max_incidents_per_cycle: int = 10
+    # Screen each new error with one cheap tool-less request before paying for
+    # the investigation. Off investigates everything the signatures let past.
+    screen_errors: bool = True
     # A published incident that goes quiet this long and comes back is
     # reported again, as a regression. 0 reports each error once, ever.
     reopen_after_days: float = DEFAULT_REOPEN_AFTER_DAYS
@@ -371,6 +391,7 @@ class Config(Base):
         ai = table(doc, "ai")
         ai["provider"] = self.ai.provider
         set_or_del(ai, "model", self.ai.model)
+        set_or_del(ai, "triage_model", self.ai.triage_model)
         set_or_del(ai, "base_url", self.ai.base_url)
         ai["temperature"] = self.ai.temperature
         ai["max_tokens"] = self.ai.max_tokens
@@ -431,7 +452,9 @@ class Config(Base):
         daemon["workdir"] = self.daemon.workdir
         set_or_del(daemon, "repo_path", self.daemon.repo_path or None)
         set_if_customized(daemon, self.daemon, "max_usd_per_day")
+        set_if_customized(daemon, self.daemon, "max_usd_per_incident")
         set_if_customized(daemon, self.daemon, "max_incidents_per_cycle")
+        set_if_customized(daemon, self.daemon, "screen_errors")
 
         chat = table(doc, "chat")
         set_if_customized(chat, self.chat, "max_usd_per_day")
