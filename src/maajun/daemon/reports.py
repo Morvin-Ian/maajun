@@ -8,7 +8,7 @@ from rich.console import Console
 from maajun.config import RepoConfig
 from maajun.monitors import ErrorEvent
 from maajun.render import render
-from maajun.utils import truncate
+from maajun.utils import truncate, truncate_tail
 from maajun.vcs import CommandResult
 
 PROJECT_URL = "https://github.com/Morvin-Ian/maajun"
@@ -21,15 +21,23 @@ MAX_TITLE_CHARS = 80
 MAX_COMMIT_SUBJECT_CHARS = 60
 
 # The sections that make a report actionable. Not every one is required: a
-# model that renames a heading should not cost a filed incident.
-REPORT_HEADINGS = ("what happened", "root cause", "suggested fix")
+# model that renames a heading should not cost a filed incident. Both
+# spellings of the fix are here because the mode decides which is asked for.
+REPORT_HEADINGS = ("what happened", "root cause", "suggested fix", "applied fix")
 
 # Every heading the format asks for. A title is the report's summary, so a
 # match here means the summary is missing and a section was read instead.
 SECTION_HEADINGS = REPORT_HEADINGS + (
-    "how to reproduce", "blast radius", "likely cause commit", "applied fix",
-    "error details", "verdict",
+    "how to reproduce", "blast radius", "likely cause commit", "follow-up",
+    "follow up", "error details", "verdict",
 )
+
+# A follow-up section saying the change is complete. An issue for one of
+# these is worse than no issue.
+NOTHING_TO_FOLLOW_UP = ("none", "n/a", "nothing", "no follow")
+
+# Shorter than this is "None" with extra words, not a piece of work.
+MIN_FOLLOW_UP_CHARS = 30
 
 HEADING_RE = re.compile(r"^\s{0,3}#{1,3}\s+(.+?)\s*#*\s*$", re.MULTILINE)
 
@@ -115,6 +123,131 @@ def by_design_reason(report: str) -> str:
     return truncate(line, MAX_TITLE_CHARS) or BY_DESIGN
 
 
+# A fenced block's contents; the tag line (```diff) is matched but dropped.
+PATCH_FENCE_RE = re.compile(r"```[^\n`]*\n(.*?)```", re.DOTALL)
+
+DIFF_SOURCE_RE = re.compile(r"^--- (?:a/|b/|/dev/null)", re.MULTILINE)
+DIFF_DEST_RE = re.compile(r"^\+\+\+ (?:a/|b/|/dev/null)", re.MULTILINE)
+DIFF_HUNK_RE = re.compile(r"^@@ -\d+", re.MULTILINE)
+
+
+def looks_like_patch(block: str) -> bool:
+    """Whether a fenced block parses as a unified diff, loosely.
+
+    Stricter than git apply on purpose: prose or ordinary code that happens to
+    start with "-" must never reach the working tree.
+    """
+    if block.startswith("diff --git"):
+        return True
+    return bool(
+        DIFF_SOURCE_RE.search(block)
+        and DIFF_DEST_RE.search(block)
+        and DIFF_HUNK_RE.search(block)
+    )
+
+
+def extract_patches(report: str) -> list[str]:
+    """The unified diffs in the report, in order, ready for `git apply`.
+
+    A model that only describes the change usually leaves the exact patch
+    behind anyway. Reading it out costs nothing.
+    """
+    patches = []
+    for match in PATCH_FENCE_RE.finditer(report or ""):
+        block = match.group(1).strip("\n")
+        # `git apply` wants the final newline; a trimmed fence drops it.
+        if block and looks_like_patch(block):
+            patches.append(block + "\n")
+    return patches
+
+
+FOLLOW_UP_RE = re.compile(
+    r"^\s{0,3}#{1,3}\s+follow[\s-]?up\s*#*\s*$", re.IGNORECASE | re.MULTILINE
+)
+
+
+def split_follow_up(report: str) -> tuple[str, str]:
+    """The report without its "Follow-up" section, and that section's body.
+
+    The pull request carries the change; what it left undone becomes an issue.
+    In one body a reviewer cannot tell which lines the diff already covers,
+    which is how a fix comes to read as a list of suggestions.
+    """
+    match = FOLLOW_UP_RE.search(report or "")
+    if not match:
+        return report, ""
+    rest = report[match.end():]
+    # The next heading closes the section, whatever its level.
+    following = HEADING_RE.search(rest)
+    if following:
+        rest = rest[: following.start()]
+    return report[: match.start()].rstrip() + "\n", rest.strip()
+
+
+def worth_following_up(text: str) -> bool:
+    """Whether a follow-up section names work rather than saying "None"."""
+    stripped = text.strip().strip("<>").strip()
+    if len(stripped) < MIN_FOLLOW_UP_CHARS:
+        return False
+    return not stripped.lower().startswith(NOTHING_TO_FOLLOW_UP)
+
+
+def follow_up_title(report: str, fallback: str) -> str:
+    return (
+        "[maajun] Follow-up: "
+        f"{truncate(headline(report) or fallback, MAX_TITLE_CHARS)}"
+    )
+
+
+def follow_up_body(event: ErrorEvent, follow_up: str, pr_url: str) -> str:
+    """The companion issue: what the fix left for later, and where the fix is.
+
+    A link is enough — GitHub cross-references the mention, so the pull
+    request shows the issue too.
+    """
+    return (
+        f"The fix for this is in {pr_url}.\n\n"
+        "These are the parts it deliberately left alone, filed here so the "
+        "pull request stays reviewable and none of it is lost:\n\n"
+        f"{follow_up}\n\n---\n\n"
+        f"{provenance(event)}"
+    )
+
+
+# A report shorter than this has never been a real finding — it is a refusal,
+# an apology, or a one-line guess.
+MIN_REPORT_CHARS = 200
+
+
+def report_problem(report: str) -> str:
+    """Why a report is not worth filing, or "" when it is.
+
+    An issue or pull request with no findings costs the reader more than it
+    gives, and hides that the run failed — so this gates publishing.
+    """
+    if not report:
+        return "it was empty"
+    if len(report) < MIN_REPORT_CHARS:
+        return f"it was {len(report)} characters long"
+    lowered = report.lower()
+    found = [h for h in REPORT_HEADINGS if h in lowered]
+    if len(found) < 2:
+        return "it has none of the report's sections"
+    return ""
+
+
+def headline_problem(report: str) -> str:
+    """Why a report cannot be titled, or "" when it can.
+
+    Soft, unlike report_problem: it earns one re-ask but never fails an
+    incident. A good analysis is worth more than a missing heading, and the
+    fallback title is the raw error, which is where this started.
+    """
+    if not headline(report):
+        return "it has no one-line summary to title the issue with"
+    return ""
+
+
 def provenance(event: ErrorEvent) -> str:
     """Where this came from, so an artifact is traceable back to the event."""
     return (
@@ -175,6 +308,7 @@ def pr_body(
     verification: CommandResult | None = None,
     *,
     previous_url: str = "",
+    unrelated_failure: bool = False,
 ) -> str:
     """Fix mode's artifact: the analysis, the test verdict, and provenance.
 
@@ -186,15 +320,22 @@ def pr_body(
         regression_note(previous_url)
         + f"{report}\n\n---\n"
         "This PR contains the applied fix and the incident report.\n\n"
-        f"{verification_section(repo_config, verification)}"
+        f"{verification_section(repo_config, verification, unrelated_failure)}"
         f"{provenance(event)}"
     )
 
 
 def verification_section(
-    repo_config: RepoConfig, verification: CommandResult | None
+    repo_config: RepoConfig,
+    verification: CommandResult | None,
+    unrelated_failure: bool = False,
 ) -> str:
-    """A verdict on the fix, so the diff isn't reviewed on trust alone."""
+    """A verdict on the fix, so the diff isn't reviewed on trust alone.
+
+    `unrelated_failure` says the suite failed without naming anything this
+    change touched, so no repair was attempted. A reviewer who is not told
+    reads a pre-existing red suite as a fact about the fix.
+    """
     if verification is None:
         return (
             "> ⚠️ **Unverified** — no `test_command` is configured for this "
@@ -209,7 +350,17 @@ def verification_section(
             f"❌ **Tests fail** (exit {verification.exit_code}) — "
             f"`{repo_config.test_command}`"
         )
-    output = truncate(verification.output, MAX_TEST_OUTPUT, "\n… (truncated)")
+        if unrelated_failure:
+            verdict += (
+                "\n\n> The failure names none of the files this change "
+                "touches, so the suite was most likely already red. No repair "
+                "was attempted; the output is below."
+            )
+    # The tail: what failed is printed last, which is what the details block
+    # was opened for.
+    output = truncate_tail(
+        verification.output, MAX_TEST_OUTPUT, "… (earlier output truncated)\n"
+    )
     return (
         f"{verdict}\n\n"
         f"<details><summary>Output</summary>\n\n"
