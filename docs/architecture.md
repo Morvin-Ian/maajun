@@ -183,11 +183,6 @@ supplies only `read_stream()`.
 - **docker** (`monitors/docker.py`) — `docker logs --since <last poll>`,
   reading the container's stderr as well as its stdout, since that is
   where an unhandled exception goes.
-- **GitHub Actions** (`monitors/github_actions.py`) — polls for failed
-  workflow runs, turning CI breakage into incidents. Failures are
-  fingerprinted by commit SHA, so several red workflows on the same
-  commit collapse into a single incident.
-
 Neither journald nor docker asks for timestamps, on purpose: both prefix
 every line, which would leave the indented lines of a traceback no longer
 indented and so impossible to group into one incident.
@@ -195,11 +190,9 @@ indented and so impossible to group into one incident.
 The two shelling-out monitors share `CommandStreamMonitor`
 (`monitors/shell.py`), which runs the command in a thread — `poll_once`
 gathers every monitor at once, so a blocking read would stall all of them —
-and reports an unreadable source once rather than every poll. The GitHub
-Actions monitor is built on `HTTPPollMonitor`, which owns the HTTP client,
-remembers which item ids it has already emitted, and swallows (but logs)
-fetch failures. Either way a monitor that can't reach its source returns no
-events rather than crashing the daemon.
+and reports an unreadable source once rather than every poll. A monitor
+that can't reach its source returns no events rather than crashing the
+daemon.
 
 Every monitor also inherits **burst thresholding** from the base class:
 with `burst_threshold > 1`, events are buffered until N of them land
@@ -211,7 +204,7 @@ blip never becomes a pull request.
 ```
 maajun/
   agent/        the tool-calling loop and its tools
-  monitors/     error sources (files, journald, docker, Actions) + defaults
+  monitors/     error sources (files, journald, docker) + defaults
   providers/    chat_completions.py (the protocol) + one file per vendor,
                 plus pricing.py
   daemon/       core (loop), reports (rendering), store, prompts, wiring

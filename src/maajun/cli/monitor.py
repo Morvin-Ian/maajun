@@ -102,16 +102,13 @@ def report_daemon_status(workdir: str) -> None:
         console.print(Panel(escape(recent), title="Recent output", border_style="blue"))
 
 
-def monitors_of(repo_config, daemon, *, runtime_only: bool = False) -> list[str]:
+def monitors_of(repo_config, daemon) -> list[str]:
     """Names of the monitors feeding one repo.
 
-    With runtime_only, CI is left out: a repo watched only by gh-actions
-    still has nobody watching the requests its users make.
+    Every monitor is a runtime source now that CI is not watched, so there is
+    nothing left to filter out.
     """
-    names = daemon.monitors_for(repo_config)
-    if runtime_only:
-        return [name for name in names if not name.startswith("gh-actions:")]
-    return names
+    return daemon.monitors_for(repo_config)
 
 
 def deployment_line(deployment) -> str:
@@ -242,7 +239,7 @@ def watch(
             border_style="blue",
         ))
         for repo_config in repos:
-            if not monitors_of(repo_config, daemon, runtime_only=True):
+            if not monitors_of(repo_config, daemon):
                 # Loud, but not fatal: a daemon that refuses to start on a
                 # config that worked yesterday is worse than a noisy one.
                 console.print(

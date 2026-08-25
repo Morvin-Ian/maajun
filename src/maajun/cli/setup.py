@@ -307,14 +307,12 @@ def setup_error_sources(
     ask: Asker,
     *,
     log_paths: str | None,
-    github_actions: bool | None,
 ) -> None:
     # Always: without knowing where this app's errors land, the daemon has
     # nothing to watch, and a finished setup would be a lie.
     for entry in config.github.get_all_repos():
         record_deployment(entry, config, auth)
 
-    configured_repos = config.github.get_all_repos()
     # Only asked when it is still needed: a repo that already knows where its
     # errors land does not need a path typed in as well.
     covered = any(sources for _, sources in config.sources_by_repo())
@@ -333,31 +331,8 @@ def setup_error_sources(
             # Fine: the app may only create its error log on first use.
             console.print(f"  [yellow]⚠[/yellow] {path} [dim](not found yet)[/dim]")
 
-    want_actions = (
-        github_actions if github_actions is not None
-        else (
-            bool(configured_repos)
-            and auth.has_github_token()
-            and ask.confirm("Watch GitHub Actions for failed runs too?", default=True)
-        )
-    )
-    if want_actions:
-        repo_names = [repo_config.repo for repo_config in configured_repos]
-        if not repo_names:
-            console.print("  [yellow]⚠ GitHub Actions needs a configured repo — "
-                          "skipped.[/yellow]")
-        elif not auth.has_github_token():
-            console.print("  [yellow]⚠ GitHub Actions needs a GitHub token — "
-                          "skipped.[/yellow]")
-        else:
-            # Repo list only: the token would be a secret in a plaintext file.
-            config.monitor.github_actions_repos = repo_names
-            console.print(
-                f"  [green]✓[/green] Watching Actions on {', '.join(repo_names)}"
-            )
-
-    # Actions only sees CI. Runtime errors — the failed requests users
-    # actually hit — reach maajun through one of the three sinks or not at all.
+    # Runtime errors — the failed requests users actually hit — reach maajun
+    # through one of the three sinks or not at all.
     unwatched = [
         repo_config.repo for repo_config, sources in config.sources_by_repo()
         if repo_config and not sources and repo_config.deployment.runtime != "none"
@@ -389,10 +364,6 @@ def setup(
     ),
     logs: str | None = typer.Option(
         None, "--logs", "-l", help="Comma-separated log files to watch"
-    ),
-    github_actions: bool | None = typer.Option(
-        None, "--github-actions/--no-github-actions",
-        help="Watch the configured repos for failed workflow runs",
     ),
     non_interactive: bool = typer.Option(
         False, "--non-interactive",
@@ -429,10 +400,7 @@ def setup(
     )
 
     step(3, total, "Error sources")
-    setup_error_sources(
-        auth, config, ask,
-        log_paths=logs, github_actions=github_actions,
-    )
+    setup_error_sources(auth, config, ask, log_paths=logs)
 
     config.save(path)
     console.print(f"\n[green]✓ Wrote {path}[/green]")

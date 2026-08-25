@@ -24,7 +24,6 @@ Three steps, of which only the first is required:
    records what it finds. No paths to remember and type — a path typed from
    memory is how a repo ends up watching a file nothing writes. If nothing
    turns up, it says so and gives the command to fix it on the server.
-   Then GitHub Actions, reusing the same credential.
 
 Press Enter to skip any optional step. Re-running is safe: every answer
 defaults to your current configuration, and stored credentials are not
@@ -40,7 +39,6 @@ instruction.
 | `-m, --mode MODE` | `suggest` or `fix` |
 | `--test-command CMD` | Command that verifies a fix-mode edit, e.g. `pytest -q` |
 | `-l, --logs PATHS` | Comma-separated log files to watch |
-| `--github-actions` | Watch the configured repos for failed workflow runs |
 | `--non-interactive` | Never prompt; take everything from flags |
 | `--reconfigure` | Ask again for credentials that are already stored |
 
@@ -154,9 +152,8 @@ it for runtime errors. Sources are listed per repo and probed: a missing
 systemd unit or container fails, a stopped one is a warning (its past logs
 are still readable), and a missing log file is a warning too (it may not
 exist until the app first logs). A repo with **no** runtime source fails,
-unless it says `deployment.runtime = "none"` on purpose — watching only
-GitHub Actions means watching CI, not your users' requests. Exits non-zero
-if any required check fails, so it works in scripts and CI.
+unless it says `deployment.runtime = "none"` on purpose. Exits non-zero if
+any required check fails, so it works in scripts and CI.
 
 | Flag | Meaning |
 |------|---------|

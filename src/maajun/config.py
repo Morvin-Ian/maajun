@@ -76,10 +76,6 @@ poll_interval = 30
 # burst_threshold = 1               # only report after N errors in the window
 # burst_window_seconds = 60
 
-# GitHub Actions — poll repos for failed workflow runs (optional).
-# Uses the same GitHub token as everything else; nothing secret goes here.
-# github_actions_repos = ["you/another-repo"]
-
 [daemon]
 # Where clones, the incident database, and state live.
 # workdir = "~/.local/share/maajun"
@@ -296,7 +292,6 @@ class MonitorConfig(Base):
     # Emit nothing until burst_threshold events land within the window.
     burst_threshold: int = 1
     burst_window_seconds: float = 60.0
-    github_actions_repos: list[str] = Field(default_factory=list)
 
     @property
     def json_level_value_set(self) -> frozenset[str]:
@@ -443,10 +438,9 @@ class Config(Base):
             "ignore_patterns",
         ):
             set_if_customized(monitor, self.monitor, name)
-        if self.monitor.github_actions_repos:
-            monitor["github_actions_repos"] = self.monitor.github_actions_repos
-        else:
-            monitor.pop("github_actions_repos", None)
+        # Dropped when the Actions monitor was removed; cleaned out of configs
+        # written before that so a stale key cannot look like a live setting.
+        monitor.pop("github_actions_repos", None)
 
         daemon = table(doc, "daemon")
         daemon["workdir"] = self.daemon.workdir

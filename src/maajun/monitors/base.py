@@ -5,11 +5,8 @@ import logging
 import re
 import time
 from abc import ABC, abstractmethod
-from collections import OrderedDict, deque
+from collections import deque
 from dataclasses import dataclass, field
-from typing import Any
-
-import httpx
 
 from maajun.utils import utcnow_iso
 
@@ -21,8 +18,6 @@ NUM_RE = re.compile(r"\d+")
 # Shared, so every monitor's fingerprint is the same width.
 FINGERPRINT_LENGTH = 16
 
-# A poll only returns recent items, so a bounded window is enough to dedup.
-MAX_SEEN_IDS = 5000
 
 def fingerprint(text: str) -> str:
     normalized = HEX_RE.sub("", text)
@@ -111,59 +106,3 @@ class Monitor(ABC):
         pass
 
 
-class HTTPPollMonitor(Monitor):
-    """Base for monitors that poll an HTTP API and dedup items by id.
-
-    Subclasses implement fetch/item_id/to_event; poll() handles the
-    fetch-failure logging and seen-id bookkeeping.
-    """
-
-    def __init__(
-        self,
-        client: httpx.AsyncClient,
-        *,
-        burst_threshold: int = 1,
-        burst_window_seconds: float = 60.0,
-    ):
-        super().__init__(
-            burst_threshold=burst_threshold,
-            burst_window_seconds=burst_window_seconds,
-        )
-        self.client = client
-        # An insertion-ordered set, so the oldest ids evict first.
-        self.seen: OrderedDict[str, None] = OrderedDict()
-
-    async def poll(self) -> list[ErrorEvent]:
-        try:
-            items = await self.fetch()
-        except Exception:
-            log.exception("%s: failed to fetch", self.name)
-            return []
-
-        events: list[ErrorEvent] = []
-        for item in items:
-            item_id = self.item_id(item)
-            if item_id in self.seen:
-                continue
-            self.seen[item_id] = None
-            events.append(self.to_event(item))
-
-        while len(self.seen) > MAX_SEEN_IDS:
-            self.seen.popitem(last=False)
-
-        return self.apply_burst_threshold(events)
-
-    async def aclose(self) -> None:
-        await self.client.aclose()
-
-    @abstractmethod
-    async def fetch(self) -> list[dict[str, Any]]:
-        """Return the raw items from the API."""
-
-    @abstractmethod
-    def item_id(self, item: dict[str, Any]) -> str:
-        """Stable id used to skip already-seen items across polls."""
-
-    @abstractmethod
-    def to_event(self, item: dict[str, Any]) -> ErrorEvent:
-        """Convert one raw item into an ErrorEvent."""
