@@ -11,12 +11,60 @@ SECRET_NAMES = frozenset({
 
 SECRET_SUFFIXES = (".pem", ".key", ".p12", ".pfx", ".keystore")
 
+# `.env.example` and its spellings are the committed template, not the file
+# with the secrets in it — and they are exactly what fix mode is told to
+# change when a finding is an undocumented environment variable. Refusing
+# them turned that whole class of fix into an analysis with no diff.
+ENV_TEMPLATE_SUFFIXES = ("example", "sample", "template", "dist", "defaults")
+
+# Secret names that are also plausible directory names. A Django app, a Go
+# package, a `credentials/` folder of templates: refusing the directory hid
+# every file under it from grep and list_dir, including the ones a fix needed.
+# The files inside are still screened one by one, so a key in there is still
+# refused by name.
+DIRECTORY_SAFE_NAMES = frozenset({"credentials"})
+
 # maajun's own record of every incident and conversation.
 PRIVATE_NAMES = frozenset({"incidents.db", "incidents.db-wal", "incidents.db-shm"})
 
 
+def is_env_template(name: str) -> bool:
+    """Whether a dotenv-ish name is the documented template, not the secret.
+
+    Judged on the last component only, so `.env.production.example` is a
+    template and `.env.production` is not.
+    """
+    return (
+        name.startswith(".env")
+        and name.rpartition(".")[2] in ENV_TEMPLATE_SUFFIXES
+    )
+
+
+def nearest_under(target: Path, root: Path) -> Path | None:
+    """The file under `root` that a path from outside it most likely meant.
+
+    A traceback names the deployment's path — `/app/apps/accounts/views.py` —
+    and that is the path a model reaches for first. The checkout holds the
+    same file at a shorter one, so the longest tail of the given path that
+    exists under the root is the file it meant. Never the bare root: the
+    shortest candidate still carries the filename.
+    """
+    parts = target.parts[1:] if target.is_absolute() else target.parts
+    for start in range(len(parts)):
+        candidate = root.joinpath(*parts[start:])
+        if candidate.exists():
+            return candidate
+    return None
+
+
 def is_secret(path: Path) -> bool:
     name = path.name.lower()
+    if is_env_template(name):
+        return False
+    # is_dir() is False for a path that does not exist, so a guessed name is
+    # still refused.
+    if name in DIRECTORY_SAFE_NAMES and path.is_dir():
+        return False
     return (
         name in SECRET_NAMES
         or name.startswith(".env.")
@@ -79,10 +127,32 @@ class Sandbox:
         if ".git" in path.parts:
             return f"{path} is inside a .git directory, which is not readable."
         if not self.contains(path):
+            hint = self.nearest(path)
+            if hint:
+                # The refusal a fix-mode run hits first, and the one that used
+                # to end it: the traceback's path is refused, the model is told
+                # not to try another, and the file it wanted was inside the
+                # checkout the whole time under a shorter name.
+                return (
+                    f"{path} is outside the directories maajun may touch, but "
+                    f"the same file is in the checkout at {hint}. Use that path."
+                )
             allowed = ", ".join(str(root) for root in self.roots) or "nothing"
             return (
-                f"{path} is outside the directories maajun may touch. "
-                f"Allowed: {allowed}. Do not try another path outside them — "
-                "say what you needed and why."
+                f"{path} is outside the directories maajun may touch, and "
+                f"nothing under {allowed} matches it. Do not try another path "
+                "outside them — say what you needed and why."
             )
         return ""
+
+    def nearest(self, path: Path) -> Path | None:
+        """The file inside a root that an outside path most likely meant.
+
+        Named in the refusal and never substituted: which file gets read, and
+        then edited, is not a guess worth making silently.
+        """
+        for root in self.roots:
+            found = nearest_under(path, root)
+            if found:
+                return found
+        return None
