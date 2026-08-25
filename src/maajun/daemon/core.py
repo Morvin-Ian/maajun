@@ -7,7 +7,8 @@ import subprocess
 from collections.abc import Callable
 from pathlib import Path
 
-from maajun.agent.core import PermissionCallback
+from maajun.agent.core import Correction, PermissionCallback
+from maajun.agent.tools.sandbox import nearest_under
 from maajun.config import Config, RepoConfig
 from maajun.daemon import triage
 from maajun.daemon.investigation import Investigation, Plan, bank_spend
@@ -49,14 +50,21 @@ MAX_DETAILS_IN_SCREEN = 2000
 
 
 
-# Tools fix mode may use. Anything else gated is refused with a reason, so
-# the model reads the refusal and tries a call that works.
+# Tools fix mode may use. These are also the only gated ones, so the guard
+# against anything else is a guard, not a path anything takes today — it is
+# what keeps a newly gated tool from being waved through as an edit.
 EDIT_TOOLS = ("edit_file", "write_file")
 
 
 def make_permission_policy(mode: str, workspace: Path) -> PermissionCallback | None:
     """suggest -> None (every gated tool denied; the agent is read-only).
-    fix     -> edits allowed anywhere inside the workspace clone."""
+    fix     -> edits allowed anywhere inside the workspace clone.
+
+    Every refusal here is a `Correction`: nothing in fix mode is forbidden,
+    the call was just made against the wrong path or the wrong tool. Sent as a
+    flat denial they read as "do not retry", which is how a run that was
+    allowed to edit ended up publishing an analysis instead.
+    """
     if mode != "fix":
         return None
 
@@ -64,16 +72,23 @@ def make_permission_policy(mode: str, workspace: Path) -> PermissionCallback | N
 
     async def approve(name: str, args: dict) -> bool | str:
         if name not in EDIT_TOOLS:
-            return f"{name} is not available; edit files with edit_file or write_file."
+            return Correction(
+                f"{name} is not available here; edit files with edit_file or "
+                "write_file."
+            )
         path = args.get("path")
         if not path:
-            return f"Say which file to edit: pass an absolute path under {root}."
+            return Correction(
+                f"Say which file to edit: pass an absolute path under {root}."
+            )
         target = Path(path).expanduser().resolve()
         if target.is_relative_to(root):
             return True
-        return (
-            f"{target} is outside the checkout. Edit the copy under {root} "
-            "instead — that is the branch the pull request is opened from."
+        hint = nearest_under(target, root)
+        return Correction(
+            f"{target} is not in the checkout. Only files under {root} can be "
+            "edited — that is the branch the pull request is opened from."
+            + (f" The same file is at {hint}." if hint else "")
         )
 
     return approve
