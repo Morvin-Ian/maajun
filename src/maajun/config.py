@@ -840,5 +840,18 @@ def render_config(config: "Config") -> str:
     parts.append(f"  log_files = [green]{config.monitor.log_files}[/green]")
     parts.append(f"  poll_interval = [green]{config.monitor.poll_interval}[/green]")
 
+    # The spend caps were settable but invisible here, so the one number that
+    # decides how deep an investigation may go could not be read back.
+    parts.append("\n[bold cyan]\\[daemon][/bold cyan]")
+    parts.append(f"  max_usd_per_day = [green]{config.daemon.max_usd_per_day}[/green]")
+    parts.append(
+        "  max_usd_per_incident = "
+        f"[green]{config.daemon.max_usd_per_incident}[/green]"
+    )
+    parts.append(
+        f"  max_incidents_per_cycle = [green]{config.daemon.max_incidents_per_cycle}[/green]"
+    )
+    parts.append(f"  screen_errors = [green]{str(config.daemon.screen_errors).lower()}[/green]")
+
     parts.append("\n[dim]Use 'maajun config <key> <value>' to set a value.[/dim]")
     return "\n".join(parts)
