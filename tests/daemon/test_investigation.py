@@ -29,7 +29,7 @@ from maajun.config import (
 from maajun.daemon.core import Daemon, LocalWorkspace
 from maajun.daemon.investigation import blames_our_edits
 from maajun.daemon.store import ARTIFACT_ISSUE, ARTIFACT_PR, IncidentStore
-from maajun.monitors import LogFileMonitor
+from maajun.monitors import ErrorEvent, LogFileMonitor
 from maajun.providers.base import CompletionResponse
 from maajun.vcs import GitWorkspace
 
@@ -740,6 +740,69 @@ async def test_a_branch_is_pushed_when_there_is_a_fix(setup):
         capture_output=True, text=True, check=True,
     ).stdout
     assert "maajun/incident-" in branches
+
+
+async def test_an_earlier_runs_edits_are_not_this_incidents_fix(setup):
+    """One clone serves every incident. A run that died after the agent had
+    edited files used to leave them on the tree, where the next incident read
+    them as its own fix and opened a pull request from someone else's diff.
+    """
+    daemon, logfile, agent, github, store, remote = setup
+    fix_mode(daemon, agent)
+    repo_config = daemon.repo_for(daemon.monitors[0])
+    workspace = daemon.workspaces["owner/name"]
+    # An unusable report twice over: the run raises after the edit is made.
+    agent.replies = ["no.", "still no."]
+
+    first = ErrorEvent(source="log", message="IndexError", details=TRACEBACK)
+    with pytest.raises(RuntimeError):
+        await daemon.handle_incident(first, repo_config, workspace)
+    assert await workspace.has_changes()  # the dead run's edit, still there
+
+    # A different error, and this time the agent changes nothing.
+    agent.replies = None
+    agent.edit_path = None
+    second = ErrorEvent(
+        source="log", message="KeyError", details="KeyError: 'promotion'"
+    )
+    await daemon.handle_incident(second, repo_config, workspace)
+
+    assert github.calls == []
+    assert len(github.issues) == 1
+
+
+async def test_a_branch_carrying_only_the_report_is_not_pushed(setup):
+    """The report file is committed on the branch, so `git status` alone
+    cannot answer whether this run fixed anything."""
+    daemon, logfile, agent, github, store, remote = setup
+    fix_mode(daemon, agent)
+    agent.edit_path = (
+        daemon.workspaces["owner/name"].path / "docs" / "incidents" / "notes.md"
+    )
+
+    with open(logfile, "a") as f:
+        f.write(TRACEBACK)
+    fp = (await daemon.poll_once())[0]
+
+    assert github.calls == []
+    assert store.get(fp, "owner/name")["artifact_kind"] == ARTIFACT_ISSUE
+
+
+async def test_the_issue_a_tripped_gate_files_keeps_the_follow_up(setup):
+    """The follow-up is split off for the pull request's sake. With no pull
+    request to open, dropping it would lose work nobody has recorded."""
+    daemon, logfile, agent, github, store, remote = setup
+    fix_mode(daemon, agent)
+    agent.report = FIXED_WITH_FOLLOW_UP
+    agent.edit_path = (
+        daemon.workspaces["owner/name"].path / "docs" / "incidents" / "notes.md"
+    )
+
+    with open(logfile, "a") as f:
+        f.write(TRACEBACK)
+    await daemon.poll_once()
+
+    assert "## Follow-up" in github.issues[0]["body"]
 
 
 async def test_the_notice_says_pr_when_one_was_opened(setup):
