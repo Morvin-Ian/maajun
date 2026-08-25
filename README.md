@@ -189,6 +189,12 @@ in it — a PR that looks like a fix until you open the Files tab wastes a
 review. The issue says the fix was attempted, so it is not mistaken for
 suggest mode.
 
+Every pull request maajun opens therefore has a code change in it. The
+committed report is not one, and neither is anything an earlier incident left
+behind — the clone is reset to the base branch before each investigation, and
+the commit is checked against that branch one last time before the branch is
+pushed. Nothing to merge means an issue, not a push.
+
 > ✅ **Tests pass** — `pytest -q`
 
 A failing suite (`❌ Tests fail (exit 1)`) still opens the PR — a fix that
