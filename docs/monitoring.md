@@ -1,14 +1,13 @@
 # Monitoring guide
 
-Maajun watches your error sources — local log files and GitHub Actions —
-and turns each new error into a pull request on GitHub. For log files it
-must run on the server that writes them (the usual VPS setup); the
-GitHub Actions monitor works from anywhere with network access.
+Maajun watches your error sources — local log files, systemd journals and
+container logs — and turns each new error into a pull request on GitHub. It
+must run on the server that writes them (the usual VPS setup).
 
 ## 1. Configure
 
 ```bash
-maajun setup   # interactive: API key, repo, mode, logs, GitHub Actions
+maajun setup   # interactive: API key, repo, mode, logs
 ```
 
 `setup` prompts for the essentials and writes the config for you;
@@ -65,10 +64,6 @@ poll_interval = 30            # seconds between polls
 # burst_threshold = 1               # only report after N errors in the window
 # burst_window_seconds = 60
 
-# GitHub Actions — poll failed workflow runs (optional).
-# Uses the same GitHub token as everything else; no secret goes in this file.
-# github_actions_repos = ["owner/name"]
-
 [daemon]
 workdir = "~/.local/share/maajun"   # clones, incident DB, state
 # repo_path = "/srv/myapp"          # local checkout to analyze in local mode
@@ -81,8 +76,8 @@ workdir = "~/.local/share/maajun"   # clones, incident DB, state
 # max_usd_per_day = 5.0             # `maajun chat`'s own daily budget (0 = no cap)
 ```
 
-At least one error source must be configured — log files or GitHub
-Actions; the daemon refuses to start with nothing to watch. Use
+At least one error source must be configured; the daemon refuses to start
+with nothing to watch. Use
 `--config /path/to/config.toml` on any command to point somewhere else.
 
 `ai.base_url` points maajun at any endpoint that speaks the OpenAI
@@ -125,10 +120,7 @@ log_files = ["/var/log/web/error.log"]
 ```
 
 Each monitor's errors open PRs on the repo it's attached to. Any global
-`monitor.log_files` attach to the **first** configured repo, as does a
-GitHub Actions monitor whose repo isn't in the list — that fallback is
-logged as a warning, since a typo in the slug would otherwise misfile
-every CI failure without a trace.
+`monitor.log_files` attach to the **first** configured repo.
 
 `[[github.repos]]` is the only supported form, including for a single
 repository. A config using the older scalars (`repo`, `base_branch`,
@@ -158,8 +150,8 @@ the log path later. The repo appears in:
   incidents, and `--repo owner/name` to filter
 - the `repo` column of `incidents.db`
 - the issue/PR body and the report file, as a `Repo:` line beside
-  `Source:` — the source names the log file or workflow that *saw* the
-  error, which with a shared log file is not the same thing
+  `Source:` — the source names the log file that *saw* the error, which with
+  a shared log file is not the same thing
 - `watch`'s notices (`New error in team/api: …`) and the daemon log
 
 ## Error sources
@@ -252,11 +244,10 @@ something you set by hand; it only fills in blanks and adds sources.
 ### A repo with no runtime source
 
 `maajun status` **fails** for a repo that nothing watches for runtime
-errors, and `maajun watch` warns about it on startup. Watching only GitHub
-Actions is watching CI, not your users' requests — which is exactly how a
+errors, and `maajun watch` warns about it on startup. That is exactly how a
 config ends up looking healthy while every 500 goes unreported.
 
-If that is deliberate for a repo (a library, a CI-only project), say so and
+If that is deliberate for a repo (a library, a background job), say so and
 the check passes:
 
 ```bash
@@ -368,28 +359,6 @@ burst_window_seconds = 300   # 5 errors within 5 minutes
 ```
 
 `--once` always flushes an incomplete burst rather than discarding it.
-
-### GitHub Actions
-
-Set `github_actions_repos` to poll each repo for failed workflow runs. It
-uses the same GitHub token as everything else — read from the keyring,
-never written into the config file — and that token needs
-read access to the repos' actions. A failure becomes an incident
-fingerprinted by the workflow *and* the commit, with the run details and a
-link to the failed run. Two workflows failing on one commit are therefore
-two incidents — "the linter failed" and "the tests failed" are different
-problems with different fixes, and keying on the commit alone meant only
-the first one polled was ever reported. Re-running the same workflow on the
-same commit is still one incident.
-
-`maajun setup --github-actions` wires this up using the GitHub token you
-already stored, rather than asking for a second one.
-
-Actions monitoring is *additional*, never a replacement: log monitors are
-built from `monitor.log_files` and each repo's `log_files` regardless, and
-enabling Actions never clears them. But it only sees CI, so a setup with
-Actions and no log file never notices a failed request — `setup` and
-`status` both say so when that is the configuration you end up with.
 
 ## 2. Give it GitHub access
 
@@ -866,8 +835,8 @@ log files in one shot and points at whatever is missing.
 - **A log file exists but nothing is detected** — `maajun status` now fails
   on an unreadable log. The usual cause is a root-owned file and a non-root
   daemon.
-- **"No monitors configured"** — the `[monitor]` section defines no log
-  files and no GitHub Actions repos.
+- **"No monitors configured"** — the `[monitor]` section and the repo
+  entries between them define no error source at all.
 - **"A repo is configured but there is no GitHub token"** — you asked for
   PRs without credentials. Run `maajun setup`, or clear `github.repo` to
   fall back to local reports.

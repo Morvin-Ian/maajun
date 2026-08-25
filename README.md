@@ -34,7 +34,7 @@ Nothing merges without your review, in either mode.
 
 Runtime-error monitoring reads log files, `journalctl`, and `docker logs` on
 the local machine, so the daemon has to run on the server your app is deployed
-on. The GitHub Actions monitor works from anywhere with network access.
+on.
 
 ## Installation
 
@@ -67,7 +67,7 @@ report. Add `-m fix` to open a pull request with the fix applied, or
 ### Monitor continuously
 
 ```bash
-maajun setup             # provider key, GitHub, deployment, GitHub Actions
+maajun setup             # provider key, GitHub, deployment, error sources
 maajun status            # what is watched, and what is not
 maajun watch             # watch in the background; the terminal comes back
 maajun watch --status    # what has it done?
@@ -121,8 +121,7 @@ detected and analyzed, but each report is written to
 ## How it works
 
 1. **Detect** — a monitor picks up a new error where that repo's errors land:
-   a log file, a systemd unit's journal, a container's stdout, or a failed
-   GitHub Actions run.
+   a log file, a systemd unit's journal, or a container's stdout.
 2. **Deduplicate** — each error is fingerprinted. The same error is never
    reported twice; repeat sightings bump a counter on the existing incident.
    One that goes quiet and comes back is reported again, as a regression.
@@ -377,7 +376,6 @@ docker_containers = ["myapp-web-1"]
 [monitor]
 log_files = ["/var/log/myapp/error.log"]
 poll_interval = 30
-# github_actions_repos = ["owner/name"]
 
 [daemon]
 workdir = "~/.local/share/maajun"   # clones, incident DB, state
@@ -387,8 +385,8 @@ workdir = "~/.local/share/maajun"   # clones, incident DB, state
 # max_usd_per_day = 5.0             # `maajun chat`'s own budget; 0 = no cap
 ```
 
-At least one error source — log files or GitHub Actions — must be configured;
-the daemon refuses to start with nothing to watch. See the
+At least one error source must be configured; the daemon refuses to start
+with nothing to watch. See the
 [monitoring guide](https://github.com/Morvin-Ian/maajun/blob/main/docs/monitoring.md)
 for every key, detection tuning, and multi-repo setups.
 

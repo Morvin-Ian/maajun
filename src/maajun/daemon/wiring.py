@@ -12,7 +12,6 @@ from maajun.daemon.core import Daemon, LocalWorkspace, make_permission_policy
 from maajun.daemon.store import IncidentStore
 from maajun.monitors import (
     DockerLogMonitor,
-    GitHubActionsMonitor,
     JournaldMonitor,
     LogFileMonitor,
     Monitor,
@@ -134,25 +133,19 @@ def local_repo_path(config: Config) -> Path:
 def build_monitors(
     config: Config,
     repos: list[RepoConfig],
-    auth: AuthManager | None = None,
     *,
     backfill: bool = False,
 ) -> tuple[list[Monitor], dict[int, RepoConfig]]:
     """Build monitors and map each to the repo whose PRs it should open.
 
-
-    legitimately watch the same log file, and name-keying silently collapsed
-    them onto whichever repo was configured last. The daemon owns every
-    monitor for its whole lifetime, so object identity is stable.
-
-    `auth` supplies the GitHub Actions token, which lives in the keyring —
-    never in the config file.
+    Keyed on the monitor's identity, not its name: two repos can legitimately
+    watch the same log file, and name-keying silently collapsed them onto
+    whichever repo was configured last. The daemon owns every monitor for its
+    whole lifetime, so object identity is stable.
     """
-    auth = auth or AuthManager()
     monitor_cfg = config.monitor
     monitors: list[Monitor] = []
     monitor_to_repo: dict[int, RepoConfig] = {}
-    default_repo = repos[0] if repos else None
 
     def attach(monitor: Monitor, repo_config: RepoConfig | None) -> None:
         monitors.append(monitor)
@@ -199,35 +192,6 @@ def build_monitors(
         for kind, target in sources:
             attach_source(kind, target, repo_config)
 
-    # Skipped without a token; `status` reports it. One unusable monitor
-    # should not stop the log monitors.
-    actions_token = auth.get_github_token() if monitor_cfg.github_actions_repos else None
-    if monitor_cfg.github_actions_repos and not actions_token:
-        log.warning(
-            "monitor.github_actions_repos is set but no GitHub token is "
-            "available; skipping GitHub Actions monitors"
-        )
-    if actions_token:
-        for repo in monitor_cfg.github_actions_repos:
-            matched = next((rc for rc in repos if rc.repo == repo), None)
-            if matched is None:
-                matched = default_repo
-                # No entry means no clone and no repo to file against, so
-                # these land on the first one. Said out loud: a typo in the
-                # slug used to misfile every CI failure silently.
-                log.warning(
-                    "monitor.github_actions_repos includes %s, which is not a "
-                    "configured repo; its failed runs will be filed against %s. "
-                    "Add it with 'maajun add-repo %s' to file them on itself.",
-                    repo, matched.repo if matched else "no repo", repo,
-                )
-            attach(GitHubActionsMonitor(
-                actions_token,
-                repo,
-                burst_threshold=monitor_cfg.burst_threshold,
-                burst_window_seconds=monitor_cfg.burst_window_seconds,
-            ), matched)
-
     return monitors, monitor_to_repo
 
 
@@ -239,12 +203,12 @@ def build_daemon(
     deps = DaemonDeps(config, auth)
     try:
         monitors, monitor_to_repo = build_monitors(
-            config, deps.repos, auth, backfill=backfill
+            config, deps.repos, backfill=backfill
         )
         if not monitors:
             raise RuntimeError(
-                "No monitors configured. Add log files under [monitor] "
-                "or GitHub Actions settings."
+                "No monitors configured. Add log files under [monitor], or a "
+                "deployment source to a repo with 'maajun discover --save'."
             )
     except Exception:
         # deps owns an open database by now.

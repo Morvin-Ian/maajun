@@ -17,26 +17,6 @@ def make_config(**monitor_kwargs) -> Config:
     )
 
 
-def test_actions_monitor_takes_its_token_from_the_keyring(fake_keyring):
-    auth = AuthManager()
-    auth.set_github_token("ghp_stored")
-    config = make_config(github_actions_repos=["owner/name"])
-
-    monitors, _ = build_monitors(config, config.github.get_all_repos(), auth)
-    assert [m.name for m in monitors] == ["gh-actions:owner/name"]
-
-
-def test_actions_monitor_skipped_without_a_token_but_logs(fake_keyring, caplog):
-    """One unusable monitor must not stop the log monitors from running."""
-    config = make_config(
-        log_files=["/tmp/does-not-matter.log"], github_actions_repos=["owner/name"],
-    )
-    monitors, _ = build_monitors(config, config.github.get_all_repos(), AuthManager())
-
-    assert [m.name for m in monitors] == ["logfile:/tmp/does-not-matter.log"]
-    assert "no GitHub token" in caplog.text
-
-
 # ---------------------------------------------------------------------------
 # Monitor -> repo routing
 # ---------------------------------------------------------------------------
@@ -67,7 +47,7 @@ def test_one_log_file_can_feed_two_repos(fake_keyring):
         RepoConfig(repo="acme/web", log_files=["/var/log/shared.log"]),
     )
     monitors, monitor_to_repo = build_monitors(
-        config, config.github.get_all_repos(), AuthManager()
+        config, config.github.get_all_repos()
     )
 
     assert routing(monitors, monitor_to_repo) == [
@@ -84,7 +64,7 @@ def test_a_log_file_is_not_watched_twice_for_the_same_repo(fake_keyring):
         log_files=["/var/log/api.log"],
     )
     monitors, monitor_to_repo = build_monitors(
-        config, config.github.get_all_repos(), AuthManager()
+        config, config.github.get_all_repos()
     )
 
     assert routing(monitors, monitor_to_repo) == [
@@ -99,7 +79,7 @@ def test_global_log_files_attach_to_the_first_repo(fake_keyring):
         log_files=["/var/log/app.log"],
     )
     monitors, monitor_to_repo = build_monitors(
-        config, config.github.get_all_repos(), AuthManager()
+        config, config.github.get_all_repos()
     )
 
     assert routing(monitors, monitor_to_repo) == [
@@ -119,7 +99,7 @@ def test_every_deployment_source_routes_to_its_own_repo(fake_keyring):
         )),
     )
     monitors, monitor_to_repo = build_monitors(
-        config, config.github.get_all_repos(), AuthManager()
+        config, config.github.get_all_repos()
     )
 
     assert routing(monitors, monitor_to_repo) == [
@@ -142,7 +122,7 @@ def test_the_older_repo_log_files_spelling_still_works(fake_keyring):
         ),
     )
     monitors, monitor_to_repo = build_monitors(
-        config, config.github.get_all_repos(), AuthManager()
+        config, config.github.get_all_repos()
     )
 
     assert routing(monitors, monitor_to_repo) == [
@@ -160,7 +140,7 @@ def test_the_same_source_can_feed_two_repos(fake_keyring):
             docker_containers=["nginx"])),
     )
     monitors, monitor_to_repo = build_monitors(
-        config, config.github.get_all_repos(), AuthManager()
+        config, config.github.get_all_repos()
     )
 
     assert routing(monitors, monitor_to_repo) == [
@@ -176,7 +156,7 @@ def test_a_journald_monitor_gets_a_cursor_under_the_workdir(fake_keyring, tmp_pa
             journald_units=["api.service"])),
     )
     config.daemon.workdir = str(tmp_path)
-    monitors, _ = build_monitors(config, config.github.get_all_repos(), AuthManager())
+    monitors, _ = build_monitors(config, config.github.get_all_repos())
 
     cursor = monitors[0].cursor_file
     assert cursor.parent == tmp_path / "cursors"
@@ -189,53 +169,10 @@ def test_local_mode_attaches_global_logs_to_its_synthetic_repo(fake_keyring):
     config = Config(monitor=MonitorConfig(log_files=["/var/log/app.log"]))
     synthetic = [RepoConfig(mode="suggest")]
 
-    monitors, monitor_to_repo = build_monitors(config, synthetic, AuthManager())
+    monitors, monitor_to_repo = build_monitors(config, synthetic)
 
     assert [m.name for m in monitors] == ["logfile:/var/log/app.log"]
     assert monitor_to_repo[id(monitors[0])] is synthetic[0]
-
-
-def test_actions_repo_routes_to_itself_when_configured(fake_keyring):
-    auth = AuthManager()
-    auth.set_github_token("ghp_stored")
-    config = multi(
-        RepoConfig(repo="acme/api"),
-        RepoConfig(repo="acme/web"),
-        github_actions_repos=["acme/web"],
-    )
-    monitors, monitor_to_repo = build_monitors(
-        config, config.github.get_all_repos(), auth
-    )
-
-    assert routing(monitors, monitor_to_repo) == [
-        ("gh-actions:acme/web", "acme/web"),
-    ]
-
-
-def test_unconfigured_actions_repo_warns_about_where_it_will_be_filed(
-    fake_keyring, caplog
-):
-    """It still falls back to repo #1 — but no longer silently.
-
-    A typo in the slug used to misfile every CI failure with no way to notice.
-    """
-    auth = AuthManager()
-    auth.set_github_token("ghp_stored")
-    config = multi(
-        RepoConfig(repo="acme/api"),
-        RepoConfig(repo="acme/web"),
-        github_actions_repos=["acme/typo"],
-    )
-    monitors, monitor_to_repo = build_monitors(
-        config, config.github.get_all_repos(), auth
-    )
-
-    assert routing(monitors, monitor_to_repo) == [
-        ("gh-actions:acme/typo", "acme/api"),
-    ]
-    assert "acme/typo" in caplog.text
-    assert "not a configured repo" in caplog.text
-    assert "filed against acme/api" in caplog.text
 
 
 # ---------------------------------------------------------------------------
@@ -282,7 +219,7 @@ def test_backfill_reaches_every_kind_of_source(fake_keyring, tmp_path):
     config.daemon.workdir = str(tmp_path)
 
     monitors, _ = build_monitors(
-        config, config.github.get_all_repos(), AuthManager(), backfill=True
+        config, config.github.get_all_repos(), backfill=True
     )
 
     assert [m.backfill for m in monitors] == [True, True, True]
@@ -295,7 +232,7 @@ def test_without_the_flag_nothing_backfills(fake_keyring, tmp_path):
     )
     config.daemon.workdir = str(tmp_path)
 
-    monitors, _ = build_monitors(config, config.github.get_all_repos(), AuthManager())
+    monitors, _ = build_monitors(config, config.github.get_all_repos())
 
     assert monitors[0].backfill is False
 
@@ -307,7 +244,7 @@ def test_a_log_monitor_keeps_its_cursor_under_the_workdir(fake_keyring, tmp_path
     )
     config.daemon.workdir = str(tmp_path)
 
-    monitors, _ = build_monitors(config, config.github.get_all_repos(), AuthManager())
+    monitors, _ = build_monitors(config, config.github.get_all_repos())
 
     assert monitors[0].cursor_file.parent == tmp_path / "cursors"
     assert monitors[0].cursor_file.suffix == ".offset"
