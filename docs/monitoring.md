@@ -768,12 +768,21 @@ over a large repo can cost several days' allowance while the daily cap waits
 its turn. **`max_usd_per_incident` defaults to `1.0`** and bounds that. Past
 it the tools are withheld and the agent is asked for its report from what it
 has already read — a thinner report, not a lost one, and nothing that was
-paid for is thrown away.
+paid for is thrown away. In `fix` mode the withheld tools include the editing
+ones, so the last request asks for any change the run had not made yet as a
+unified diff in the report, and that diff is applied — a ceiling reached
+before the edit still opens a pull request, as long as the model hands the
+patch over.
 
 ```bash
 maajun config daemon.max_usd_per_incident 3   # deeper investigations
 maajun config daemon.max_usd_per_incident 0   # 0 = no cap
+maajun config                                 # read the caps back
 ```
+
+`maajun config` with no arguments prints a `[daemon]` section with both spend
+caps and the per-cycle bound, so what a run is allowed to spend can be
+checked without opening the TOML.
 
 `maajun chat` is budgeted separately, by `chat.max_usd_per_day` (also
 `5.0`): it sums what today's chat sessions cost before each question and
@@ -873,7 +882,19 @@ log files in one shot and points at whatever is missing.
   ends with no edit *and* no applicable patch files an issue instead: the
   agent was asked once for the edit, then the diffs in its report were
   applied with `git apply` (all or none), and neither produced a diff. The
-  issue says so at the top.
+  issue says so at the top. The report file the branch would carry does not
+  count as a diff, and neither does anything an earlier run left on the
+  clone — every incident starts from a tree reset to the base branch.
+  If it keeps happening on one repo, run with `-v` and look for
+  `tool_corrected` lines: they name every call the run made against a path
+  outside the checkout, and a run that spends its rounds on those has none
+  left for the edit. `max_usd_per_incident` is the other common cause — the
+  ceiling reached before the edit.
+- **Reports that stop mid-sentence** — the model hit `ai.max_tokens` for
+  that provider. The run asks it to continue from where it broke off, up to
+  twice, and logs a warning naming the ceiling; a fix-mode report that keeps
+  running out is also spending the tokens its edit needed, so raise it:
+  `maajun config ai.max_tokens 8192`.
 - **Nothing detected** — confirm the log path is right and your log
   format matches `error_pattern` (warnings are *not* matched by default),
   or that errors are recognized stack traces. For JSON logs, set

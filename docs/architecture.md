@@ -27,7 +27,33 @@ Only the newest turn keeps them — older rounds collapse back to the
 conversation, which is what the user is still talking about, and context
 stays bounded.
 
-Two ceilings keep a long tool loop inside the context window. Each tool
+A third ceiling is the model's own output limit, `ai.max_tokens`. Every
+provider reports it — `finish_reason` comes back as `length` — and nothing
+read it, so an answer that stopped mid-sentence was taken for a finished one.
+A report cut off there passes every check the daemon makes: it is long enough
+and it has its headings, and it is filed with its fix section half written.
+Worse in fix mode, where the tokens the report ran out of are the ones the
+edit needed. `answer_in_full` asks the model to continue from where it broke
+off, tools withheld, up to twice, and joins the halves verbatim. The same
+ceiling truncates a long `write_file` argument mid-JSON; that used to reach
+the permission gate as a call with no path, which answered
+`PERMISSION_DENIED` — telling the model an edit it was allowed to make had
+been refused, and not to retry. `parse_args` now returns `None` for what did
+not parse and the model is told the call was cut off, not denied. A cut that
+lands late enough to still be valid JSON loses only the `path`, and
+`ToolRegistry.normalize` used to fill that in with the sandbox root: the
+policy then approved an edit *of a directory*, and the correction written for
+a pathless call never ran. It now leaves the omission alone for a tool whose
+schema requires a path, and defaults only the tools — `grep`, `list_dir`,
+`glob` — that mean the root when they say nothing.
+
+The spend ceiling has the same shape as the output one: what a run has left
+to do when it trips is usually the edit. `OUT_OF_BUDGET` therefore asks for
+any pending change as a fenced unified diff, which costs no further tool call
+and which `apply_reported_diff` applies verbatim — so a run that spends its
+allowance on reading still publishes a fix rather than an analysis.
+
+Two further ceilings keep a long tool loop inside the context window. Each tool
 result is capped (and says how much was cut, so the model does not read a
 truncated file as a complete one), and the request itself is trimmed
 oldest-first once it grows too large. Trimming never drops the system
@@ -237,6 +263,11 @@ maajun/
 5. **Analyze** — for a new fingerprint, the daemon syncs an isolated
    clone of the event's repo, creates a branch
    `maajun/incident-<fingerprint>`, and asks the agent to investigate.
+   One clone serves every incident in a repo, so the sync resets it —
+   `reset --hard` and `clean -fd`, ignored files left alone. Without that, a
+   run that died after the agent had edited files left them on the tree for
+   the next incident, which read them as its own fix and opened a pull
+   request from a diff belonging to a different error.
    The agent reads the code with its safe tools and writes a structured
    report (what happened / root cause / likely cause commit / the fix) — the
    last few commits on the base branch are handed to it so the
@@ -254,7 +285,9 @@ maajun/
    read as suggestions, and it billed the diff twice: once as the edit, again
    as prose, on the dearer half of the bill.
 6. **Insist on the edit** — fix mode that produced a report and no diff is
-   asked once more. A pull request with nothing in it publishes nothing
+   asked once more. "No diff" is `reports.code_changes` over
+   `git status`, not `git status` itself: the incident report is a change to
+   the tree by itself, and a branch carrying only that is an analysis. A pull request with nothing in it publishes nothing
    anyone can review, and the usual cause is the escape hatch in
    `FIX_PROMPT_SUFFIX` — "the right fix is outside this repository" — being
    taken for a finding that does have an in-repo fix. An environment
@@ -333,10 +366,17 @@ maajun/
    list of suggestions. A follow-up that says "None" files nothing, and one
    that cannot be filed is a log line: the pull request is already open and
    it has the fix. The report is then committed as
-   `docs/incidents/<fingerprint>.md` alongside the agent's edits, the branch
-   is pushed, and a **pull request** is opened with the report as its body. Fix mode that ends with neither an edit nor
-   an applicable patch files an issue instead (step 6), because a pull
-   request with no diff only looks like a fix until the Files tab says
+   `docs/incidents/<fingerprint>.md` alongside the agent's edits, and the
+   commit is then measured against the base branch one last time. That is the
+   only check that reads what the Files tab will show rather than what the
+   working tree holds, and `reports.code_changes` discounts the report file
+   itself, so a commit carrying nothing but `docs/incidents/<fp>.md` is never
+   pushed: `open_pull_request` returns `""` and `publish` files the issue,
+   with the follow-up section still in it because there is no pull request to
+   split it out of. Past the gate the branch is pushed and a **pull request**
+   is opened with the report as its body. Fix mode that ends with neither an
+   edit nor an applicable patch files an issue instead (step 6), because a
+   pull request with no diff only looks like a fix until the Files tab says
    otherwise. With no
    `github.repo` configured the daemon
    runs in [local mode](monitoring.md#1-configure) instead: steps 1–3 are
@@ -513,6 +553,28 @@ whole purpose is to hold a credential (`.env`, `id_rsa`, `*.pem`, `.netrc`,
 incident and every conversation anyone has had with it. Reading either one
 would put it in front of the AI provider, and from the daemon into a public
 issue.
+
+Two names are matched more narrowly than that, because refusing them cost
+more than it bought. `.env.example` and its spellings (`.sample`,
+`.template`, `.dist`, `.defaults`) are the committed template rather than the
+file with the secrets in it — and they are exactly what fix mode is told to
+change when a finding is an undocumented environment variable, so refusing
+them turned that whole class of fix into an analysis with no diff. Judged on
+the last component, so `.env.production.example` is a template and
+`.env.production` is not. And `credentials` matches the *file*, not a
+directory of that name: a Django app or a Go package called `credentials` had
+every file under it hidden from `grep` and `list_dir`. The files inside are
+still screened one by one, so a key in there is still refused by name.
+
+A refused path that exists inside the sandbox under a shorter name is named
+in the refusal. This is the first call a fix-mode run makes and the one that
+used to end it: the traceback says `/app/apps/accounts/views.py`, the model
+asks for that, and the checkout holds the same file at
+`<workspace>/apps/accounts/views.py`. `Sandbox.nearest` walks the tails of
+the given path and reports the longest one that exists — named, never
+substituted, because which file gets read and then edited is not a guess
+worth making silently. Only a path that matches nothing under a root still
+gets the flat "do not try another path" refusal.
 
 That is two gates, not one, because a tool can open a file it was never
 handed. `ToolRegistry.off_limits` checks the path in the *arguments*; a tool
