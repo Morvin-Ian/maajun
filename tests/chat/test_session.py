@@ -1,9 +1,17 @@
+import asyncio
+
 import pytest
 from rich.console import Console
 
 from maajun.chat.memory import ChatMemory
 from maajun.chat.prompt import build_system_prompt
-from maajun.chat.session import COMMANDS, HELP, ChatSession
+from maajun.chat.session import (
+    COMMANDS,
+    HELP,
+    ChatSession,
+    ignore_asyncgen_teardown,
+    quiet_loop,
+)
 from maajun.config import AIProviderConfig, Config, GitHubConfig, RepoConfig
 from maajun.daemon.store import IncidentStore
 from maajun.providers.base import CompletionResponse, ProviderError
@@ -792,3 +800,55 @@ def test_starting_a_new_session_does_not(session_factory):
     session.replace_agent(keep_history=False)
 
     assert session.agent.history == []
+
+
+# ---------------------------------------------------------------------------
+# The loop chat runs its turns on
+# ---------------------------------------------------------------------------
+
+
+class RecordingLoop:
+    def __init__(self):
+        self.handled = []
+
+    def default_exception_handler(self, context):
+        self.handled.append(context)
+
+
+def test_an_asyncgen_closing_error_is_not_reported():
+    """Every turn leaves the HTTP stream's generator to be closed later, and
+    closing it can raise once its connection is gone. The reply was already
+    delivered, so the report is noise on the way out."""
+    loop = RecordingLoop()
+
+    ignore_asyncgen_teardown(loop, {
+        "message": "an error occurred during closing of asynchronous generator",
+        "exception": RuntimeError("generator didn't stop after athrow()"),
+    })
+
+    assert loop.handled == []
+
+
+def test_anything_else_is_still_reported():
+    loop = RecordingLoop()
+    context = {"message": "Task exception was never retrieved"}
+
+    ignore_asyncgen_teardown(loop, context)
+
+    assert loop.handled == [context]
+
+
+def test_the_session_runs_its_turns_on_a_quiet_loop(session_factory):
+    session = session_factory([])
+
+    handler = session.runner.get_loop().get_exception_handler()
+
+    assert handler is ignore_asyncgen_teardown
+
+
+def test_quiet_loop_hands_back_a_usable_loop():
+    loop = quiet_loop()
+    try:
+        assert loop.run_until_complete(asyncio.sleep(0, result="ran")) == "ran"
+    finally:
+        loop.close()
