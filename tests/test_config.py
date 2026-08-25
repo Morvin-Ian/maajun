@@ -223,6 +223,29 @@ def test_render_config_marks_unconfigured_repo():
     assert "maajun add-repo" in out
 
 
+def test_render_config_shows_the_spend_caps():
+    """They were settable but invisible, so the one number that decides how
+    deep an investigation may go could not be read back."""
+    from maajun.config import DaemonConfig, render_config
+
+    config = Config(daemon=DaemonConfig(max_usd_per_incident=7.5, max_usd_per_day=20.0))
+    out = render_config(config)
+
+    assert "max_usd_per_incident = [green]7.5" in out
+    assert "max_usd_per_day = [green]20.0" in out
+
+
+def test_the_spend_caps_round_trip_through_set_and_get():
+    config = Config()
+
+    config.set("daemon.max_usd_per_incident", "7.5")
+    config.set("ai.max_tokens", "16384")
+
+    assert config.daemon.max_usd_per_incident == 7.5
+    assert config.get("daemon.max_usd_per_incident") == "7.5"
+    assert config.ai.max_tokens == 16384
+
+
 # ---------------------------------------------------------------------------
 # Monitor tuning round-trips through save/load
 # ---------------------------------------------------------------------------
