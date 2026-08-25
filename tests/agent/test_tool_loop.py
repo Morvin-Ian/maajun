@@ -695,11 +695,14 @@ async def test_the_last_round_asks_for_the_pending_edit_as_a_diff(monkeypatch):
 
 
 async def test_a_run_inside_its_allowance_is_left_alone(monkeypatch):
+    """The spend cap must not bite; the round ceiling still ends the run, and
+    the last request it buys is the report."""
     agent, provider = expensive_agent(monkeypatch, limit=100.0)
 
     await agent.chat("investigate")
 
-    assert all(offered for offered in provider.tools_offered)
+    assert all(offered for offered in provider.tools_offered[:-1])
+    assert provider.tools_offered[-1] == []
 
 
 async def test_no_ceiling_means_no_ceiling(monkeypatch):
@@ -708,8 +711,34 @@ async def test_no_ceiling_means_no_ceiling(monkeypatch):
 
     await agent.chat("investigate")
 
-    assert provider.calls == agent.max_rounds
-    assert all(offered for offered in provider.tools_offered)
+    # Every round, plus the one that asks for the report.
+    assert provider.calls == agent.max_rounds + 1
+    assert all(offered for offered in provider.tools_offered[:-1])
+
+
+async def test_a_run_that_uses_every_round_is_asked_for_the_report(monkeypatch):
+    """It used to return whatever prose happened to accompany the last tool
+    call, which is usually nothing: the run filed "no usable report (it was
+    empty)" and threw away everything it had read. Nothing stops this on the
+    default provider, where every round is free and the spend cap never trips."""
+    agent, provider = expensive_agent(monkeypatch, limit=0.0)
+
+    response = await agent.chat("investigate")
+
+    assert response.content == "the report"
+    assert provider.tools_offered[-1] == []
+
+
+async def test_the_round_ceiling_says_which_ceiling_it_was(monkeypatch):
+    agent, provider = expensive_agent(monkeypatch, limit=0.0)
+
+    await agent.chat("investigate")
+
+    asked = "\n".join(
+        m["content"] for m in provider.last_messages if m["role"] == "user"
+    )
+    assert "every tool call this investigation allows" in asked
+    assert "whole budget" not in asked
 
 
 async def test_spend_accumulates_across_a_run_not_just_a_turn(monkeypatch):

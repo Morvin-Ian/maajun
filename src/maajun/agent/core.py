@@ -37,11 +37,10 @@ MIN_REQUEST_MESSAGES = 4
 
 TOOL_RESULT_PREVIEW = 200
 
-# Sent when a run has spent its allowance. The tools are withheld with it, so
-# the round it buys can only be the answer.
-OUT_OF_BUDGET = """
-That is the whole budget for this investigation — there are no more tool
-calls available, and this is the last thing you will be asked.
+# Sent when a run can make no more tool calls, whichever ceiling it reached.
+# The tools are withheld with it, so the round it buys can only be the answer.
+LAST_REQUEST = """
+{reason}, and this is the last thing you will be asked.
 
 Write the full report now, from what you have already read. Say plainly what
 you could not determine rather than filling it in: a report with a named gap
@@ -53,6 +52,16 @@ unified diff — `--- a/path`, `+++ b/path`, `@@` hunks, real context lines. It
 costs you no tool call and it is applied verbatim, so the change still lands.
 A described change is not applied; a diff is.
 """
+
+OUT_OF_BUDGET = (
+    "That is the whole budget for this investigation — there are no more tool "
+    "calls available"
+)
+
+OUT_OF_ROUNDS = (
+    "You have used every tool call this investigation allows — there are no "
+    "more available"
+)
 
 # What a provider calls a response the output-token ceiling cut short.
 TRUNCATED_FINISH_REASONS = ("length", "max_tokens", "max_output_tokens")
@@ -312,7 +321,6 @@ class Agent:
 
         tools = self.registry.definitions()
         thinking_parts: list[str] = []
-        last_content = ""
         # Every round is billed, and the spend cap reads these numbers.
         self.usage = {}
 
@@ -325,8 +333,6 @@ class Agent:
 
                 if response.thinking:
                     thinking_parts.append(response.thinking)
-                if response.content:
-                    last_content = response.content
 
                 if not response.tool_calls:
                     content = await self.answer_in_full(messages, emit, response)
@@ -350,14 +356,19 @@ class Agent:
                     )
                     return await self.answer_now(messages, emit, produced)
 
-            emit({"role": "assistant", "content": last_content})
-            self.commit_turn(produced)
-            return CompletionResponse(
-                content=last_content,
-                thinking="".join(thinking_parts) or None,
-                usage=self.usage or None,
-                model=response.model,
+            # The round ceiling, banked the way the spend ceiling is. Returning
+            # `last_content` here returned the prose that happened to accompany
+            # a tool call, which is usually nothing at all: a run that spent
+            # every round reading filed "the analysis produced no usable report
+            # (it was empty)" and threw away everything it had read. The spend
+            # ceiling never covers this on a free model, where nothing the run
+            # does can reach a dollar ceiling and rounds are the only limit.
+            log.warning(
+                "used all %d tool rounds without an answer; asking for the "
+                "report from what has been read already",
+                self.max_rounds,
             )
+            return await self.answer_now(messages, emit, produced, OUT_OF_ROUNDS)
 
         except Exception:
             self.rollback_user_message()
@@ -368,13 +379,15 @@ class Agent:
         messages: list[dict[str, Any]],
         emit: Callable[[dict[str, Any]], None],
         produced: list[dict[str, Any]],
+        reason: str = OUT_OF_BUDGET,
     ) -> CompletionResponse:
         """One last round with the tools withheld, to bank the work so far.
 
         Abandoning the run instead would pay for everything and file nothing.
-        Withheld rather than discouraged, so it cannot loop again.
+        Withheld rather than discouraged, so it cannot loop again. `reason` is
+        which ceiling was reached, which is all the two paths differ by.
         """
-        emit({"role": "user", "content": OUT_OF_BUDGET})
+        emit({"role": "user", "content": LAST_REQUEST.format(reason=reason)})
         trim_request_messages(messages)
         response = await self.ask_without_tools(messages)
         content = await self.answer_in_full(messages, emit, response)
