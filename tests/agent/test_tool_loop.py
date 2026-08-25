@@ -9,9 +9,10 @@ from maajun.agent.core import (
     Agent,
     Correction,
 )
-from maajun.agent.tools import WRITE_FILE, ToolRegistry, default_registry
+from maajun.agent.tools import WRITE_FILE, Sandbox, ToolRegistry, default_registry
 from maajun.agent.tools.base import Tool, json_schema
 from maajun.config import AIProviderConfig, Config
+from maajun.daemon.core import make_permission_policy
 from maajun.providers.base import CompletionResponse, ProviderError, ToolDefinition
 from maajun.providers.factory import ProviderFactory
 
@@ -303,6 +304,35 @@ async def test_only_the_newest_turn_keeps_its_tool_results(config):
     assert sum(1 for entry in agent.history if entry["role"] == "tool") == 1
 
 
+class PathlessWriteProvider(StreamsFromChatMixin):
+    """A write_file whose arguments parsed but arrived without a path.
+
+    What the output ceiling produces when it cuts a long call just late
+    enough to still be valid JSON.
+    """
+
+    def __init__(self):
+        self.call_count = 0
+        self.last_messages = None
+
+    async def chat_completion(self, messages, **kwargs):
+        self.call_count += 1
+        self.last_messages = messages
+        if self.call_count == 1:
+            return CompletionResponse(
+                content="",
+                tool_calls=[{
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {
+                        "name": "write_file",
+                        "arguments": json.dumps({"content": "the fix"}),
+                    },
+                }],
+            )
+        return CompletionResponse(content="retried with a path")
+
+
 def tool_messages(provider):
     return [m for m in provider.last_messages if m["role"] == "tool"]
 
@@ -385,6 +415,22 @@ async def test_a_plain_string_denial_still_says_not_to_retry(config):
     result = tool_messages(provider)[0]["content"]
     assert "Do not retry" in result
     assert "I do not want that file touched." in result
+
+
+async def test_an_edit_that_lost_its_path_is_corrected_not_denied(config, tmp_path):
+    """The whole chain: the path is not invented, so the policy sees it
+    missing and answers with the correction written for it."""
+    provider = PathlessWriteProvider()
+    agent = make_agent(config, provider)
+    agent.registry = ToolRegistry([WRITE_FILE], Sandbox([tmp_path]))
+    agent.approve = make_permission_policy("fix", tmp_path)
+
+    await agent.chat("fix it")
+
+    result = tool_messages(provider)[0]["content"]
+    assert "Say which file to edit" in result
+    assert "was not refused" in result
+    assert "IsADirectoryError" not in result
 
 
 async def test_safe_tool_skips_approval(config):
