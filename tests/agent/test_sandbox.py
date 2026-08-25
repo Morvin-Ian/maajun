@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import pytest
 
 from maajun.agent.tools import BUILTIN_TOOLS, Sandbox, ToolRegistry, default_registry
@@ -298,3 +300,113 @@ async def test_tools_without_a_path_are_untouched(project):
     assert await registry.execute("not_a_file_tool", {"path": "/etc/passwd"}) == (
         "ran with '/etc/passwd'"
     )
+
+
+# ---------------------------------------------------------------------------
+# The path a traceback names
+# ---------------------------------------------------------------------------
+
+
+async def test_a_deployment_path_is_refused_with_the_checkout_path(registry, project):
+    """The first call a fix-mode run makes, and the one that used to end it."""
+    result = await registry.execute("read_file", {"path": "/app/src/app.py"})
+
+    assert str(project / "src" / "app.py") in result
+    assert "Do not try another path" not in result
+
+
+async def test_a_path_that_matches_nothing_is_still_a_flat_refusal(registry):
+    result = await registry.execute("read_file", {"path": "/app/no/such/file.py"})
+
+    assert "Do not try another path" in result
+
+
+def test_the_hint_is_never_the_bare_root(project):
+    """A hint of the root itself sends the model to edit a directory."""
+    sandbox = Sandbox([project])
+
+    assert sandbox.nearest(Path("/app")) is None
+    assert sandbox.nearest(Path("/somewhere/project")) is None
+
+
+def test_the_hint_prefers_the_longest_matching_tail(tmp_path):
+    root = tmp_path / "checkout"
+    (root / "apps" / "accounts").mkdir(parents=True)
+    (root / "apps" / "accounts" / "views.py").write_text("")
+    (root / "views.py").write_text("")
+    sandbox = Sandbox([root])
+
+    hint = sandbox.nearest(Path("/app/apps/accounts/views.py"))
+
+    assert hint == root / "apps" / "accounts" / "views.py"
+
+
+async def test_a_secret_outside_the_root_is_refused_as_a_secret(registry, project):
+    """The hint must never point at a credential file."""
+    (project / ".env").write_text("API_KEY=sk-real-secret\n")
+
+    result = await registry.execute("read_file", {"path": "/app/.env"})
+
+    assert "holds credentials" in result
+    assert "sk-real-secret" not in result
+
+
+# ---------------------------------------------------------------------------
+# Names that are also ordinary directories
+# ---------------------------------------------------------------------------
+
+
+async def test_a_credentials_package_is_listable(registry, project):
+    """Refusing the directory hid every file in it, fix included."""
+    package = project / "credentials"
+    package.mkdir()
+    (package / "models.py").write_text("class Token: pass\n")
+
+    listing = await registry.execute("list_dir", {"path": str(package)})
+
+    assert "models.py" in listing
+    assert "holds credentials" not in listing
+
+
+async def test_a_key_inside_a_credentials_package_is_still_refused(registry, project):
+    package = project / "credentials"
+    package.mkdir()
+    (package / "id_rsa").write_text("PRIVATE KEY")
+
+    result = await registry.execute("read_file", {"path": str(package / "id_rsa")})
+
+    assert "holds credentials" in result
+    assert "PRIVATE KEY" not in result
+
+
+async def test_a_credentials_file_is_still_refused(registry, project):
+    """Only the directory is exempt; the extensionless file is the secret."""
+    (project / "credentials").write_text("token=abcd")
+
+    result = await registry.execute("read_file", {"path": str(project / "credentials")})
+
+    assert "holds credentials" in result
+
+
+# ---------------------------------------------------------------------------
+# A call that lost its path
+# ---------------------------------------------------------------------------
+
+
+async def test_a_required_path_is_not_invented(registry, project):
+    """Substituting the root made a pathless write_file an approved call
+    against a directory, and the model got IsADirectoryError."""
+    assert registry.normalize("write_file", {"content": "x"}) == {"content": "x"}
+    assert registry.normalize("edit_file", {"old_string": "a"}) == {"old_string": "a"}
+
+
+async def test_an_optional_path_still_defaults_to_the_root(registry, project):
+    assert registry.normalize("grep", {"pattern": "x"})["path"] == str(project)
+    assert registry.normalize("list_dir", {})["path"] == str(project)
+
+
+async def test_a_pathless_read_says_it_needs_a_path(registry, project):
+    result = await registry.execute("read_file", {})
+
+    assert "needs a path" in result
+    assert str(project) in result

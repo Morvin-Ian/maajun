@@ -77,20 +77,40 @@ class ToolRegistry:
             return False
         return "path" in tool.definition.parameters.get("properties", {})
 
+    def requires_path(self, name: str) -> bool:
+        """Whether the tool's schema makes `path` mandatory.
+
+        Separates the tools that *default* their path — grep, list_dir, glob,
+        which mean the root when they say nothing — from the ones where a
+        missing path is a broken call.
+        """
+        tool = self.tools.get(name)
+        if tool is None:
+            return False
+        return "path" in tool.definition.parameters.get("required", [])
+
     def normalize(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         """Absolutize the path a call names, against the sandbox root.
 
         Done before the permission check so the policy and the tool judge the
         same path, and a relative one is not measured against the wrong root.
-        An omitted path becomes the root: grep and list_dir otherwise default
-        to the process directory, which is both useless to the model and a
-        way out of the sandbox.
+        An omitted path becomes the root for the tools that allow one: grep
+        and list_dir otherwise default to the process directory, which is both
+        useless to the model and a way out of the sandbox. A tool that
+        *requires* a path keeps the omission instead. Substituting the root
+        there turned a write_file that had lost its path into a call the
+        permission policy approved — against a directory — so the correction
+        written for exactly that mistake never ran and the model was handed an
+        IsADirectoryError instead.
         """
         if self.sandbox is None or not self.takes_path(name):
             return arguments
         given = str(arguments.get("path") or "")
-        resolved = self.sandbox.resolve(given) if given else self.sandbox.roots[0]
-        return {**arguments, "path": str(resolved)}
+        if not given:
+            if self.requires_path(name):
+                return arguments
+            return {**arguments, "path": str(self.sandbox.roots[0])}
+        return {**arguments, "path": str(self.sandbox.resolve(given))}
 
     def off_limits(self, tool: Tool, arguments: dict[str, Any]) -> str:
         """Why the sandbox refuses this call, or "" if it does not.
@@ -114,6 +134,11 @@ class ToolRegistry:
         if not tool:
             return f"Error: unknown tool '{name}'"
         arguments = self.normalize(name, arguments)
+        # Reached by the ungated tools; a gated one is corrected by the policy
+        # before it gets here.
+        if self.requires_path(name) and not arguments.get("path"):
+            where = self.sandbox.roots[0] if self.sandbox else "the workspace"
+            return f"Error: {name} needs a path. Pass an absolute path under {where}."
         refusal = self.off_limits(tool, arguments)
         if refusal:
             return f"Error: {refusal}"
