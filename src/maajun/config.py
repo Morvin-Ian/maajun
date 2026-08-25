@@ -76,10 +76,6 @@ poll_interval = 30
 # burst_threshold = 1               # only report after N errors in the window
 # burst_window_seconds = 60
 
-# GitHub Actions — poll repos for failed workflow runs (optional).
-# Uses the same GitHub token as everything else; nothing secret goes here.
-# github_actions_repos = ["you/another-repo"]
-
 [daemon]
 # Where clones, the incident database, and state live.
 # workdir = "~/.local/share/maajun"
@@ -296,7 +292,6 @@ class MonitorConfig(Base):
     # Emit nothing until burst_threshold events land within the window.
     burst_threshold: int = 1
     burst_window_seconds: float = 60.0
-    github_actions_repos: list[str] = Field(default_factory=list)
 
     @property
     def json_level_value_set(self) -> frozenset[str]:
@@ -443,10 +438,9 @@ class Config(Base):
             "ignore_patterns",
         ):
             set_if_customized(monitor, self.monitor, name)
-        if self.monitor.github_actions_repos:
-            monitor["github_actions_repos"] = self.monitor.github_actions_repos
-        else:
-            monitor.pop("github_actions_repos", None)
+        # Dropped when the Actions monitor was removed; cleaned out of configs
+        # written before that so a stale key cannot look like a live setting.
+        monitor.pop("github_actions_repos", None)
 
         daemon = table(doc, "daemon")
         daemon["workdir"] = self.daemon.workdir
@@ -839,6 +833,19 @@ def render_config(config: "Config") -> str:
     parts.append("\n[bold cyan]\\[monitor][/bold cyan]")
     parts.append(f"  log_files = [green]{config.monitor.log_files}[/green]")
     parts.append(f"  poll_interval = [green]{config.monitor.poll_interval}[/green]")
+
+    # The spend caps were settable but invisible here, so the one number that
+    # decides how deep an investigation may go could not be read back.
+    parts.append("\n[bold cyan]\\[daemon][/bold cyan]")
+    parts.append(f"  max_usd_per_day = [green]{config.daemon.max_usd_per_day}[/green]")
+    parts.append(
+        "  max_usd_per_incident = "
+        f"[green]{config.daemon.max_usd_per_incident}[/green]"
+    )
+    parts.append(
+        f"  max_incidents_per_cycle = [green]{config.daemon.max_incidents_per_cycle}[/green]"
+    )
+    parts.append(f"  screen_errors = [green]{str(config.daemon.screen_errors).lower()}[/green]")
 
     parts.append("\n[dim]Use 'maajun config <key> <value>' to set a value.[/dim]")
     return "\n".join(parts)

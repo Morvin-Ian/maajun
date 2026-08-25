@@ -116,9 +116,8 @@ def build_monitor_checks(
     checks: list[Check] = []
     grouped = config.sources_by_repo(repos)
     label_repo = len(repos) > 1
-    watches_actions = bool(config.monitor.github_actions_repos)
 
-    if not watches_actions and not any(sources for _, sources in grouped):
+    if not any(sources for _, sources in grouped):
         checks.append(Check(
             "At least one monitor configured", False,
             "run 'maajun discover --save', or add monitor.log_files",
@@ -150,11 +149,6 @@ def build_monitor_checks(
                 "requests; run 'maajun discover --save'",
             ))
 
-    if watches_actions:
-        checks.append(Check(
-            f"GitHub Actions: {', '.join(config.monitor.github_actions_repos)}",
-            True, counts=False,
-        ))
     return checks
 
 

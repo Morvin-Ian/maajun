@@ -189,65 +189,36 @@ def test_setup_preserves_a_second_repo(fake_keyring, api_key, tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# GitHub Actions
+# Nothing watching the runtime
 # ---------------------------------------------------------------------------
 
 
-def test_github_actions_never_writes_the_token_to_config(fake_keyring, api_key, tmp_path):
-    """Regression: the wizard copied the keyring token into config.toml,
-    downgrading a secret that was safely stored."""
-    config_path = tmp_path / "config.toml"
-    AuthManager().set_github_token("ghp_stored")
-
-    runner.invoke(app, [
-        "setup", "--non-interactive", "--config", str(config_path),
-        "--repo", "acme/webapp", "--github-actions",
-    ])
-    config = Config.load(config_path)
-    assert config.monitor.github_actions_repos == ["acme/webapp"]
-    assert "ghp_stored" not in config_path.read_text()
-
-
-def test_github_actions_is_skipped_without_a_token(fake_keyring, api_key, tmp_path):
-    config_path = tmp_path / "config.toml"
-    result = runner.invoke(app, [
-        "setup", "--non-interactive", "--config", str(config_path),
-        "--repo", "acme/webapp", "--github-actions",
-    ])
-    assert "needs a GitHub token" in result.output
-    assert Config.load(config_path).monitor.github_actions_repos == []
-
-
-def test_actions_alone_warns_that_runtime_errors_go_unwatched(
+def test_a_repo_with_no_source_warns_that_runtime_errors_go_unwatched(
     fake_keyring, api_key, tmp_path
 ):
-    """Actions only reports CI. Failed requests need a log file."""
+    """A repo nothing watches is a repo whose failed requests nobody sees."""
     config_path = tmp_path / "config.toml"
-    AuthManager().set_github_token("ghp_stored")
 
     result = runner.invoke(app, [
         "setup", "--non-interactive", "--config", str(config_path),
-        "--repo", "acme/webapp", "--github-actions",
+        "--repo", "acme/webapp",
     ])
     assert "Nothing watches runtime errors for acme/webapp" in result.output
 
 
-def test_a_log_file_alongside_actions_is_kept_and_not_warned_about(
+def test_a_log_file_is_kept_and_silences_the_warning(
     fake_keyring, api_key, tmp_path
 ):
-    """Regression guard: accepting Actions must not displace the log monitor."""
     config_path = tmp_path / "config.toml"
     log_file = tmp_path / "app.log"
     log_file.write_text("")
-    AuthManager().set_github_token("ghp_stored")
 
     result = runner.invoke(app, [
         "setup", "--non-interactive", "--config", str(config_path),
-        "--repo", "acme/webapp", "--logs", str(log_file), "--github-actions",
+        "--repo", "acme/webapp", "--logs", str(log_file),
     ])
     config = Config.load(config_path)
     assert config.monitor.log_files == [str(log_file)]
-    assert config.monitor.github_actions_repos == ["acme/webapp"]
     assert "Nothing watches runtime errors" not in result.output
 
 

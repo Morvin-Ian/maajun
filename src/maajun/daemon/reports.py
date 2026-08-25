@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Iterable
 from pathlib import Path
 
 from rich.console import Console
@@ -12,6 +13,11 @@ from maajun.utils import truncate, truncate_tail
 from maajun.vcs import CommandResult
 
 PROJECT_URL = "https://github.com/Morvin-Ian/maajun"
+
+# Where the report file is committed inside the repo. Named here because the
+# gate that keeps a pull request from being nothing but a report has to know
+# which path does not count as a fix.
+INCIDENT_REPORT_DIR = "docs/incidents"
 
 # Quoted verbatim, so cap them or GitHub rejects the body.
 MAX_DETAILS_IN_BODY = 4000
@@ -159,6 +165,19 @@ def extract_patches(report: str) -> list[str]:
         if block and looks_like_patch(block):
             patches.append(block + "\n")
     return patches
+
+
+def code_changes(paths: Iterable[str]) -> list[str]:
+    """The changed paths that are a fix — everything but the report file.
+
+    A pull request whose only file is `docs/incidents/<fp>.md` is an analysis
+    with a branch attached: it reads as a fix right up until the Files tab
+    says otherwise. Callers treat an empty list as "this run changed no code".
+    """
+    return [
+        path for path in paths
+        if not path.replace("\\", "/").startswith(f"{INCIDENT_REPORT_DIR}/")
+    ]
 
 
 FOLLOW_UP_RE = re.compile(
