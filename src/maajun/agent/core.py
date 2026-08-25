@@ -47,15 +47,69 @@ Write the full report now, from what you have already read. Say plainly what
 you could not determine rather than filling it in: a report with a named gap
 is worth something, and a guess dressed as a finding is worth less than
 nothing.
+
+If there was an edit you had not made yet, put it in the report as a fenced
+unified diff — `--- a/path`, `+++ b/path`, `@@` hunks, real context lines. It
+costs you no tool call and it is applied verbatim, so the change still lands.
+A described change is not applied; a diff is.
+"""
+
+# What a provider calls a response the output-token ceiling cut short.
+TRUNCATED_FINISH_REASONS = ("length", "max_tokens", "max_output_tokens")
+
+# Continuations bought for one answer that hit that ceiling. A report needs
+# one; a model still going after two is not writing one.
+MAX_CONTINUATIONS = 2
+
+CONTINUE_TRUNCATED = """
+Your last message stopped mid-sentence: it hit the output limit. Continue it
+from exactly where it broke off, and nothing else. Do not repeat a word of
+what you already wrote, do not start the report over, do not apologize — the
+two halves are joined verbatim, so anything else lands mid-sentence.
 """
 
 # True approves, False denies, a string denies with a reason for the model.
+# A `Correction` is the third answer: the call was wrong, not forbidden.
 PermissionCallback = Callable[[str, dict[str, Any]], Awaitable[bool | str]]
+
+
+class Correction(str):
+    """A refusal the model can fix by calling again, differently.
+
+    A plain string means a person said no and gave a reason, so the model is
+    told not to retry. A policy that is describing a mistake — the wrong root,
+    a missing argument — needs the opposite answer, and an unattended run has
+    nobody to ask instead. Subclasses `str` so the callback protocol, and
+    every policy that returns an ordinary string, are unchanged.
+    """
+
 
 PERMISSION_DENIED = (
     "Error: the user denied permission for this tool call. "
     "Do not retry it — adjust your approach or ask the user what to do."
 )
+
+NOT_ALLOWED_AS_CALLED = (
+    "Error: that call is not allowed as written. {reason}\n"
+    "The change itself was not refused: make the corrected call now."
+)
+
+# A call whose arguments did not parse, which is almost always the output
+# ceiling cutting them off mid-JSON. Nobody denied it, and saying so sent the
+# model away from the edit it was making: PERMISSION_DENIED tells it not to
+# retry, so a truncated write_file ended the run with no change at all.
+MALFORMED_ARGUMENTS = (
+    "Error: the arguments for that call were not valid JSON — they were most "
+    "likely cut off by the output limit. This was not a refusal. Make the "
+    "call again, smaller: edit_file on the few lines that change costs a "
+    "fraction of write_file on a whole file."
+)
+
+
+def truncated(response: CompletionResponse) -> bool:
+    """Whether the output-token ceiling cut this response short."""
+    return response.finish_reason in TRUNCATED_FINISH_REASONS
+
 
 SYSTEM_PROMPT = """\
 You are Maajun, an expert AI coding assistant with access to tools.
@@ -275,10 +329,10 @@ class Agent:
                     last_content = response.content
 
                 if not response.tool_calls:
-                    emit({"role": "assistant", "content": response.content})
+                    content = await self.answer_in_full(messages, emit, response)
                     self.commit_turn(produced)
                     return CompletionResponse(
-                        content=response.content,
+                        content=content,
                         thinking="".join(thinking_parts) or None,
                         usage=self.usage or None,
                         model=response.model,
@@ -322,16 +376,62 @@ class Agent:
         """
         emit({"role": "user", "content": OUT_OF_BUDGET})
         trim_request_messages(messages)
-        response = await self.complete(messages, [])
-        accumulate_usage(self.usage, response.usage)
-        accumulate_usage(self.total_usage, response.usage)
-        emit({"role": "assistant", "content": response.content})
+        response = await self.ask_without_tools(messages)
+        content = await self.answer_in_full(messages, emit, response)
         self.commit_turn(produced)
         return CompletionResponse(
-            content=response.content,
+            content=content,
             usage=self.usage or None,
             model=response.model,
         )
+
+    async def ask_without_tools(self, messages: list[dict[str, Any]]):
+        """One request with no tools offered, billed to this run."""
+        response = await self.complete(messages, [])
+        accumulate_usage(self.usage, response.usage)
+        accumulate_usage(self.total_usage, response.usage)
+        return response
+
+    async def answer_in_full(
+        self,
+        messages: list[dict[str, Any]],
+        emit: Callable[[dict[str, Any]], None],
+        response: CompletionResponse,
+    ) -> str:
+        """The answer, continued past the output ceiling if it stopped there.
+
+        A report cut off mid-sentence passes every check the daemon makes —
+        it is long enough, it has its headings — and is filed with its fix
+        section half written. Worse in fix mode: the tokens the report ran out
+        of are the ones the edit needed, so the run publishes an analysis and
+        changes nothing.
+
+        The continuation is asked with the tools withheld. This branch is only
+        reached because the model was answering rather than calling, and a
+        tool call mid-report would restart the answer.
+        """
+        emit({"role": "assistant", "content": response.content or ""})
+        parts = [response.content or ""]
+        for _ in range(MAX_CONTINUATIONS):
+            if not truncated(response):
+                return "".join(parts)
+            log.warning(
+                "the answer hit the %s-token output ceiling; asking it to "
+                "continue from where it stopped",
+                self.config.ai.max_tokens,
+            )
+            emit({"role": "user", "content": CONTINUE_TRUNCATED})
+            trim_request_messages(messages)
+            response = await self.ask_without_tools(messages)
+            emit({"role": "assistant", "content": response.content or ""})
+            parts.append(response.content or "")
+        if truncated(response):
+            log.warning(
+                "the answer is still cut off after %d continuations; filing it "
+                "as it stands. Raise ai.max_tokens for this provider.",
+                MAX_CONTINUATIONS,
+            )
+        return "".join(parts)
 
     async def chat_stream(self, message: str) -> AsyncIterator[StreamChunk]:
         """Yield ("thinking" | "content" | "running" | "tool", text) chunks.
@@ -447,13 +547,19 @@ class Agent:
             })
             yield name, result
 
-    async def execute_tool(self, name: str, args: dict[str, Any]) -> str:
+    async def execute_tool(self, name: str, args: dict[str, Any] | None) -> str:
+        if args is None:
+            log.warning("tool_call name=%s had unparseable arguments", name)
+            return MALFORMED_ARGUMENTS
         log.info("tool_call name=%s args=%s", name, args)
         args = self.registry.normalize(name, args)
         verdict = await self.permitted(name, args)
         if verdict is True:
             result = await self.registry.execute(name, args)
             log.info("tool_result name=%s len=%d", name, len(result))
+        elif isinstance(verdict, Correction):
+            result = NOT_ALLOWED_AS_CALLED.format(reason=verdict)
+            log.info("tool_corrected name=%s: %s", name, verdict)
         else:
             result = PERMISSION_DENIED
             if isinstance(verdict, str):
@@ -519,7 +625,13 @@ class Agent:
         ]
 
     @staticmethod
-    def parse_args(fn: dict) -> dict:
+    def parse_args(fn: dict) -> dict | None:
+        """The call's arguments, or None when they did not parse.
+
+        None rather than {}: an empty dict reaches the tool as a call with
+        every argument missing, and the permission gate turns that into a
+        refusal the model is told not to retry.
+        """
         try:
             args = (
                 json.loads(fn["arguments"])
@@ -527,5 +639,5 @@ class Agent:
                 else fn["arguments"]
             )
         except json.JSONDecodeError:
-            return {}
-        return args if isinstance(args, dict) else {}
+            return None
+        return args if isinstance(args, dict) else None
