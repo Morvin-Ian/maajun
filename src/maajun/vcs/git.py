@@ -105,6 +105,7 @@ class GitWorkspace:
             await self.git("clone", self.remote_url, str(self.path), cwd=self.root)
         else:
             await self.git("fetch", "origin")
+            await self.discard_local_changes()
         try:
             await self.git("checkout", "-B", base_branch, f"origin/{base_branch}")
         except GitError as err:
@@ -113,8 +114,35 @@ class GitWorkspace:
                 "Check the branch name or use --base-branch."
             ) from err
 
+    async def discard_local_changes(self) -> None:
+        """Put the clone back to HEAD, so no earlier run's edits survive.
+
+        One clone serves every incident in a repo. A run that died after the
+        agent edited files — an unusable report, a git or GitHub failure, a
+        killed daemon — leaves them on disk, and `checkout -B` carries them
+        onto the next incident's branch, where `has_changes` reads them as
+        that incident's fix. That is a pull request whose diff belongs to a
+        different error.
+
+        Ignored files are left alone (`clean -fd`, not `-fdx`): a virtualenv
+        or a node_modules in the clone is expensive to rebuild and is not a
+        change anyone is reviewing.
+        """
+        await self.git("reset", "--hard")
+        await self.git("clean", "-fd")
+
     async def create_branch(self, branch: str, base_branch: str) -> None:
         await self.git("checkout", "-B", branch, f"origin/{base_branch}")
+
+    async def committed_files(self, base_branch: str) -> list[str]:
+        """The paths this branch's commits change, against the base branch.
+
+        What the pull request's Files tab will show, asked before the push.
+        """
+        output = await self.git(
+            "diff", "--name-only", f"origin/{base_branch}...HEAD"
+        )
+        return [line.strip() for line in output.splitlines() if line.strip()]
 
     async def has_changes(self) -> bool:
         return bool(await self.git("status", "--porcelain"))
