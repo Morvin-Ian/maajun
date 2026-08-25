@@ -126,7 +126,8 @@ def prompt_mode(current: str = "suggest") -> str:
     """Prompt for suggest/fix mode, defaulting to `current`."""
     console.print("\n[bold]Mode[/bold]")
     console.print(
-        "  [cyan]1.[/cyan] suggest — PRs contain only the incident report and suggested fix"
+        "  [cyan]1.[/cyan] suggest — Github issues contain only the incident "
+        "report and suggested fix"
     )
     console.print(
         "  [cyan]2.[/cyan] fix — the agent may also change code inside its workspace"
