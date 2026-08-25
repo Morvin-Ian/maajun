@@ -125,6 +125,29 @@ class TurnView:
         self.quiet()
 
 
+def quiet_loop() -> asyncio.AbstractEventLoop:
+    """A loop that keeps a streaming SDK's teardown noise off the screen.
+
+    An SSE stream abandoned at "[DONE]" leaves the HTTP byte-stream generator
+    under it suspended. Closing that generator once its connection is gone
+    raises, and asyncio reports it when the loop shuts down — which is when
+    chat exits, long after the reply was delivered.
+    """
+    loop = asyncio.new_event_loop()
+    loop.set_exception_handler(ignore_asyncgen_teardown)
+    return loop
+
+
+def ignore_asyncgen_teardown(
+    loop: asyncio.AbstractEventLoop, context: dict[str, object]
+) -> None:
+    message = str(context.get("message", ""))
+    if "asynchronous generator" in message:
+        log.debug("%s: %s", message, context.get("exception"))
+        return
+    loop.default_exception_handler(context)
+
+
 class ChatSession:
     def __init__(
         self,
@@ -147,7 +170,7 @@ class ChatSession:
         self.ask = ask
         self.history_path = history_path
         self.reader = None
-        self.runner = asyncio.Runner()
+        self.runner = asyncio.Runner(loop_factory=quiet_loop)
         self.view: TurnView | None = None
         self.agent = self.build_agent()
 

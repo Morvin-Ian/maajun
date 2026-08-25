@@ -16,6 +16,7 @@ from daemon.fakes import (
     FakeAgent,
     FakeGitHub,
 )
+from maajun.agent.core import Correction
 from maajun.config import (
     Config,
     DaemonConfig,
@@ -95,6 +96,32 @@ async def test_a_denial_tells_the_model_what_to_do_instead(tmp_path):
 
     other_tool = await approve("bash", {"command": "pytest"})
     assert "edit_file" in other_tool
+
+
+async def test_a_refusal_names_the_same_file_inside_the_checkout(tmp_path):
+    """The traceback names the deployment's path, so that is the path the
+    model reaches for first. Refusing it without naming the clone's copy is
+    how a run that was allowed to edit published an analysis instead."""
+    (tmp_path / "apps" / "accounts").mkdir(parents=True)
+    (tmp_path / "apps" / "accounts" / "views.py").write_text("")
+    approve = make_permission_policy("fix", tmp_path)
+
+    refusal = await approve("edit_file", {"path": "/app/apps/accounts/views.py"})
+
+    assert str(tmp_path / "apps" / "accounts" / "views.py") in refusal
+
+
+async def test_every_fix_mode_refusal_is_a_correction(tmp_path):
+    """Nothing in fix mode is forbidden — the call was made wrongly. Sent as
+    a flat denial they read as "do not retry"."""
+    approve = make_permission_policy("fix", tmp_path)
+
+    for call in (
+        ("edit_file", {"path": "/etc/passwd"}),
+        ("edit_file", {}),
+        ("bash", {"command": "pytest"}),
+    ):
+        assert isinstance(await approve(*call), Correction), call
 
 
 async def test_notices_emitted_for_new_error_and_artifact(setup):

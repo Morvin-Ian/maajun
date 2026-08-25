@@ -131,12 +131,12 @@ def test_no_monitors_at_all_still_fails():
     assert "At least one monitor configured" in check_labels(sections)
 
 
-def test_actions_alone_fails_the_preflight():
-    """CI-only leaves every failed request unwatched, which is the whole
-    point of the tool — so it blocks `watch` rather than warning."""
+def test_a_repo_with_no_source_fails_the_preflight_and_says_why():
+    """A repo nothing watches leaves every failed request unseen, which is the
+    whole point of the tool — so it blocks `watch` rather than warning."""
     config = Config(
         github=GitHubConfig(repos=[RepoConfig(repo="owner/name")]),
-        monitor=MonitorConfig(github_actions_repos=["owner/name"]),
+        monitor=MonitorConfig(),
     )
     sections, ok = build_status(
         config, provider="deepseek", has_key=True, has_token=True,
@@ -227,31 +227,38 @@ def test_a_configured_folder_that_is_missing_is_only_a_warning(tmp_path):
     assert check.warn and check.counts is False
 
 
-def test_runtime_none_is_how_a_ci_only_repo_passes():
-    """The explicit opt-out: said out loud in config, not inferred."""
-    repo = RepoConfig(
+def test_runtime_none_is_how_a_repo_opts_out(tmp_path):
+    """The explicit opt-out: said out loud in config, not inferred.
+
+    Another repo carries the log file, because opting one repo out cannot make
+    a daemon with nothing at all to poll pass its preflight.
+    """
+    logf = tmp_path / "web.log"
+    logf.write_text("")
+    quiet = RepoConfig(
         repo="owner/name", deployment=DeploymentConfig(runtime="none")
     )
+    watched = RepoConfig(repo="owner/web", log_files=[str(logf)])
     config = Config(
-        github=GitHubConfig(repos=[repo]),
-        monitor=MonitorConfig(github_actions_repos=["owner/name"]),
+        github=GitHubConfig(repos=[quiet, watched]),
+        monitor=MonitorConfig(),
     )
     sections, ok = build_status(
         config, provider="deepseek", has_key=True, has_token=True,
-        repos=[repo], network=None,
+        repos=[quiet, watched], network=None,
     )
     assert ok is True
-    assert find(sections, "no runtime source").detail == 'runtime = "none"'
+    # Labels carry the repo once there is more than one.
+    opted_out = find(sections, "owner/name — no runtime source")
+    assert opted_out.detail == 'runtime = "none"'
 
 
-def test_actions_with_a_log_file_does_not_warn(tmp_path):
+def test_a_global_log_file_counts_as_runtime_coverage(tmp_path):
     logf = tmp_path / "app.log"
     logf.write_text("")
     config = Config(
         github=GitHubConfig(repos=[RepoConfig(repo="owner/name")]),
-        monitor=MonitorConfig(
-            log_files=[str(logf)], github_actions_repos=["owner/name"]
-        ),
+        monitor=MonitorConfig(log_files=[str(logf)]),
     )
     sections, ok = build_status(
         config, provider="deepseek", has_key=True, has_token=True,
@@ -268,7 +275,7 @@ def test_a_per_repo_log_file_counts_as_runtime_coverage(tmp_path):
     repo = RepoConfig(repo="owner/name", log_files=[str(logf)])
     config = Config(
         github=GitHubConfig(repos=[repo]),
-        monitor=MonitorConfig(github_actions_repos=["owner/name"]),
+        monitor=MonitorConfig(),
     )
     sections, ok = build_status(
         config, provider="deepseek", has_key=True, has_token=True,

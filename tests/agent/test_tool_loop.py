@@ -3,10 +3,16 @@ import json
 
 import pytest
 
-from maajun.agent.core import PERMISSION_DENIED, Agent
-from maajun.agent.tools import WRITE_FILE, ToolRegistry, default_registry
+from maajun.agent.core import (
+    MAX_CONTINUATIONS,
+    PERMISSION_DENIED,
+    Agent,
+    Correction,
+)
+from maajun.agent.tools import WRITE_FILE, Sandbox, ToolRegistry, default_registry
 from maajun.agent.tools.base import Tool, json_schema
 from maajun.config import AIProviderConfig, Config
+from maajun.daemon.core import make_permission_policy
 from maajun.providers.base import CompletionResponse, ProviderError, ToolDefinition
 from maajun.providers.factory import ProviderFactory
 
@@ -298,6 +304,35 @@ async def test_only_the_newest_turn_keeps_its_tool_results(config):
     assert sum(1 for entry in agent.history if entry["role"] == "tool") == 1
 
 
+class PathlessWriteProvider(StreamsFromChatMixin):
+    """A write_file whose arguments parsed but arrived without a path.
+
+    What the output ceiling produces when it cuts a long call just late
+    enough to still be valid JSON.
+    """
+
+    def __init__(self):
+        self.call_count = 0
+        self.last_messages = None
+
+    async def chat_completion(self, messages, **kwargs):
+        self.call_count += 1
+        self.last_messages = messages
+        if self.call_count == 1:
+            return CompletionResponse(
+                content="",
+                tool_calls=[{
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {
+                        "name": "write_file",
+                        "arguments": json.dumps({"content": "the fix"}),
+                    },
+                }],
+            )
+        return CompletionResponse(content="retried with a path")
+
+
 def tool_messages(provider):
     return [m for m in provider.last_messages if m["role"] == "tool"]
 
@@ -345,6 +380,57 @@ async def test_dangerous_tool_denied_by_callback(config):
     await agent.chat("run something")
 
     assert tool_messages(provider)[0]["content"] == PERMISSION_DENIED
+
+
+async def test_a_correction_is_not_read_as_a_refusal(config):
+    """A policy describing a mistake needs the opposite answer to a person
+    saying no: the model has to make the call again, differently."""
+    provider = ToolCallingProvider()
+    agent = make_agent(config, provider)
+    agent.registry = ToolRegistry([WRITE_FILE])
+
+    async def correct(name, args):
+        return Correction("Only files under /checkout can be edited.")
+
+    agent.approve = correct
+    await agent.chat("run something")
+
+    result = tool_messages(provider)[0]["content"]
+    assert "Only files under /checkout" in result
+    assert "was not refused" in result
+    assert "Do not retry" not in result
+
+
+async def test_a_plain_string_denial_still_says_not_to_retry(config):
+    provider = ToolCallingProvider()
+    agent = make_agent(config, provider)
+    agent.registry = ToolRegistry([WRITE_FILE])
+
+    async def deny(name, args):
+        return "I do not want that file touched."
+
+    agent.approve = deny
+    await agent.chat("run something")
+
+    result = tool_messages(provider)[0]["content"]
+    assert "Do not retry" in result
+    assert "I do not want that file touched." in result
+
+
+async def test_an_edit_that_lost_its_path_is_corrected_not_denied(config, tmp_path):
+    """The whole chain: the path is not invented, so the policy sees it
+    missing and answers with the correction written for it."""
+    provider = PathlessWriteProvider()
+    agent = make_agent(config, provider)
+    agent.registry = ToolRegistry([WRITE_FILE], Sandbox([tmp_path]))
+    agent.approve = make_permission_policy("fix", tmp_path)
+
+    await agent.chat("fix it")
+
+    result = tool_messages(provider)[0]["content"]
+    assert "Say which file to edit" in result
+    assert "was not refused" in result
+    assert "IsADirectoryError" not in result
 
 
 async def test_safe_tool_skips_approval(config):
@@ -541,9 +627,11 @@ class ExpensiveProvider(StreamsFromChatMixin):
         self.calls = 0
         self.per_round = per_round
         self.tools_offered = []
+        self.last_messages = None
 
     async def chat_completion(self, messages, tools=None, **kwargs):
         self.calls += 1
+        self.last_messages = messages
         self.tools_offered.append(list(tools or []))
         usage = {"prompt_tokens": self.per_round, "completion_tokens": 1_000}
         if not tools:
@@ -591,12 +679,30 @@ async def test_a_run_that_spends_its_allowance_is_asked_for_the_report(monkeypat
     assert agent.spent_usd() > 0.5
 
 
+async def test_the_last_round_asks_for_the_pending_edit_as_a_diff(monkeypatch):
+    """The tools are gone, so an edit the run had not made yet can only land
+    as a patch in the report — which costs no extra round and which
+    apply_reported_diff applies verbatim. Described, it lands nothing."""
+    agent, provider = expensive_agent(monkeypatch, limit=0.5)
+
+    await agent.chat("investigate")
+
+    instruction = "\n".join(
+        m["content"] for m in provider.last_messages if m["role"] == "user"
+    )
+    assert "unified diff" in instruction
+    assert "--- a/" in instruction and "@@" in instruction
+
+
 async def test_a_run_inside_its_allowance_is_left_alone(monkeypatch):
+    """The spend cap must not bite; the round ceiling still ends the run, and
+    the last request it buys is the report."""
     agent, provider = expensive_agent(monkeypatch, limit=100.0)
 
     await agent.chat("investigate")
 
-    assert all(offered for offered in provider.tools_offered)
+    assert all(offered for offered in provider.tools_offered[:-1])
+    assert provider.tools_offered[-1] == []
 
 
 async def test_no_ceiling_means_no_ceiling(monkeypatch):
@@ -605,8 +711,34 @@ async def test_no_ceiling_means_no_ceiling(monkeypatch):
 
     await agent.chat("investigate")
 
-    assert provider.calls == agent.max_rounds
-    assert all(offered for offered in provider.tools_offered)
+    # Every round, plus the one that asks for the report.
+    assert provider.calls == agent.max_rounds + 1
+    assert all(offered for offered in provider.tools_offered[:-1])
+
+
+async def test_a_run_that_uses_every_round_is_asked_for_the_report(monkeypatch):
+    """It used to return whatever prose happened to accompany the last tool
+    call, which is usually nothing: the run filed "no usable report (it was
+    empty)" and threw away everything it had read. Nothing stops this on the
+    default provider, where every round is free and the spend cap never trips."""
+    agent, provider = expensive_agent(monkeypatch, limit=0.0)
+
+    response = await agent.chat("investigate")
+
+    assert response.content == "the report"
+    assert provider.tools_offered[-1] == []
+
+
+async def test_the_round_ceiling_says_which_ceiling_it_was(monkeypatch):
+    agent, provider = expensive_agent(monkeypatch, limit=0.0)
+
+    await agent.chat("investigate")
+
+    asked = "\n".join(
+        m["content"] for m in provider.last_messages if m["role"] == "user"
+    )
+    assert "every tool call this investigation allows" in asked
+    assert "whole budget" not in asked
 
 
 async def test_spend_accumulates_across_a_run_not_just_a_turn(monkeypatch):
@@ -619,3 +751,158 @@ async def test_spend_accumulates_across_a_run_not_just_a_turn(monkeypatch):
     await agent.chat("again")
 
     assert agent.spent_usd() > first
+
+
+# ---------------------------------------------------------------------------
+# The output-token ceiling
+# ---------------------------------------------------------------------------
+
+
+class TruncatingProvider(StreamsFromChatMixin):
+    """Stops mid-sentence for its first `cuts` answers, then finishes."""
+
+    def __init__(self, cuts=1):
+        self.cuts = cuts
+        self.calls = 0
+        self.prompts = []
+        self.usage = None
+
+    async def chat_completion(self, messages, tools=None, **kwargs):
+        self.calls += 1
+        self.prompts.append(messages[-1]["content"])
+        cut = self.calls <= self.cuts
+        return CompletionResponse(
+            content=(
+                f"## Applied fix\npart {self.calls} of it, cut off mid-"
+                if cut else "sentence. Done."
+            ),
+            finish_reason="length" if cut else "stop",
+            usage=self.usage,
+        )
+
+    async def validate_credentials(self):
+        return True
+
+    def get_provider_name(self):
+        return "fake"
+
+
+async def test_an_answer_cut_off_by_the_output_ceiling_is_continued(config):
+    """A report that stops mid-sentence passes every check the daemon makes —
+    it is long enough, it has its headings — and is filed half written. In fix
+    mode the tokens it ran out of are the ones the edit needed."""
+    provider = TruncatingProvider()
+    agent = make_agent(config, provider)
+
+    response = await agent.chat("investigate")
+
+    assert response.content == (
+        "## Applied fix\npart 1 of it, cut off mid-sentence. Done."
+    )
+    assert provider.calls == 2
+    assert "continue it" in provider.prompts[1].lower()
+
+
+async def test_a_complete_answer_buys_no_continuation(config):
+    provider = TruncatingProvider(cuts=0)
+    agent = make_agent(config, provider)
+
+    await agent.chat("investigate")
+
+    assert provider.calls == 1
+
+
+async def test_continuations_are_bounded(config):
+    """Then the partial answer is filed as it stands: a model still going
+    after two continuations is not writing a report."""
+    provider = TruncatingProvider(cuts=99)
+    agent = make_agent(config, provider)
+
+    response = await agent.chat("investigate")
+
+    assert provider.calls == 1 + MAX_CONTINUATIONS
+    assert response.content.endswith("cut off mid-")
+
+
+async def test_a_continuation_is_billed_to_the_run(config):
+    """It is a request like any other, and the spend cap reads these."""
+    provider = TruncatingProvider()
+    provider.usage = {"prompt_tokens": 100, "completion_tokens": 10}
+    agent = make_agent(config, provider)
+
+    response = await agent.chat("investigate")
+
+    assert response.usage == {"prompt_tokens": 200, "completion_tokens": 20}
+
+
+async def test_the_continuation_is_asked_with_no_tools(config):
+    """This branch was reached because the model was answering rather than
+    calling, and a tool call mid-report restarts the answer."""
+    offered = []
+
+    provider = TruncatingProvider()
+    inner = provider.chat_completion
+
+    async def record(messages, tools=None, **kwargs):
+        offered.append(list(tools or []))
+        return await inner(messages, tools, **kwargs)
+
+    provider.chat_completion = record
+    agent = make_agent(config, provider)
+    agent.registry = default_registry()
+
+    await agent.chat("investigate")
+
+    assert offered[0] and offered[1] == []
+
+
+class TruncatedCallProvider(StreamsFromChatMixin):
+    """A write_file whose long `content` argument was cut off mid-JSON."""
+
+    def __init__(self):
+        self.calls = 0
+        self.last_messages = None
+
+    async def chat_completion(self, messages, tools=None, **kwargs):
+        self.calls += 1
+        self.last_messages = messages
+        if self.calls == 1:
+            return CompletionResponse(
+                content="",
+                finish_reason="length",
+                tool_calls=[{
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {
+                        "name": "write_file",
+                        "arguments": '{"path": "x.txt", "content": "the who',
+                    },
+                }],
+            )
+        return CompletionResponse(content="final answer")
+
+    async def validate_credentials(self):
+        return True
+
+    def get_provider_name(self):
+        return "fake"
+
+
+async def test_a_call_whose_arguments_were_cut_off_is_not_a_refusal(config):
+    """The ceiling truncates the arguments of a long write_file, and the
+    unparseable result used to reach the permission gate as a call with no
+    path at all. Being told the user refused an edit — and not to retry it —
+    is how fix mode ended a run having changed nothing."""
+    provider = TruncatedCallProvider()
+    agent = make_agent(config, provider)
+    agent.registry = ToolRegistry([WRITE_FILE])
+
+    async def approve(name, args):
+        raise AssertionError("a call that never parsed is not the gate's to judge")
+
+    agent.approve = approve
+    await agent.chat("fix it")
+
+    result = tool_messages(provider)[0]["content"]
+    assert "not valid JSON" in result
+    assert PERMISSION_DENIED not in result

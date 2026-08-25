@@ -185,7 +185,7 @@ class Investigation:
                 self.progress("Re-asking for the report")
                 response = await self.ask(RETRY_SUFFIX.format(problem=problem))
                 self.report = response.content.strip()
-            if self.applies_a_fix and not await self.workspace.has_changes():
+            if self.applies_a_fix and not await self.code_changes():
                 await self.secure_the_edit()
         except BaseException:
             self.bank_spend()
@@ -247,35 +247,58 @@ class Investigation:
             self.opens_pull_request = False
 
         if self.opens_pull_request:
-            url, branch, kind = await self.open_pull_request(), self.plan.branch, ARTIFACT_PR
-        else:
-            url, branch, kind = await self.file_issue(), "", ARTIFACT_ISSUE
-        self.record(url, branch, kind)
+            url = await self.open_pull_request()
+            if url:
+                self.record(url, self.plan.branch, ARTIFACT_PR)
+                return url
+            # The gate inside open_pull_request tripped: nothing was pushed
+            # and nothing is open, so the analysis is still unpublished.
+            self.opens_pull_request = False
+
+        url = await self.file_issue()
+        self.record(url, "", ARTIFACT_ISSUE)
         return url
+
+    async def code_changes(self) -> list[str]:
+        """The files this run changed that a reviewer would call a fix.
+
+        `git status` alone answers a different question — whether the tree is
+        dirty — and the report file makes it dirty by itself.
+        """
+        return reports.code_changes(await self.workspace.changed_files())
 
     async def has_a_diff(self) -> bool:
         """Whether there is something to review.
 
-        Asked before the report file is written — that file is itself a
-        change, so afterwards the answer is always yes.
+        Asked before the report file is written, and blind to it either way:
+        a branch carrying only `docs/incidents/<fp>.md` is an analysis.
         """
-        if await self.workspace.has_changes():
+        if await self.code_changes():
             return True
         # The insisted report gets the same free attempt: asked point blank, a
         # model that still only describes it hands the patch over while doing so.
         return await self.apply_reported_diff()
 
     async def open_pull_request(self) -> str:
-        """Verify, repair what this change broke, and open the PR."""
+        """Verify, repair what this change broke, and open the PR.
+
+        Returns "" when the commit turned out to carry no fix, in which case
+        nothing was pushed and the caller files the analysis as an issue.
+        """
         verification, unrelated = await self.verified_fix()
         self.progress("Opening PR")
         # Filed apart: a reviewer should not have to work out which lines of
         # the report the diff already covers.
-        self.report, follow_up = reports.split_follow_up(self.report)
+        report, follow_up = reports.split_follow_up(self.report)
         reports.write_report_file(
-            self.workspace.path / "docs" / "incidents", self.event, self.report
+            self.workspace.path / reports.INCIDENT_REPORT_DIR, self.event, report
         )
         await self.workspace.commit_all(self.commit_message)
+        if not await self.committed_code_changes():
+            return ""
+        # Past the gate, so the split is what gets published; before it, the
+        # whole report — follow-up included — is still what the issue says.
+        self.report = report
         await self.workspace.push(self.plan.branch)
         url = await self.daemon.github.create_pull_request(
             self.repo_config.repo,
@@ -290,6 +313,26 @@ class Investigation:
         )
         await self.file_follow_up(follow_up, url)
         return url
+
+    async def committed_code_changes(self) -> list[str]:
+        """The fix as the pull request's Files tab would show it.
+
+        The last gate before a branch leaves the machine, and the only one
+        that reads the commit rather than the working tree. Everything above
+        decides whether a fix was made; this decides whether one is being
+        published, so a path that reaches here with nothing to merge files an
+        issue instead of pushing a branch nobody can review.
+        """
+        changed = reports.code_changes(
+            await self.workspace.committed_files(self.repo_config.base_branch)
+        )
+        if not changed:
+            log.warning(
+                "the commit for fp=%s in repo=%s changes nothing but the "
+                "report; not pushing it, and filing the analysis as an issue",
+                self.event.fingerprint, self.repo_config.repo,
+            )
+        return changed
 
     async def file_issue(self) -> str:
         self.progress("Filing issue")

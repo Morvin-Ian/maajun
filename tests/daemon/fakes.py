@@ -53,6 +53,9 @@ class FakeAgent:
     async def chat(self, message):
         self.prompts.append(message)
         if self.edit_path:
+            # The clone only exists once the run has synced it, so a test can
+            # aim at a path whose directory is not there yet.
+            self.edit_path.parent.mkdir(parents=True, exist_ok=True)
             self.edit_path.write_text("items = [0]\n")
         content = self.replies.pop(0) if self.replies else self.report
         return CompletionResponse(content=content, usage=dict(self.usage_per_call))

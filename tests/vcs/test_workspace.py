@@ -147,3 +147,77 @@ async def test_apply_patches_does_nothing_with_no_patches(tmp_path):
     await workspace.apply_patches([])
 
     assert not await workspace.has_changes()
+
+
+# ---------------------------------------------------------------------------
+# What one incident leaves behind for the next
+# ---------------------------------------------------------------------------
+
+
+def cloned_workspace(tmp_path) -> GitWorkspace:
+    """A clone of a bare remote, as sync() would leave it."""
+    bare = tmp_path / "remote.git"
+    subprocess.run(
+        ["git", "init", "--bare", "-b", "main", str(bare)],
+        check=True, capture_output=True,
+    )
+    seed = seeded_workspace(tmp_path)
+    run = lambda *a: subprocess.run(  # noqa: E731
+        ["git", "-c", "user.email=t@t", "-c", "user.name=t", *a],
+        cwd=str(seed.path), check=True, capture_output=True,
+    )
+    run("remote", "add", "origin", str(bare))
+    run("push", "origin", "main")
+    workspace = GitWorkspace(tmp_path / "clone", "owner/name", remote_url=str(bare))
+    return workspace
+
+
+async def test_sync_discards_what_an_earlier_run_left_on_the_tree(tmp_path):
+    """One clone serves every incident. A run that died after the agent edited
+    files left them for the next incident to open a pull request from."""
+    workspace = cloned_workspace(tmp_path)
+    await workspace.sync("main")
+    (workspace.path / "main.py").write_text("half a fix\n")
+    (workspace.path / "scratch.py").write_text("notes\n")
+
+    await workspace.sync("main")
+
+    assert not await workspace.has_changes()
+    assert (workspace.path / "main.py").read_text() == "items = []\n"
+    assert not (workspace.path / "scratch.py").exists()
+
+
+async def test_an_ignored_file_survives_the_clean(tmp_path):
+    """`clean -fd`, not `-fdx`: a virtualenv in the clone is expensive to
+    rebuild and is not a change anyone is reviewing."""
+    workspace = cloned_workspace(tmp_path)
+    await workspace.sync("main")
+    (workspace.path / ".gitignore").write_text(".venv/\n")
+    (workspace.path / ".venv").mkdir()
+    (workspace.path / ".venv" / "pyvenv.cfg").write_text("home = /usr\n")
+    await workspace.commit_all("ignore the venv")
+
+    await workspace.sync("main")
+
+    assert (workspace.path / ".venv" / "pyvenv.cfg").exists()
+
+
+async def test_committed_files_is_what_the_files_tab_will_show(tmp_path):
+    workspace = cloned_workspace(tmp_path)
+    await workspace.sync("main")
+    await workspace.create_branch("maajun/incident-abc", "main")
+    (workspace.path / "main.py").write_text("items = [0]\n")
+    (workspace.path / "docs").mkdir()
+    (workspace.path / "docs" / "note.md").write_text("why\n")
+    await workspace.commit_all("maajun: a fix")
+
+    assert sorted(await workspace.committed_files("main")) == [
+        "docs/note.md", "main.py",
+    ]
+
+
+async def test_committed_files_is_empty_on_the_base_branch(tmp_path):
+    workspace = cloned_workspace(tmp_path)
+    await workspace.sync("main")
+
+    assert await workspace.committed_files("main") == []
