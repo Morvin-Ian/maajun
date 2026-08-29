@@ -4,6 +4,10 @@ import time
 
 from maajun.monitors.shell import CommandOutput, CommandStreamMonitor
 
+# How far back --backfill reaches. Unbounded, `docker logs` buffers the
+# container's whole retained log.
+BACKFILL_LINES = 50_000
+
 
 class DockerLogMonitor(CommandStreamMonitor):
     """Reads a container's logs, in docker or compose.
@@ -28,8 +32,10 @@ class DockerLogMonitor(CommandStreamMonitor):
     def command(self) -> list[str]:
         self.pending_since = time.time()
         if self.backfill and not self.read_once:
-            # Everything the container still holds — once, then windows.
-            return ["docker", "logs", self.container]
+            # The newest BACKFILL_LINES it still holds — once, then windows.
+            return [
+                "docker", "logs", "--tail", str(BACKFILL_LINES), self.container
+            ]
         return [
             "docker", "logs", "--since", f"{int(self.since)}", self.container
         ]

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 
 from maajun.monitors.cursors import (
@@ -15,6 +16,13 @@ from maajun.monitors.defaults import (
     TRACEBACK_LOOKAHEAD_LINES,
 )
 from maajun.monitors.stream import LogStreamMonitor
+
+# Most one poll will read. An increment is never near this; a backfill is,
+# and the rest of it is read by the next poll.
+MAX_READ_BYTES = 16 * 1024 * 1024
+
+# Past this a read is worth a thread.
+THREAD_ABOVE_BYTES = 512 * 1024
 
 
 class LogFileMonitor(LogStreamMonitor):
@@ -66,8 +74,21 @@ class LogFileMonitor(LogStreamMonitor):
         return f"logfile:{self.path}"
 
     async def read_stream(self) -> str:
-        # Reading a local file is a syscall or two; not worth a thread.
+        # An increment is a syscall or two; a backfill would hold the loop
+        # while every other monitor waits.
+        if self.pending_bytes() > THREAD_ABOVE_BYTES:
+            return await asyncio.to_thread(self.read_new)
         return self.read_new()
+
+    def pending_bytes(self) -> int:
+        """Roughly how much is waiting to be read.
+
+        Only chooses between a thread and an inline read, so a rough answer
+        before the cursor is positioned is fine.
+        """
+        size = self.size_now()
+        offset = self.offset if self.positioned else min(self.start_at, size)
+        return max(0, size - offset)
 
     def size_now(self) -> int:
         """The file's size, or 0 if it is not there yet — everything a file
@@ -135,7 +156,9 @@ class LogFileMonitor(LogStreamMonitor):
             return ""
         with open(self.path, "rb") as f:
             f.seek(self.offset)
-            data = f.read()
+            # Capped, so a backfill drains over several polls. A read that
+            # stops mid-line is what carryover_text is for.
+            data = f.read(MAX_READ_BYTES)
             self.offset = f.tell()
         self.remember()
         # A read can land mid-character while the writer is still going.
