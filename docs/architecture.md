@@ -68,9 +68,8 @@ Every supported provider speaks the `/chat/completions` protocol, so
 behavior — retries, streaming, tool serialization, response parsing — and a
 vendor module is only an endpoint, a pair of model names, and any content
 quirks to strip: `deepseek.py` removes DeepSeek's DSML tool-call markup,
-`openai.py` has nothing to strip, `ox_alpha.py` is OpenRouter's endpoint and the one
-free model. Point `ai.base_url` at a gateway to use any other compatible
-endpoint.
+`openai.py` has nothing to strip. Point `ai.base_url` at a gateway to use any
+other compatible endpoint.
 
 `anthropic.py` is the exception: Claude speaks the Messages API, so it
 subclasses `AIProvider` directly and translates both ways. The system prompt

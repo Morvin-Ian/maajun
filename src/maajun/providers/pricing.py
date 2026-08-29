@@ -13,11 +13,6 @@ log = logging.getLogger(__name__)
 #
 # The DeepSeek rows are its peak rates; off-peak is half of them.
 PRICING: dict[str, dict[str, float]] = {
-    # Free for the length of OpenRouter's preview.
-    # https://openrouter.ai/stealth/ox-alpha
-    "stealth/ox-alpha": {
-        "input": 0.0, "cached_input": 0.0, "cache_write": 0.0, "output": 0.0,
-    },
     # https://api-docs.deepseek.com/quick_start/pricing
     "deepseek-v4-flash": {
         "input": 0.44, "cached_input": 0.014, "cache_write": 0.44, "output": 1.32,

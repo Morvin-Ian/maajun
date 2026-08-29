@@ -155,10 +155,7 @@ def test_the_default_rate_is_above_every_known_model():
 
 
 def test_the_thinking_model_costs_more_than_the_default_one():
-    """If these ever invert, thinking_mode has stopped being the premium path.
-
-    Ox is exempt: one free model serves both, so there is nothing to invert.
-    """
+    """If these ever invert, thinking_mode has stopped being the premium path."""
     from maajun.providers.anthropic import AnthropicProvider
     from maajun.providers.deepseek import DeepSeekProvider
     from maajun.providers.openai import OpenAIProvider
@@ -229,7 +226,6 @@ def test_a_provider_that_reports_no_cache_is_charged_in_full():
 
 
 def test_every_model_has_a_cache_hit_rate_at_or_below_its_miss_rate():
-    """Equal only where both are zero — a free model."""
     from maajun.providers.pricing import PRICING
 
     for model, rates in PRICING.items():
@@ -306,19 +302,8 @@ def test_the_vision_model_is_priced():
 
 
 # ---------------------------------------------------------------------------
-# Ox Alpha, Anthropic
+# Anthropic
 # ---------------------------------------------------------------------------
-
-
-def test_ox_alpha_costs_nothing():
-    """The whole reason it is offered first."""
-    assert compute_cost(10_000_000, 10_000_000, "stealth/ox-alpha", at=PEAK) == 0.0
-
-
-def test_a_free_model_is_still_costed_from_the_table_not_special_cased():
-    from maajun.providers.pricing import DEFAULT_PRICING, pricing_for
-
-    assert pricing_for("stealth/ox-alpha", PEAK) is not DEFAULT_PRICING
 
 
 def test_anthropic_charges_a_premium_to_write_the_cache():
