@@ -45,7 +45,7 @@ INCIDENT_COLUMNS: tuple[str, ...] = (
 )
 
 # Bumped with every MIGRATIONS entry. Databases predating this sit at 0.
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 # What an incident produced. Recorded, not inferred from `branch != ""`,
 # which cannot tell a suggest-mode issue from a local-mode report.
@@ -274,9 +274,17 @@ def migrate_to_6(conn: sqlite3.Connection) -> None:
         )
 
 
+def migrate_to_7(conn: sqlite3.Connection) -> None:
+    """Index last_seen, which cost_since filters on for every new error."""
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS incidents_by_last_seen"
+        " ON incidents(last_seen)"
+    )
+
+
 MIGRATIONS = (
     migrate_to_1, migrate_to_2, migrate_to_3, migrate_to_4, migrate_to_5,
-    migrate_to_6,
+    migrate_to_6, migrate_to_7,
 )
 
 # Incident lifecycle: new -> processed, or new -> failed -> new (retried) ->
