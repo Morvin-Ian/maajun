@@ -5,8 +5,14 @@ from typer.testing import CliRunner
 
 from maajun.auth import AuthManager
 from maajun.cli import app
-from maajun.cli.setup import detect_repo_from_git, model_line, setup_model
-from maajun.cli.shared import Asker
+from maajun.cli.setup import (
+    detect_repo_from_git,
+    model_line,
+    pick_provider,
+    setup_model,
+    split_by_kind,
+)
+from maajun.cli.shared import Asker, implemented_providers
 from maajun.config import Config, DeploymentConfig, RepoConfig
 from maajun.discovery import Discovered
 from maajun.inspection import Inspection
@@ -643,3 +649,46 @@ def test_changing_provider_clears_a_model_chosen_for_the_old_one():
     config.ai.model = "claude-opus-5"
     config.set("ai.provider", "openai")
     assert config.ai.model is None
+
+
+# ---------------------------------------------------------------------------
+# Provider selection
+# ---------------------------------------------------------------------------
+
+
+def test_the_providers_are_listed_downwards_and_grouped(capsys):
+    pick_provider(Answer("1"), implemented_providers(), "deepseek")
+    lines = [
+        line.strip() for line in capsys.readouterr().out.splitlines() if line.strip()
+    ]
+
+    heads = [
+        index for index, line in enumerate(lines)
+        if line.startswith(("Vendors", "Gateways"))
+    ]
+    assert len(heads) == 2 and heads[0] < heads[1]
+    # One provider per line, numbered, rather than all of them on one.
+    assert "1. deepseek" in lines
+    for name in implemented_providers():
+        assert sum(name in line for line in lines) == 1
+
+
+def test_a_number_reaches_a_gateway_listed_after_the_vendors():
+    """The gateways carry on the vendors' numbering, so 4 is not 1 again."""
+    names = implemented_providers()
+    vendors, gateways = split_by_kind(names)
+    assert pick_provider(Answer(str(len(vendors) + 1)), names, "") == gateways[0]
+
+
+def test_a_provider_can_still_be_typed_by_name():
+    assert pick_provider(Answer("anthropic"), implemented_providers(), "") == "anthropic"
+
+
+def test_an_out_of_range_number_is_left_for_the_caller_to_reject():
+    assert pick_provider(Answer("99"), implemented_providers(), "") == "99"
+
+
+def test_nothing_is_listed_when_nobody_is_there_to_read_it(capsys):
+    ask = Asker(interactive=False)
+    assert pick_provider(ask, implemented_providers(), "openai") == "openai"
+    assert capsys.readouterr().out == ""
