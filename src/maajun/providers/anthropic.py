@@ -88,8 +88,9 @@ class AnthropicProvider(AIProvider):
         }
         if system:
             params["system"] = system
-        if tools:
-            params["tools"] = self.prepare_tools(tools)
+        prepared = self.prepared_tools(tools)
+        if prepared:
+            params["tools"] = prepared
         if self.model.startswith(ADAPTIVE_MODELS):
             # Sampling is rejected on these, and thinking is why they cost more.
             params["thinking"] = {"type": "adaptive", "display": "summarized"}

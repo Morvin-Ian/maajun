@@ -55,6 +55,8 @@ class AIProvider(ABC):
 
     def __init__(self, config: dict[str, Any]):
         self.config = config
+        self.tools_key: tuple[str, ...] | None = None
+        self.tools_prepared: list[dict[str, Any]] | None = None
         self.api_key = config.get("api_key")
         self.base_url = config.get("base_url") or self.base_url
         self.model = config.get("model") or (
@@ -102,6 +104,23 @@ class AIProvider(ABC):
 
     async def aclose(self) -> None:  # noqa: B027 - optional hook, no-op by default
         """Release any held resources (e.g. HTTP clients). Override if needed."""
+
+    def prepared_tools(
+        self, tools: list[ToolDefinition] | None
+    ) -> list[dict[str, Any]] | None:
+        """The wire form of a tool list, rebuilt only when the set changes.
+
+        Keyed on the names, not id(tools): CPython reuses freed addresses, so
+        an id cache could serve one list's entry for another. Without it the
+        same set is re-prepared on every round of the tool loop.
+        """
+        if not tools:
+            return None
+        key = tuple(tool.name for tool in tools)
+        if key != self.tools_key:
+            self.tools_key = key
+            self.tools_prepared = self.prepare_tools(tools)
+        return self.tools_prepared
 
     def prepare_tools(self, tools: list[ToolDefinition]) -> list[dict[str, Any]]:
         return [
