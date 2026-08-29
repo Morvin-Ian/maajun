@@ -20,18 +20,72 @@ SKIP_DIRS = {
 MAX_FILE_SIZE = 5 * 1024 * 1024
 
 
-def in_skip_dir(rel: Path) -> bool:
-    return any(part in SKIP_DIRS for part in rel.parts)
+def pattern_source(pattern: str) -> str:
+    """A glob pattern as regex source, matched against a '/'-joined path."""
+    out: list[str] = []
+    i = 0
+    while i < len(pattern):
+        if pattern.startswith("**/", i):
+            out.append(r"(?:[^/]+/)*")  # ** spans zero or more segments
+            i += 3
+        elif pattern.startswith("**", i):
+            out.append(r".*")
+            i += 2
+        elif pattern[i] == "*":
+            out.append(r"[^/]*")
+            i += 1
+        elif pattern[i] == "?":
+            out.append(r"[^/]")
+            i += 1
+        elif pattern[i] == "[" and pattern.find("]", i + 1) != -1:
+            end = pattern.find("]", i + 1)
+            body = pattern[i + 1:end]
+            out.append("[" + ("^" + body[1:] if body.startswith("!") else body) + "]")
+            i = end + 1
+        else:
+            out.append(re.escape(pattern[i]))
+            i += 1
+    return "".join(out)
+
+
+def ends_in_tree(pattern: str) -> bool:
+    """Whether the last component is a bare **.
+
+    Path.glob reads that as directories only, anchor included: src/** is
+    src/ and every directory beneath it.
+    """
+    return pattern == "**" or pattern.endswith("/**")
+
+
+def pattern_regex(pattern: str) -> re.Pattern[str]:
+    """A glob pattern as a regex over a '/'-joined relative path.
+
+    Matching ourselves is what lets the walk prune: Path.glob descends every
+    directory before anything can filter it, so **/*.py read all of
+    node_modules only to discard it.
+    """
+    if pattern == "**":
+        return re.compile(r".*\Z")
+    if ends_in_tree(pattern):
+        return re.compile(pattern_source(pattern[:-3]) + r"(?:/.*)?\Z")
+    return re.compile(pattern_source(pattern) + r"\Z")
 
 
 def glob_sync(root: Path, pattern: str) -> list[str]:
-    results = []
-    for match in sorted(root.glob(pattern)):
-        rel = match.relative_to(root)
-        if in_skip_dir(rel):
-            continue
-        results.append(str(rel) + ("/" if match.is_dir() else ""))
-    return results
+    regex = pattern_regex(pattern)
+    dirs_only = ends_in_tree(pattern)
+    found: list[tuple[str, str]] = []
+    for dirpath, dirnames, filenames in os.walk(root):
+        # Pruned before descending, the way grep does it.
+        dirnames[:] = [d for d in dirnames if d not in SKIP_DIRS]
+        base = Path(dirpath).relative_to(root)
+        for name, suffix in [(d, "/") for d in dirnames] + [(f, "") for f in filenames]:
+            if dirs_only and not suffix:
+                continue
+            rel = (base / name).as_posix()
+            if regex.match(rel):
+                found.append((rel, suffix))
+    return [rel + suffix for rel, suffix in sorted(found)]
 
 
 async def glob(pattern: str, path: str = ".") -> str:
