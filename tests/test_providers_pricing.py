@@ -195,10 +195,11 @@ def test_every_catalogued_model_has_a_price():
 
 def test_a_gateway_declares_no_default_model():
     """It would be a guess at which vendor's model the key can reach."""
+    from maajun.providers.bai import BAIProvider
     from maajun.providers.openrouter import OpenRouterProvider
     from maajun.providers.straitly import StraitlyProvider
 
-    for gateway in (OpenRouterProvider, StraitlyProvider):
+    for gateway in (OpenRouterProvider, StraitlyProvider, BAIProvider):
         assert not gateway.default_model
         assert not gateway.models
         assert gateway.catalog_url

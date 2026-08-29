@@ -12,3 +12,4 @@ class StraitlyProvider(ChatCompletionsProvider):
     name = ProviderType.STRAITLY.value
     base_url = "https://api.straitly.ai/v1"
     catalog_url = "https://straitly.ai/models"
+    model_example = "anthropic/claude-opus-5"

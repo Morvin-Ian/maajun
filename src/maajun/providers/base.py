@@ -13,6 +13,7 @@ class ProviderType(Enum):
     ANTHROPIC = "anthropic"
     OPENROUTER = "openrouter"
     STRAITLY = "straitly"
+    BAI = "bai"
 
 
 class ProviderError(Exception):
@@ -68,6 +69,9 @@ class AIProvider(ABC):
     # than a list can carry — catalog_url is where to look them up instead.
     models: tuple[ModelInfo, ...] = ()
     catalog_url: str = ""
+    # One id in this provider's own naming, for the prompt that asks for one.
+    # Gateways differ: most prefix the vendor, BAI does not.
+    model_example: str = ""
 
     def __init__(self, config: dict[str, Any]):
         self.config = config

@@ -300,7 +300,7 @@ report — the issue says why.
 
 ## AI providers
 
-Three vendors and two gateways, all interchangeable. `maajun setup` offers
+Three vendors and three gateways, all interchangeable. `maajun setup` offers
 them in this order — cheapest first — and defaults to the first:
 
 | | DeepSeek | OpenAI | Anthropic |
@@ -342,25 +342,28 @@ maajun config ai.model claude-opus-5
 
 ### Gateways
 
-`openrouter` and `straitly` are gateways: one key reaching many vendors'
-models, named `vendor/model`.
+`openrouter`, `straitly` and `bai` are gateways: one key reaching many
+vendors' models.
 
-| | OpenRouter | Straitly |
-|---|---|---|
-| `ai.provider` | `openrouter` | `straitly` |
-| Models | [openrouter.ai/models](https://openrouter.ai/models) | [straitly.ai/models](https://straitly.ai/models) |
-| API key | [openrouter.ai](https://openrouter.ai/settings/keys) | [straitly.ai](https://straitly.ai/) |
+| | OpenRouter | Straitly | BAI |
+|---|---|---|---|
+| `ai.provider` | `openrouter` | `straitly` | `bai` |
+| Model ids | `anthropic/claude-opus-5` | `anthropic/claude-opus-5` | `gpt-5.2` |
+| Models | [openrouter.ai/models](https://openrouter.ai/models) | [straitly.ai/models](https://straitly.ai/models) | [docs.b.ai](https://docs.b.ai) |
+| API key | [openrouter.ai](https://openrouter.ai/settings/keys) | [straitly.ai](https://straitly.ai/) | [chat.b.ai](https://chat.b.ai) |
 
-Neither has a default model — their catalogues change, and nothing here should
+None has a default model — their catalogues change, and nothing here should
 guess which one your key can reach — so `ai.model` is required:
 
 ```bash
 maajun setup --provider openrouter --model anthropic/claude-opus-5
+maajun setup --provider bai --model gpt-5.2
 ```
 
 Costs still come from the table below: `anthropic/claude-opus-5` is priced as
-`claude-opus-5`. A model with no entry is costed at the dearest rate maajun
-knows, and setup says so when you pick one.
+`claude-opus-5`. BAI drops the vendor prefix, so its ids are looked up as
+they are. A model with no entry is costed at the dearest rate maajun knows,
+and setup says so when you pick one.
 
 Switch at any time — the key for each provider is stored separately, so moving
 back and forth costs nothing:
@@ -371,7 +374,7 @@ maajun config ai.model gpt-4o        # override the default model
 maajun provider-list                 # which providers have a key stored
 ```
 
-DeepSeek, OpenAI, and both gateways speak `/chat/completions`, so any other
+DeepSeek, OpenAI, and all three gateways speak `/chat/completions`, so any other
 compatible gateway, proxy, or self-hosted server works too — point
 `ai.base_url` at it, and `ai.provider` still selects the request dialect and
 model defaults.
