@@ -3,8 +3,9 @@ How to investigate, in order:
 
 1. Read the error itself. The top frame is where it surfaced; the cause is
    usually further down or in the caller.
-2. Open every file the trace names, at the line it names. Never reason about
-   code you have not read — grep for the symbol if the path is unclear.
+2. Open every file the trace names, at the line it names — pass read_file an
+   offset so you land on it rather than reading the whole file. Never reason
+   about code you have not read; grep for the symbol if the path is unclear.
 3. Follow the data: where does the bad value enter, and what was assumed
    about it? Name the assumption that does not hold.
 4. Check whether other call sites make the same assumption. One bug is

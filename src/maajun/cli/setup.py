@@ -25,25 +25,26 @@ from maajun.cli.shared import (
     implemented_providers,
     load_config,
     prompt_mode,
-    provider_choices,
 )
 from maajun.cli.status_checks import build_status
 from maajun.config import Config, RepoConfig, default_config_path
 from maajun.daemon import service
 from maajun.discovery import probe_source
-from maajun.providers.base import ProviderType
+from maajun.providers.base import ModelInfo, ProviderType
+from maajun.providers.catalog import CatalogEntry, by_vendor, fetch_catalog
 from maajun.providers.factory import ProviderFactory
+from maajun.providers.pricing import base_pricing
 from maajun.utils import is_valid_repo, qualify
 from maajun.vcs.gh import account_login, gh_account, ssh_works
 
 PROVIDER_SIGNUP_URLS = {
-    "ox-alpha": "https://openrouter.ai/settings/keys",
     "deepseek": "https://platform.deepseek.com",
     "openai": "https://platform.openai.com/api-keys",
     "anthropic": "https://console.anthropic.com/settings/keys",
+    "openrouter": "https://openrouter.ai/settings/keys",
+    "straitly": "https://straitly.ai/",
+    "bai": "https://chat.b.ai",
 }
-
-GITHUB_TOKEN_URL = "https://github.com/settings/personal-access-tokens"
 
 GITHUB_REMOTE_RE = re.compile(r"github\.com[:/]([^/\s]+/[^/\s]+?)(?:\.git)?/?$")
 
@@ -79,6 +80,43 @@ def validate_api_key(provider: str, key: str, base_url: str | None = None) -> bo
         return asyncio.run(check())
 
 
+def split_by_kind(names: list[str]) -> tuple[list[str], list[str]]:
+    """The providers as vendors and gateways.
+
+    A gateway is the one with no catalogue of its own: it fronts other
+    vendors' models rather than serving any it makes.
+    """
+    vendors = [name for name in names if provider_class(name).models]
+    gateways = [name for name in names if not provider_class(name).models]
+    return vendors, gateways
+
+
+def pick_provider(ask: Asker, implemented: list[str], current: str) -> str:
+    """Offer the providers down the page and grouped, not as one slashed line.
+
+    Returns whatever was typed; the caller checks it against `implemented`.
+    """
+    vendors, gateways = split_by_kind(implemented)
+    ordered = vendors + gateways
+    if ask.interactive:
+        number = 1
+        for group, heading, note in (
+            (vendors, "Vendors", "their own models"),
+            (gateways, "Gateways", "one key, many vendors' models"),
+        ):
+            if not group:
+                continue
+            console.print(f"\n  [bold]{heading}[/bold] [dim]({note})[/dim]")
+            for name in group:
+                console.print(f"    [cyan]{number}.[/cyan] {name}")
+                number += 1
+
+    answer = ask.text("AI provider (number, or a name)", current).strip()
+    if answer.isdigit() and 1 <= int(answer) <= len(ordered):
+        return ordered[int(answer) - 1]
+    return answer
+
+
 def setup_provider(
     auth: AuthManager,
     ask: Asker,
@@ -97,7 +135,7 @@ def setup_provider(
         )
         raise typer.Exit(1)
     if len(implemented) > 1 and not requested:
-        provider = ask.text(f"AI provider ({'/'.join(provider_choices())})", provider)
+        provider = pick_provider(ask, implemented, provider)
         if provider not in implemented:
             console.print(f"[red]✗ Unknown provider {provider!r}.[/red]")
             raise typer.Exit(1)
@@ -108,11 +146,6 @@ def setup_provider(
 
     say_where_credentials_go()
 
-    if ProviderFactory.is_free(provider):
-        console.print(
-            "  [dim]This model is free — the key is only how OpenRouter "
-            "identifies you.[/dim]"
-        )
     signup = PROVIDER_SIGNUP_URLS.get(provider)
     if signup:
         console.print(f"  [dim]Get a key at {signup}[/dim]")
@@ -143,6 +176,181 @@ def setup_provider(
             return provider
         raise typer.Exit(1)
     return provider
+
+
+def provider_class(provider: str):
+    return ProviderFactory.providers[ProviderType(provider)]
+
+
+def model_line(cls, model: ModelInfo) -> str:
+    """One catalogue entry: what it costs, and the role it already plays."""
+    rates, known = base_pricing(model.id)
+    price = (
+        f"${rates['input']:.2f} in / ${rates['output']:.2f} out per 1M tokens"
+        if known
+        else "price unknown — costed at the dearest rate"
+    )
+    roles = []
+    if model.id == cls.default_model:
+        roles.append("default")
+    if model.id == cls.thinking_model:
+        roles.append("thinking_mode picks this")
+    tag = f" [yellow]({', '.join(roles)})[/yellow]" if roles else ""
+    return f"[cyan]{model.id}[/cyan] — [dim]{price}[/dim]{tag}"
+
+
+def warn_if_unpriced(model: str, quoted: CatalogEntry | None = None) -> None:
+    """Say so when a model has no pricing entry, because the cap will bite.
+
+    An unknown model is costed at the dearest rate maajun knows, so the
+    daily cap stops early rather than overshooting — right, but surprising
+    if nobody said it would happen, and more so having just been shown what
+    the gateway charges. Where there is a quote, it is repeated here so the
+    gap between the two numbers is on screen rather than a mystery.
+    """
+    if not model or base_pricing(model)[1] is not None:
+        return
+    quote = ""
+    if quoted is not None and quoted.input is not None and quoted.output is not None:
+        quote = (
+            f" [dim]The gateway quotes ${quoted.input:.2f} in / "
+            f"${quoted.output:.2f} out.[/dim]"
+        )
+    console.print(
+        f"  [yellow]⚠ No published price for {model}.[/yellow] [dim]It will be "
+        "costed at the dearest rate maajun knows, so daemon.max_usd_per_day "
+        f"will stop earlier than the real spend warrants.[/dim]{quote}"
+    )
+
+
+def pick_from_catalog(ask: Asker, cls, current: str | None) -> str | None:
+    """Offer the provider's models. Returns the id, or None for its default."""
+    console.print("\n  [bold]Models:[/bold]")
+    for index, model in enumerate(cls.models, 1):
+        console.print(f"    [cyan]{index}.[/cyan] {model_line(cls, model)}")
+        console.print(f"       [dim]{model.note}[/dim]")
+
+    default = current or cls.default_model
+    answer = ask.text(
+        "Model (number, or an id to use one not listed)", default
+    ).strip()
+    if answer.isdigit() and 1 <= int(answer) <= len(cls.models):
+        answer = cls.models[int(answer) - 1].id
+    # Storing the provider's own default pins it; leaving it unset lets the
+    # default move when the provider's cheap tier is replaced.
+    return None if answer == cls.default_model else answer
+
+
+def catalog_line(entry: CatalogEntry) -> str:
+    """One fetched model, at the price the gateway itself quotes for it."""
+    if entry.input is None or entry.output is None:
+        price = "price not quoted"
+    elif not entry.input and not entry.output:
+        price = "free"
+    else:
+        price = f"${entry.input:.2f} in / ${entry.output:.2f} out per 1M tokens"
+    return f"[cyan]{entry.id}[/cyan] — [dim]{price}[/dim]"
+
+
+def pick_from_gateway(
+    ask: Asker, cls, entries: tuple[CatalogEntry, ...], current: str | None
+) -> str | None:
+    """Vendor first, then that vendor's models.
+
+    Two steps because one is not enough: a gateway fronts hundreds of
+    models, which is the shape their own catalogues take too. Either prompt
+    also takes an id outright, for anyone who already knows the one they
+    want.
+    """
+    groups = by_vendor(entries)
+    vendors = list(groups)
+    console.print(
+        f"\n  [bold]{cls.name} carries {len(entries)} models from "
+        f"{len(vendors)} vendors:[/bold]"
+    )
+    for index, vendor in enumerate(vendors, 1):
+        console.print(
+            f"    [cyan]{index}.[/cyan] {vendor} [dim]({len(groups[vendor])})[/dim]"
+        )
+
+    answer = ask.text("Vendor (number, or a model id to skip ahead)", "").strip()
+    if not (answer.isdigit() and 1 <= int(answer) <= len(vendors)):
+        return answer or None
+
+    chosen = groups[vendors[int(answer) - 1]]
+    console.print("\n  [bold]Models:[/bold]")
+    for index, entry in enumerate(chosen, 1):
+        console.print(f"    [cyan]{index}.[/cyan] {catalog_line(entry)}")
+
+    answer = ask.text("Model (number, or an id)", current or "").strip()
+    if answer.isdigit() and 1 <= int(answer) <= len(chosen):
+        return chosen[int(answer) - 1].id
+    return answer or None
+
+
+def ask_for_gateway_model(ask: Asker, cls, current: str | None) -> str | None:
+    """A gateway has no default, so a model id is not optional."""
+    console.print(
+        f"\n  [dim]{cls.name} reaches many vendors' models, named like "
+        f"{cls.model_example}. Browse them at {cls.catalog_url}[/dim]"
+    )
+    answer = ask.text(f"Model (e.g. {cls.model_example})", current or "").strip()
+    if not answer:
+        console.print(
+            "  [yellow]⚠ No model set.[/yellow] [dim]A gateway has no default, "
+            "so set one with 'maajun config ai.model <id>' before watching."
+            "[/dim]"
+        )
+        return None
+    return answer
+
+
+def gateway_catalog(cls, api_key: str | None) -> tuple[CatalogEntry, ...]:
+    """What the gateway says it carries, or () if it will not say."""
+    if not api_key:
+        return ()
+    with console.status(f"[dim]Reading {cls.name}'s model list...[/dim]"):
+        return fetch_catalog(cls.base_url, api_key)
+
+
+def setup_model(
+    ask: Asker,
+    config: Config,
+    provider: str,
+    requested: str | None,
+    api_key: str | None = None,
+) -> None:
+    """Choose which of the provider's models runs the investigations."""
+    cls = provider_class(provider)
+    if requested:
+        config.ai.model = requested
+        console.print(f"  [green]✓[/green] Model: {requested}")
+        warn_if_unpriced(requested)
+        return
+    if not ask.interactive:
+        return
+
+    entries: tuple[CatalogEntry, ...] = ()
+    if cls.models:
+        chosen = pick_from_catalog(ask, cls, config.ai.model)
+    else:
+        # A gateway ships no catalogue, so its own /v1/models is the only
+        # place the real ids and prices exist. Unreachable, and it falls
+        # back to asking for one.
+        entries = gateway_catalog(cls, api_key)
+        chosen = (
+            pick_from_gateway(ask, cls, entries, config.ai.model)
+            if entries
+            else ask_for_gateway_model(ask, cls, config.ai.model)
+        )
+    config.ai.model = chosen
+    settled = chosen or cls.default_model
+    if not settled:
+        return  # a gateway the user skipped; it already said so
+    console.print(f"  [green]✓[/green] Model: {settled}")
+    warn_if_unpriced(
+        settled, next((e for e in entries if e.id == settled), None)
+    )
 
 
 def say_where_credentials_go() -> None:
@@ -180,7 +388,7 @@ def setup_github(
     test_command: str | None,
     reconfigure: bool,
 ) -> None:
-    existing = config.github.get_all_repos()
+    existing = config.github.repos
     current = existing[0].repo if existing else ""
     # A suggestion only; adopting the surrounding checkout silently would
     # be a surprising side effect.
@@ -310,7 +518,7 @@ def setup_error_sources(
 ) -> None:
     # Always: without knowing where this app's errors land, the daemon has
     # nothing to watch, and a finished setup would be a lie.
-    for entry in config.github.get_all_repos():
+    for entry in config.github.repos:
         record_deployment(entry, config, auth)
 
     # Only asked when it is still needed: a repo that already knows where its
@@ -351,6 +559,9 @@ def setup(
         None, "--config", "-c", help="Config file location"
     ),
     provider: str | None = typer.Option(None, "--provider", help="AI provider to use"),
+    model: str | None = typer.Option(
+        None, "--model", help="Model to use, e.g. gpt-4o (default: the provider's)"
+    ),
     repo: str | None = typer.Option(
         None, "--repo", help="Repository to open PRs on (owner/name)"
     ),
@@ -391,6 +602,10 @@ def setup(
     config.ai.provider = setup_provider(
         auth, ask, provider, reconfigure, config.ai.base_url
     )
+    setup_model(
+        ask, config, config.ai.provider, model,
+        api_key=auth.get_api_key(config.ai.provider),
+    )
 
     step(2, total, "GitHub", optional=True)
     setup_github(
@@ -424,7 +639,7 @@ def start_watching(config: Config, config_path: Path) -> None:
 
 
 def print_summary(config: Config, auth: AuthManager) -> bool:
-    repos = config.github.get_all_repos()
+    repos = config.github.repos
     has_token = auth.has_github_token()
     sections, ok = build_status(
         config,

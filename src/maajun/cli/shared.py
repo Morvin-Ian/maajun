@@ -66,14 +66,6 @@ def implemented_providers() -> list[str]:
     return [p.value for p in ProviderFactory.get_supported_providers()]
 
 
-def provider_choices() -> list[str]:
-    """The provider names as offered, with the free one marked."""
-    return [
-        f"{name} (free)" if ProviderFactory.is_free(name) else name
-        for name in implemented_providers()
-    ]
-
-
 def configured_providers(auth: AuthManager) -> list[str]:
     return [p for p in implemented_providers() if auth.has_api_key(p)]
 
@@ -140,19 +132,6 @@ def prompt_mode(current: str = "suggest") -> str:
         return "suggest"
     console.print(f"[yellow]⚠ Invalid choice. Using {current}.[/yellow]")
     return current
-
-
-def pick_provider(configured: list[str]) -> str:
-    if len(configured) == 1:
-        return configured[0]
-    console.print("\n[bold]Select a provider:[/bold]\n")
-    for i, p in enumerate(configured, 1):
-        console.print(f"  [cyan]{i}.[/cyan] {p}")
-    while True:
-        choice = prompt_line("\n> Choice: ").strip()
-        if choice.isdigit() and 1 <= int(choice) <= len(configured):
-            return configured[int(choice) - 1]
-        console.print("[red]Invalid choice.[/red]")
 
 
 def pick_repo(repos: list[RepoConfig]) -> RepoConfig:

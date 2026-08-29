@@ -113,9 +113,16 @@ def config(
         return
 
     try:
+        had_model = config.ai.model
         config.set(key, value, repo)
         config.save(config_path)
         console.print(f"[green]✓ Set {key} = {value}[/green]{scope}")
+        if key == "ai.provider" and had_model and not config.ai.model:
+            console.print(
+                f"[dim]  Cleared ai.model ({had_model}) — it belonged to the "
+                "previous provider. Set a new one with 'maajun config "
+                "ai.model <id>'.[/dim]"
+            )
     except ValueError as e:
         console.print(f"[red]✗ {e}[/red]")
         raise typer.Exit(1) from e

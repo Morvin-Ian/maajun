@@ -210,7 +210,7 @@ def watch(
         console.print(f"[red]✗ {e}[/red]")
         raise typer.Exit(1) from e
 
-    repos = config.github.get_all_repos()
+    repos = config.github.repos
     dry_note = "\n[yellow]Dry run — no branches/PRs will be created[/yellow]" if dry_run else ""
     if backfill:
         dry_note += (
@@ -509,7 +509,7 @@ def status(
     provider = config.ai.provider
     has_key = auth.has_api_key(provider)
     has_token = auth.has_github_token()
-    repos = config.github.get_all_repos()
+    repos = config.github.repos
 
     network = None
     if repos and has_token and not no_network:

@@ -658,7 +658,7 @@ def test_the_older_repo_log_files_spelling_is_merged_in():
         deployment=DeploymentConfig(log_files=["/old.log", "/new.log"]),
     )
 
-    assert repo.runtime_log_files() == ["/old.log", "/new.log"]
+    assert repo.runtime_sources() == [("file", "/old.log"), ("file", "/new.log")]
 
 
 def test_global_log_files_belong_to_the_first_repo():

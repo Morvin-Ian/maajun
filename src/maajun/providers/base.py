@@ -8,14 +8,28 @@ from typing import Any
 class ProviderType(Enum):
     """Declaration order is the order they are offered in, cheapest first."""
 
-    OX_ALPHA = "ox-alpha"
     DEEPSEEK = "deepseek"
     OPENAI = "openai"
     ANTHROPIC = "anthropic"
+    OPENROUTER = "openrouter"
+    STRAITLY = "straitly"
+    BAI = "bai"
 
 
 class ProviderError(Exception):
     """A provider API call failed. The message is safe to show to the user."""
+
+
+@dataclass(frozen=True)
+class ModelInfo:
+    """One model a provider offers, as `maajun setup` lists it.
+
+    No prices here: those come from pricing.PRICING, so the catalogue and
+    the spend cap cannot disagree about what a model costs.
+    """
+
+    id: str
+    note: str
 
 
 @dataclass
@@ -51,10 +65,18 @@ class AIProvider(ABC):
     base_url: str | None = None
     default_model: str = ""
     thinking_model: str = ""
-    free: bool = False  # offered first, and never weighed against a paid one
+    # Offered by `maajun setup`. Empty for a gateway, which has more models
+    # than a list can carry — catalog_url is where to look them up instead.
+    models: tuple[ModelInfo, ...] = ()
+    catalog_url: str = ""
+    # One id in this provider's own naming, for the prompt that asks for one.
+    # Gateways differ: most prefix the vendor, BAI does not.
+    model_example: str = ""
 
     def __init__(self, config: dict[str, Any]):
         self.config = config
+        self.tools_key: tuple[str, ...] | None = None
+        self.tools_prepared: list[dict[str, Any]] | None = None
         self.api_key = config.get("api_key")
         self.base_url = config.get("base_url") or self.base_url
         self.model = config.get("model") or (
@@ -102,6 +124,23 @@ class AIProvider(ABC):
 
     async def aclose(self) -> None:  # noqa: B027 - optional hook, no-op by default
         """Release any held resources (e.g. HTTP clients). Override if needed."""
+
+    def prepared_tools(
+        self, tools: list[ToolDefinition] | None
+    ) -> list[dict[str, Any]] | None:
+        """The wire form of a tool list, rebuilt only when the set changes.
+
+        Keyed on the names, not id(tools): CPython reuses freed addresses, so
+        an id cache could serve one list's entry for another. Without it the
+        same set is re-prepared on every round of the tool loop.
+        """
+        if not tools:
+            return None
+        key = tuple(tool.name for tool in tools)
+        if key != self.tools_key:
+            self.tools_key = key
+            self.tools_prepared = self.prepare_tools(tools)
+        return self.tools_prepared
 
     def prepare_tools(self, tools: list[ToolDefinition]) -> list[dict[str, Any]]:
         return [

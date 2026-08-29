@@ -38,13 +38,6 @@ class ChatCompletionsProvider(AIProvider):
         self.client: AsyncOpenAI | None = None
         self.stream_usage = True
 
-    def prepared_tools(self, tools: list[ToolDefinition] | None) -> list[dict[str, Any]] | None:
-        # Not memoized on id(tools): CPython reuses freed addresses, so a
-        # cache could serve stale tools.
-        if not tools:
-            return None
-        return self.prepare_tools(tools)
-
     async def initialize(self) -> None:
         if not self.api_key:
             raise ProviderError("API key is required. Run `maajun setup` to set one.")
@@ -190,10 +183,18 @@ class ChatCompletionsProvider(AIProvider):
 
         Sends self.model, not default_model: a key that cannot reach the
         configured model should fail here, not on the first real call.
+
+        A gateway has no default model and setup stores its key before
+        asking for one, so there is nothing to send; the key is checked
+        against the model list instead of being rejected for naming no model.
         """
         try:
             if not self.client:
                 await self.initialize()
+
+            if not self.model:
+                await self.retryable(self.client.models.list)
+                return True
 
             response = await self.retryable(
                 self.client.chat.completions.create,

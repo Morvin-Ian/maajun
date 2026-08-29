@@ -9,6 +9,10 @@ from maajun.monitors.shell import CommandStreamMonitor
 
 log = logging.getLogger(__name__)
 
+# How far back --backfill reaches. Unbounded, one call buffers the unit's
+# whole journal into memory.
+BACKFILL_LINES = 50_000
+
 
 class JournaldMonitor(CommandStreamMonitor):
     """Reads a systemd unit's journal: gunicorn, uvicorn, nginx, supervisor.
@@ -55,10 +59,10 @@ class JournaldMonitor(CommandStreamMonitor):
             if self.cursor_file.exists():
                 return cmd
         if self.backfill and not self.read_once:
-            # Everything the journal still holds for this unit. Guarded by
-            # read_once as well as the cursor, since without a writable
-            # cursor directory every poll would replay the lot.
-            return cmd
+            # The newest BACKFILL_LINES the journal still holds for this
+            # unit. Guarded by read_once as well as the cursor, since without
+            # a writable cursor directory every poll would replay the lot.
+            return [*cmd, "-n", str(BACKFILL_LINES)]
         cmd += ["--since", f"@{int(self.since)}"]
         return cmd
 

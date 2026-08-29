@@ -16,6 +16,7 @@ from anthropic import (
 from .base import (
     AIProvider,
     CompletionResponse,
+    ModelInfo,
     ProviderError,
     ProviderType,
     StreamChunk,
@@ -44,6 +45,14 @@ class AnthropicProvider(AIProvider):
     name = ProviderType.ANTHROPIC.value
     default_model = "claude-haiku-4-5"
     thinking_model = "claude-opus-5"
+    models = (
+        ModelInfo("claude-haiku-4-5", "The fastest and cheapest Claude."),
+        ModelInfo(
+            "claude-sonnet-5",
+            "Mid tier: more capable than Haiku, well under Opus in price.",
+        ),
+        ModelInfo("claude-opus-5", "The most capable, and the dearest."),
+    )
 
     def __init__(self, config: dict[str, Any]):
         super().__init__(config)
@@ -88,8 +97,9 @@ class AnthropicProvider(AIProvider):
         }
         if system:
             params["system"] = system
-        if tools:
-            params["tools"] = self.prepare_tools(tools)
+        prepared = self.prepared_tools(tools)
+        if prepared:
+            params["tools"] = prepared
         if self.model.startswith(ADAPTIVE_MODELS):
             # Sampling is rejected on these, and thinking is why they cost more.
             params["thinking"] = {"type": "adaptive", "display": "summarized"}
