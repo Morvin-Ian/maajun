@@ -11,10 +11,24 @@ class ProviderType(Enum):
     DEEPSEEK = "deepseek"
     OPENAI = "openai"
     ANTHROPIC = "anthropic"
+    OPENROUTER = "openrouter"
+    STRAITLY = "straitly"
 
 
 class ProviderError(Exception):
     """A provider API call failed. The message is safe to show to the user."""
+
+
+@dataclass(frozen=True)
+class ModelInfo:
+    """One model a provider offers, as `maajun setup` lists it.
+
+    No prices here: those come from pricing.PRICING, so the catalogue and
+    the spend cap cannot disagree about what a model costs.
+    """
+
+    id: str
+    note: str
 
 
 @dataclass
@@ -50,6 +64,10 @@ class AIProvider(ABC):
     base_url: str | None = None
     default_model: str = ""
     thinking_model: str = ""
+    # Offered by `maajun setup`. Empty for a gateway, which has more models
+    # than a list can carry — catalog_url is where to look them up instead.
+    models: tuple[ModelInfo, ...] = ()
+    catalog_url: str = ""
 
     def __init__(self, config: dict[str, Any]):
         self.config = config
