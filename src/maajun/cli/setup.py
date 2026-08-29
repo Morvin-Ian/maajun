@@ -30,8 +30,9 @@ from maajun.cli.status_checks import build_status
 from maajun.config import Config, RepoConfig, default_config_path
 from maajun.daemon import service
 from maajun.discovery import probe_source
-from maajun.providers.base import ProviderType
+from maajun.providers.base import ModelInfo, ProviderType
 from maajun.providers.factory import ProviderFactory
+from maajun.providers.pricing import base_pricing
 from maajun.utils import is_valid_repo, qualify
 from maajun.vcs.gh import account_login, gh_account, ssh_works
 
@@ -39,6 +40,8 @@ PROVIDER_SIGNUP_URLS = {
     "deepseek": "https://platform.deepseek.com",
     "openai": "https://platform.openai.com/api-keys",
     "anthropic": "https://console.anthropic.com/settings/keys",
+    "openrouter": "https://openrouter.ai/settings/keys",
+    "straitly": "https://straitly.ai/",
 }
 
 GITHUB_REMOTE_RE = re.compile(r"github\.com[:/]([^/\s]+/[^/\s]+?)(?:\.git)?/?$")
@@ -136,6 +139,102 @@ def setup_provider(
             return provider
         raise typer.Exit(1)
     return provider
+
+
+def provider_class(provider: str):
+    return ProviderFactory.providers[ProviderType(provider)]
+
+
+def model_line(cls, model: ModelInfo) -> str:
+    """One catalogue entry: what it costs, and the role it already plays."""
+    rates, known = base_pricing(model.id)
+    price = (
+        f"${rates['input']:.2f} in / ${rates['output']:.2f} out per 1M tokens"
+        if known
+        else "price unknown — costed at the dearest rate"
+    )
+    roles = []
+    if model.id == cls.default_model:
+        roles.append("default")
+    if model.id == cls.thinking_model:
+        roles.append("thinking_mode picks this")
+    tag = f" [yellow]({', '.join(roles)})[/yellow]" if roles else ""
+    return f"[cyan]{model.id}[/cyan] — [dim]{price}[/dim]{tag}"
+
+
+def warn_if_unpriced(model: str) -> None:
+    """Say so when a model has no pricing entry, because the cap will bite.
+
+    An unknown model is costed at the dearest rate maajun knows, so the
+    daily cap stops early rather than overshooting — right, but surprising
+    if nobody said it would happen.
+    """
+    if not model or base_pricing(model)[1] is not None:
+        return
+    console.print(
+        f"  [yellow]⚠ No published price for {model}.[/yellow] [dim]It will be "
+        "costed at the dearest rate maajun knows, so daemon.max_usd_per_day "
+        "will stop earlier than the real spend warrants.[/dim]"
+    )
+
+
+def pick_from_catalog(ask: Asker, cls, current: str | None) -> str | None:
+    """Offer the provider's models. Returns the id, or None for its default."""
+    console.print("\n  [bold]Models:[/bold]")
+    for index, model in enumerate(cls.models, 1):
+        console.print(f"    [cyan]{index}.[/cyan] {model_line(cls, model)}")
+        console.print(f"       [dim]{model.note}[/dim]")
+
+    default = current or cls.default_model
+    answer = ask.text(
+        "Model (number, or an id to use one not listed)", default
+    ).strip()
+    if answer.isdigit() and 1 <= int(answer) <= len(cls.models):
+        answer = cls.models[int(answer) - 1].id
+    # Storing the provider's own default pins it; leaving it unset lets the
+    # default move when the provider's cheap tier is replaced.
+    return None if answer == cls.default_model else answer
+
+
+def ask_for_gateway_model(ask: Asker, cls, current: str | None) -> str | None:
+    """A gateway has no default, so a model id is not optional."""
+    console.print(
+        f"\n  [dim]{cls.name} reaches many vendors' models, named "
+        f"vendor/model. Browse them at {cls.catalog_url}[/dim]"
+    )
+    answer = ask.text("Model (e.g. anthropic/claude-opus-5)", current or "").strip()
+    if not answer:
+        console.print(
+            "  [yellow]⚠ No model set.[/yellow] [dim]A gateway has no default, "
+            "so set one with 'maajun config ai.model <id>' before watching."
+            "[/dim]"
+        )
+        return None
+    return answer
+
+
+def setup_model(ask: Asker, config: Config, provider: str, requested: str | None) -> None:
+    """Choose which of the provider's models runs the investigations."""
+    cls = provider_class(provider)
+    if requested:
+        config.ai.model = requested
+        console.print(f"  [green]✓[/green] Model: {requested}")
+        warn_if_unpriced(requested)
+        return
+    if not ask.interactive:
+        return
+
+    chosen = (
+        pick_from_catalog(ask, cls, config.ai.model)
+        if cls.models
+        else ask_for_gateway_model(ask, cls, config.ai.model)
+    )
+    config.ai.model = chosen
+    settled = chosen or cls.default_model
+    if not settled:
+        return  # a gateway the user skipped; it already said so
+    console.print(f"  [green]✓[/green] Model: {settled}")
+    warn_if_unpriced(settled)
 
 
 def say_where_credentials_go() -> None:
@@ -344,6 +443,9 @@ def setup(
         None, "--config", "-c", help="Config file location"
     ),
     provider: str | None = typer.Option(None, "--provider", help="AI provider to use"),
+    model: str | None = typer.Option(
+        None, "--model", help="Model to use, e.g. gpt-4o (default: the provider's)"
+    ),
     repo: str | None = typer.Option(
         None, "--repo", help="Repository to open PRs on (owner/name)"
     ),
@@ -384,6 +486,7 @@ def setup(
     config.ai.provider = setup_provider(
         auth, ask, provider, reconfigure, config.ai.base_url
     )
+    setup_model(ask, config, config.ai.provider, model)
 
     step(2, total, "GitHub", optional=True)
     setup_github(
