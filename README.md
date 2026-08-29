@@ -300,8 +300,22 @@ report — the issue says why.
 
 ## AI providers
 
-Three vendors and three gateways, all interchangeable. `maajun setup` offers
-them in this order — cheapest first — and defaults to the first:
+Three vendors and three gateways, all interchangeable. `maajun setup` lists
+them grouped by kind, cheapest first, and defaults to the first:
+
+```
+  Vendors (their own models)
+    1. deepseek
+    2. openai
+    3. anthropic
+
+  Gateways (one key, many vendors' models)
+    4. openrouter
+    5. straitly
+    6. bai
+
+  > AI provider (number, or a name) [deepseek]:
+```
 
 | | DeepSeek | OpenAI | Anthropic |
 |---|---|---|---|

@@ -79,6 +79,43 @@ def validate_api_key(provider: str, key: str, base_url: str | None = None) -> bo
         return asyncio.run(check())
 
 
+def split_by_kind(names: list[str]) -> tuple[list[str], list[str]]:
+    """The providers as vendors and gateways.
+
+    A gateway is the one with no catalogue of its own: it fronts other
+    vendors' models rather than serving any it makes.
+    """
+    vendors = [name for name in names if provider_class(name).models]
+    gateways = [name for name in names if not provider_class(name).models]
+    return vendors, gateways
+
+
+def pick_provider(ask: Asker, implemented: list[str], current: str) -> str:
+    """Offer the providers down the page and grouped, not as one slashed line.
+
+    Returns whatever was typed; the caller checks it against `implemented`.
+    """
+    vendors, gateways = split_by_kind(implemented)
+    ordered = vendors + gateways
+    if ask.interactive:
+        number = 1
+        for group, heading, note in (
+            (vendors, "Vendors", "their own models"),
+            (gateways, "Gateways", "one key, many vendors' models"),
+        ):
+            if not group:
+                continue
+            console.print(f"\n  [bold]{heading}[/bold] [dim]({note})[/dim]")
+            for name in group:
+                console.print(f"    [cyan]{number}.[/cyan] {name}")
+                number += 1
+
+    answer = ask.text("AI provider (number, or a name)", current).strip()
+    if answer.isdigit() and 1 <= int(answer) <= len(ordered):
+        return ordered[int(answer) - 1]
+    return answer
+
+
 def setup_provider(
     auth: AuthManager,
     ask: Asker,
@@ -97,9 +134,7 @@ def setup_provider(
         )
         raise typer.Exit(1)
     if len(implemented) > 1 and not requested:
-        provider = ask.text(
-            f"AI provider ({'/'.join(implemented_providers())})", provider
-        )
+        provider = pick_provider(ask, implemented, provider)
         if provider not in implemented:
             console.print(f"[red]✗ Unknown provider {provider!r}.[/red]")
             raise typer.Exit(1)
