@@ -55,6 +55,15 @@ class Asker:
         return answer.startswith("y")
 
 
+def at_a_terminal() -> bool:
+    """Whether someone is present to answer a prompt.
+
+    Commands that prompt are also run from scripts and from the chat tool,
+    where a question would hang on a stdin nobody is typing into.
+    """
+    return sys.stdin.isatty()
+
+
 def split_list(value: str | None) -> list[str] | None:
     """A comma-separated flag as a list. None stays None: "leave as is"."""
     if value is None:
