@@ -13,3 +13,4 @@ class OpenRouterProvider(ChatCompletionsProvider):
     name = ProviderType.OPENROUTER.value
     base_url = "https://openrouter.ai/api/v1"
     catalog_url = "https://openrouter.ai/models"
+    model_example = "anthropic/claude-opus-5"

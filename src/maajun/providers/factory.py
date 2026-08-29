@@ -1,6 +1,7 @@
 from typing import Any
 
 from .anthropic import AnthropicProvider
+from .bai import BAIProvider
 from .base import AIProvider, ProviderType
 from .deepseek import DeepSeekProvider
 from .openai import OpenAIProvider
@@ -18,6 +19,7 @@ class ProviderFactory:
         # ai.model names one.
         ProviderType.OPENROUTER: OpenRouterProvider,
         ProviderType.STRAITLY: StraitlyProvider,
+        ProviderType.BAI: BAIProvider,
     }
 
     @classmethod

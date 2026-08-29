@@ -14,6 +14,7 @@ def test_every_provider_is_supported():
         ProviderType.ANTHROPIC,
         ProviderType.OPENROUTER,
         ProviderType.STRAITLY,
+        ProviderType.BAI,
     ]
 
 

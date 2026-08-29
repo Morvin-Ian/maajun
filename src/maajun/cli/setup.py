@@ -42,6 +42,7 @@ PROVIDER_SIGNUP_URLS = {
     "anthropic": "https://console.anthropic.com/settings/keys",
     "openrouter": "https://openrouter.ai/settings/keys",
     "straitly": "https://straitly.ai/",
+    "bai": "https://chat.b.ai",
 }
 
 GITHUB_REMOTE_RE = re.compile(r"github\.com[:/]([^/\s]+/[^/\s]+?)(?:\.git)?/?$")
@@ -199,10 +200,10 @@ def pick_from_catalog(ask: Asker, cls, current: str | None) -> str | None:
 def ask_for_gateway_model(ask: Asker, cls, current: str | None) -> str | None:
     """A gateway has no default, so a model id is not optional."""
     console.print(
-        f"\n  [dim]{cls.name} reaches many vendors' models, named "
-        f"vendor/model. Browse them at {cls.catalog_url}[/dim]"
+        f"\n  [dim]{cls.name} reaches many vendors' models, named like "
+        f"{cls.model_example}. Browse them at {cls.catalog_url}[/dim]"
     )
-    answer = ask.text("Model (e.g. anthropic/claude-opus-5)", current or "").strip()
+    answer = ask.text(f"Model (e.g. {cls.model_example})", current or "").strip()
     if not answer:
         console.print(
             "  [yellow]⚠ No model set.[/yellow] [dim]A gateway has no default, "

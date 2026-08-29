@@ -4,10 +4,11 @@ import httpx
 import pytest
 from openai import APIStatusError
 
+from maajun.providers.bai import BAIProvider
 from maajun.providers.openrouter import OpenRouterProvider
 from maajun.providers.straitly import StraitlyProvider
 
-GATEWAYS = (OpenRouterProvider, StraitlyProvider)
+GATEWAYS = (OpenRouterProvider, StraitlyProvider, BAIProvider)
 
 
 def listing_provider(cls, config, models_list):
@@ -73,3 +74,21 @@ async def test_a_rejected_gateway_key_is_still_reported(cls):
     provider = listing_provider(cls, {"api_key": "k"}, models_list)
 
     assert await provider.validate_credentials() is False
+
+
+async def test_bai_points_at_its_own_endpoint():
+    assert BAIProvider({"api_key": "k"}).base_url == "https://api.b.ai/v1"
+
+
+@pytest.mark.parametrize("cls", GATEWAYS)
+def test_every_gateway_offers_an_id_in_its_own_naming(cls):
+    """setup shows this as the example, so a vendor prefix where the gateway
+    wants none sends people to a model id that does not resolve."""
+    assert cls.model_example
+    assert cls.catalog_url
+    assert not cls.default_model
+
+
+def test_bai_names_models_without_a_vendor_prefix():
+    assert "/" not in BAIProvider.model_example
+
