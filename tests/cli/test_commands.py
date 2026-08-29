@@ -23,6 +23,24 @@ def flat(text: str) -> str:
     return " ".join(text.split())
 
 
+@pytest.fixture(autouse=True)
+def no_probing(monkeypatch):
+    """add-repo probes the host for deployments; tests that care opt back in.
+
+    Without this, every test that adds a repo would probe the developer's real
+    machine, pick up whatever containers happen to be running, and take seconds
+    doing it. Mirrors the fixture of the same name in test_setup.py.
+    """
+    monkeypatch.setattr(
+        "maajun.cli.deployment.discover", lambda repo, existing=None: Discovered()
+    )
+
+    async def no_inspection(folder, ai):
+        raise AssertionError("a test reached the real code inspection")
+
+    monkeypatch.setattr("maajun.cli.deployment.inspect_repo", no_inspection)
+
+
 @pytest.fixture
 def fake_keyring(monkeypatch):
     """In-memory keyring for CLI tests."""
@@ -551,6 +569,101 @@ def test_add_repo_records_a_deployment(fake_keyring, tmp_path):
     assert deployment.runs == "docker compose"
     assert deployment.journald_units == ["api.service", "nginx.service"]
     assert deployment.docker_containers == ["api-web-1"]
+
+
+def test_add_repo_records_what_it_finds_running(fake_keyring, tmp_path, monkeypatch):
+    """The point of the change: add-repo runs setup's discovery step.
+
+    Before, a repo added this way had an empty deployment block, so the daemon
+    could only see what GitHub showed it — no containers, no port, no logs.
+    """
+    config_path = tmp_path / "config.toml"
+    monkeypatch.setattr("maajun.cli.deployment.discover", lambda repo, existing=None: Discovered(
+        path="/srv/api", port=8000, runs="docker compose",
+        docker_containers=["api-web-1"], notes=["container api-web-1"],
+    ))
+
+    result = runner.invoke(app, ["add-repo", "acme/api", "--config", str(config_path)])
+
+    assert result.exit_code == 0
+    deployment = repo_config(config_path).deployment
+    assert (deployment.path, deployment.port) == ("/srv/api", 8000)
+    assert deployment.runs == "docker compose"
+    assert deployment.docker_containers == ["api-web-1"]
+    assert "container api-web-1" in flat(result.output)
+
+
+def test_discovery_does_not_overwrite_a_flag(fake_keyring, tmp_path, monkeypatch):
+    """A path typed by hand outranks a guess from the host."""
+    config_path = tmp_path / "config.toml"
+    monkeypatch.setattr("maajun.cli.deployment.discover", lambda repo, existing=None: Discovered(
+        path="/wrong/guess", port=9999,
+    ))
+
+    runner.invoke(app, [
+        "add-repo", "acme/api", "--config", str(config_path),
+        "--path", "/srv/api", "--port", "8000",
+    ])
+
+    deployment = repo_config(config_path).deployment
+    assert (deployment.path, deployment.port) == ("/srv/api", 8000)
+
+
+def test_add_repo_does_not_prompt_without_a_terminal(fake_keyring, tmp_path):
+    """Scripts and the chat tool call add-repo with nobody at the keyboard.
+
+    A prompt there would hang on a stdin no one is typing into, so the flow is
+    gated on an actual TTY rather than on the flag alone.
+    """
+    config_path = tmp_path / "config.toml"
+
+    result = runner.invoke(app, ["add-repo", "acme/api", "--config", str(config_path)])
+
+    assert result.exit_code == 0
+    assert "Base branch" not in result.output
+    assert "Mode (1/2)" not in result.output
+    entry = repo_config(config_path)
+    assert (entry.base_branch, entry.mode) == ("main", "suggest")
+
+
+def test_add_repo_asks_the_way_setup_does(fake_keyring, tmp_path, monkeypatch):
+    """With a terminal, the same questions setup asks for its first repo."""
+    config_path = tmp_path / "config.toml"
+    monkeypatch.setattr("maajun.cli.monitor.at_a_terminal", lambda: True)
+    answers = iter(["develop", "2", "make test", ""])
+    monkeypatch.setattr(
+        "maajun.cli.shared.prompt_line", lambda text: next(answers)
+    )
+
+    result = runner.invoke(app, ["add-repo", "acme/api", "--config", str(config_path)])
+
+    assert result.exit_code == 0
+    entry = repo_config(config_path)
+    assert entry.base_branch == "develop"
+    assert entry.mode == "fix"
+    assert entry.test_command == "make test"
+
+
+def test_fix_mode_without_a_test_command_is_called_out(fake_keyring, tmp_path):
+    """Fix mode edits code; an unverified PR should say so up front."""
+    config_path = tmp_path / "config.toml"
+
+    result = runner.invoke(app, [
+        "add-repo", "acme/api", "--config", str(config_path), "--mode", "fix",
+    ])
+
+    assert "No test command" in flat(result.output)
+
+
+def test_add_repo_records_a_test_command(fake_keyring, tmp_path):
+    config_path = tmp_path / "config.toml"
+
+    runner.invoke(app, [
+        "add-repo", "acme/api", "--config", str(config_path),
+        "--mode", "fix", "--test-command", "pytest -q",
+    ])
+
+    assert repo_config(config_path).test_command == "pytest -q"
 
 
 def test_re_adding_a_repo_leaves_its_deployment_alone(fake_keyring, tmp_path):

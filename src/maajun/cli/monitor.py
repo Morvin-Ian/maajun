@@ -11,9 +11,19 @@ from rich.markup import escape
 from rich.panel import Panel
 
 from maajun.auth import AuthManager, credentials_file, file_store_in_use
-from maajun.cli.shared import app, console, load_config, pick_repo, split_list
+from maajun.cli.deployment import record_deployment
+from maajun.cli.shared import (
+    Asker,
+    app,
+    at_a_terminal,
+    console,
+    load_config,
+    pick_repo,
+    prompt_mode,
+    split_list,
+)
 from maajun.cli.status_checks import build_status, gather_github
-from maajun.config import RepoConfig
+from maajun.config import Config, RepoConfig
 from maajun.daemon import build_daemon, build_daemon_for_report, service
 from maajun.daemon.store import ARTIFACT_IGNORED
 from maajun.discovery import probe_source
@@ -419,9 +429,22 @@ def add_repo(
     docker_containers: str | None = typer.Option(
         None, "--docker-containers", help="Comma-separated containers to read logs from"
     ),
+    test_command: str | None = typer.Option(
+        None, "--test-command",
+        help="Command that verifies a fix-mode edit, e.g. 'pytest -q'",
+    ),
+    non_interactive: bool = typer.Option(
+        False, "--non-interactive",
+        help="Never prompt; take everything from flags and the host probes",
+    ),
     config_path: Path | None = typer.Option(None, "--config", "-c", help="Config file location"),
 ):
     """Add a repository to watch.
+
+    Runs the same steps `maajun setup` runs for its first repo: asks for the
+    base branch and mode, then probes this host for where the app runs and
+    where its errors land. Anything given as a flag is not asked about, and
+    with --non-interactive nothing is asked at all.
 
     The owner can be left off once GitHub is authenticated: `add-repo myapp`
     becomes `<your-login>/myapp`. Re-adding a repo already in the list
@@ -473,12 +496,83 @@ def add_repo(
         entry.deployment.journald_units = units
     if containers is not None:
         entry.deployment.docker_containers = containers
+    if test_command is not None:
+        entry.test_command = test_command
+
+    # Prompting is off unless a person is actually at the terminal. add-repo
+    # is used from scripts and from the chat tool, and a prompt there would
+    # hang waiting on a stdin nobody is typing into.
+    ask = Asker(interactive=not non_interactive and at_a_terminal())
+    configure_repo(entry, config, AuthManager(), ask, asked_branch=base_branch,
+                   asked_mode=mode, asked_test_command=test_command)
+
     config.save(config_path)
 
     names = ", ".join(repo_config.repo for repo_config in config.github.repos)
     verb = "Updated" if updated else "Added"
     console.print(f"[green]✓ {verb} {repo} ({entry.mode}).[/green]")
     console.print(f"[dim]Now watching: {names}[/dim]")
+
+
+def configure_repo(
+    entry: RepoConfig,
+    config: Config,
+    auth: AuthManager,
+    ask: Asker,
+    *,
+    asked_branch: str | None,
+    asked_mode: str | None,
+    asked_test_command: str | None,
+) -> None:
+    """Fill in a repo the way `maajun setup` fills in its first one.
+
+    Setup asks for the branch and mode, then probes the host to find where the
+    app runs and where its errors land. add-repo used to do neither, so a repo
+    added afterwards had an empty deployment block and the daemon could only
+    see what GitHub showed it. Same steps, same order, same functions.
+
+    Only asks about what was not passed as a flag.
+    """
+    if ask.interactive and asked_branch is None:
+        entry.base_branch = ask.text("Base branch", entry.base_branch)
+    if ask.interactive and asked_mode is None:
+        entry.mode = prompt_mode(entry.mode)
+
+    # Only fix mode produces a diff, so only fix mode has anything to verify.
+    if entry.mode == "fix" and asked_test_command is None and ask.interactive:
+        console.print(
+            "  [dim]Fix mode edits code. A test command lets maajun verify "
+            "the fix and put the result in the PR.[/dim]"
+        )
+        entry.test_command = ask.text(
+            "Test command (Enter to skip)", entry.test_command
+        )
+    if entry.mode == "fix" and not entry.test_command:
+        console.print(
+            "  [yellow]⚠ No test command — fix-mode PRs will be marked "
+            "unverified.[/yellow]"
+        )
+
+    # The step that was missing: find the deployment on this host and record
+    # it. Additive — anything already set, including the flags above, wins.
+    record_deployment(entry, config, auth)
+
+    # A repo with no runtime source is the case add-repo silently produced.
+    # Ask rather than leave it half-configured.
+    if not entry.runtime_sources() and ask.interactive:
+        console.print(
+            "  [dim]Nothing here watches this app's runtime errors yet. "
+            "If it writes an error log, naming it closes that gap.[/dim]"
+        )
+        answer = ask.text("Log files to watch (comma-separated, Enter to skip)", "")
+        named = [path.strip() for path in answer.split(",") if path.strip()]
+        if named:
+            entry.log_files = named
+            for path in named:
+                exists = Path(path).expanduser().exists()
+                mark = "[green]✓[/green]" if exists else "[yellow]⚠[/yellow]"
+                suffix = "" if exists else " [dim](not found yet)[/dim]"
+                console.print(f"    {mark} {path}{suffix}")
 
 
 def print_check(label: str, ok: bool, detail: str = "", warn: bool = False) -> bool:
