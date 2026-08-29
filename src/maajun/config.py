@@ -242,6 +242,9 @@ class DaemonConfig(Base):
     # Screen each new error with one cheap tool-less request before paying for
     # the investigation. Off investigates everything the signatures let past.
     screen_errors: bool = True
+    # Screened-out errors are not incidents, so the cap above never counts
+    # them. This one does.
+    max_screens_per_cycle: int = 50
     # A published incident that goes quiet this long and comes back is
     # reported again, as a regression. 0 reports each error once, ever.
     reopen_after_days: float = DEFAULT_REOPEN_AFTER_DAYS

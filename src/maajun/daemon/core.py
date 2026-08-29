@@ -185,6 +185,8 @@ class Daemon:
         self.on_notice = on_notice
         self.budget_warned_for = ""  # UTC day already warned about
         self.handled_this_cycle = 0
+        self.screened_this_cycle = 0
+        self.screen_agent = None
         # One slot is enough: incidents are handled one at a time.
         self.last_artifact_kind: str | None = None
         self.last_ignored_reason = ""
@@ -271,6 +273,21 @@ class Daemon:
         )
         return True
 
+    def screens_full(self) -> bool:
+        """Whether this cycle has used its allowance of screens.
+
+        `cycle_full` counts investigations, and a screened-out error never
+        becomes one — so a burst of guards was otherwise unbounded.
+        """
+        limit = self.config.daemon.max_screens_per_cycle
+        if limit <= 0 or self.screened_this_cycle < limit:
+            return False
+        log.info(
+            "reached max_screens_per_cycle (%d); the rest of this cycle's "
+            "errors will be screened on the next poll", limit,
+        )
+        return True
+
     ARTIFACT_LABELS = {
         ARTIFACT_PR: "PR opened",
         ARTIFACT_ISSUE: "Issue opened",
@@ -301,6 +318,16 @@ class Daemon:
             self.config.monitor.ignore_by_design,
         )
 
+    def screening_agent(self):
+        """The screen's agent, kept for the daemon's life.
+
+        One per error meant a new HTTP client, and so a new handshake, for
+        every error screened.
+        """
+        if self.screen_agent is None:
+            self.screen_agent = self.screen_factory()
+        return self.screen_agent
+
     async def screen(self, event: ErrorEvent) -> str:
         """Why a cheap model says this is not a defect, or "" to investigate.
 
@@ -313,7 +340,8 @@ class Daemon:
         """
         if self.screen_factory is None or not self.config.daemon.screen_errors:
             return ""
-        agent = self.screen_factory()
+        self.screened_this_cycle += 1
+        agent = self.screening_agent()
         try:
             response = await agent.chat(
                 triage.SCREEN_PROMPT.format(
@@ -328,7 +356,7 @@ class Daemon:
             return ""
         finally:
             bank_spend(self.store, event, agent)
-            await agent.aclose()
+            agent.clear_history()  # kept for the next error
         reason = triage.screened_out(response.content)
         if reason:
             log.info(
@@ -409,7 +437,10 @@ class Daemon:
         return installed
 
     async def aclose(self) -> None:
-        """Close the GitHub client and any monitor HTTP clients."""
+        """Close the GitHub client, the screen agent, and the monitors."""
+        if self.screen_agent is not None:
+            await self.screen_agent.aclose()
+            self.screen_agent = None
         if self.github is not None:
             closer = getattr(self.github, "aclose", None)
             if closer:
@@ -433,6 +464,7 @@ class Daemon:
                 return None
 
         self.handled_this_cycle = 0
+        self.screened_this_cycle = 0
         results = await asyncio.gather(*(poll(m) for m in self.monitors))
 
         handled: list[str] = []
@@ -469,15 +501,22 @@ class Daemon:
             if not self.store.record(event):
                 log.debug("known error fp=%s repo=%s", event.fingerprint, label)
                 continue
-            if not dry_run and (self.over_budget() or self.cycle_full()):
-                # Left at 'new' for a later poll. Deleting the row instead
-                # reset first_seen and the sighting count every cycle.
-                log.debug(
-                    "deferring fp=%s repo=%s until there is budget",
-                    event.fingerprint, label,
-                )
-                continue
-            intended = self.working_as_intended(event) or await self.screen(event)
+            # Free, so it runs ahead of the gates below: a guard is closed
+            # here rather than deferred and re-decided every cycle.
+            intended = self.working_as_intended(event)
+            if not intended:
+                # Counters first; over_budget reads the database.
+                if not dry_run and (
+                    self.cycle_full() or self.screens_full() or self.over_budget()
+                ):
+                    # Left at 'new' for a later poll. Deleting the row instead
+                    # reset first_seen and the sighting count every cycle.
+                    log.debug(
+                        "deferring fp=%s repo=%s until there is budget",
+                        event.fingerprint, label,
+                    )
+                    continue
+                intended = await self.screen(event)
             if intended:
                 # Nothing is billed and nothing is filed, but the row stays
                 # so `maajun incidents --ignored` can show the call.

@@ -863,6 +863,7 @@ class FakeScreen:
         self.fail = fail
         self.prompts = []
         self.closed = False
+        self.cleared = 0
 
     async def chat(self, message):
         self.prompts.append(message)
@@ -875,6 +876,9 @@ class FakeScreen:
 
     def take_usage(self):
         return {"prompt_tokens": 400, "completion_tokens": 8}
+
+    def clear_history(self):
+        self.cleared += 1
 
     async def aclose(self):
         self.closed = True
@@ -919,7 +923,93 @@ async def test_a_screen_that_says_investigate_costs_one_small_request(setup):
     assert len(screen.prompts) == 1
     assert len(agent.prompts) == 1
     assert len(github.issues) == 1
+    # Kept open for the next error.
+    assert screen.cleared == 1
+    assert not screen.closed
+    await daemon.aclose()
     assert screen.closed
+
+
+async def test_screen_limit_bounds_a_burst_of_screened_errors(setup):
+    """max_incidents_per_cycle counts investigations, which a screened-out
+    error never becomes."""
+    daemon, logfile, agent, github, store, remote = setup
+    daemon.config.daemon.max_screens_per_cycle = 2
+    screen = with_screen(daemon, FakeScreen("by design: a quota refused it"))
+
+    with open(logfile, "a") as f:
+        f.write(distinct_errors(5))
+    handled = await daemon.poll_once()
+
+    assert handled == []
+    assert len(screen.prompts) == 2
+    assert agent.prompts == []
+
+
+async def test_screens_beyond_the_limit_are_screened_next_poll(setup):
+    daemon, logfile, agent, github, store, remote = setup
+    daemon.config.daemon.max_screens_per_cycle = 2
+    screen = with_screen(daemon, FakeScreen("by design: a quota refused it"))
+
+    with open(logfile, "a") as f:
+        f.write(distinct_errors(5))
+    await daemon.poll_once()
+
+    with open(logfile, "a") as f:
+        f.write(distinct_errors(5))
+    await daemon.poll_once()
+
+    assert len(screen.prompts) == 4
+
+
+async def test_zero_screens_per_cycle_means_unlimited(setup):
+    daemon, logfile, agent, github, store, remote = setup
+    daemon.config.daemon.max_screens_per_cycle = 0
+    screen = with_screen(daemon, FakeScreen("by design: a quota refused it"))
+
+    with open(logfile, "a") as f:
+        f.write(distinct_errors(5))
+    await daemon.poll_once()
+
+    assert len(screen.prompts) == 5
+
+
+async def test_the_screen_agent_is_built_once_for_the_whole_daemon(setup):
+    """A fresh one per error meant a handshake per error."""
+    daemon, logfile, agent, github, store, remote = setup
+    built = []
+
+    def factory():
+        built.append(FakeScreen("by design: a quota refused it"))
+        return built[-1]
+
+    daemon.screen_factory = factory
+    with open(logfile, "a") as f:
+        f.write(distinct_errors(4))
+    await daemon.poll_once()
+
+    assert len(built) == 1
+    assert len(built[0].prompts) == 4
+
+
+async def test_a_signature_match_is_closed_even_when_over_budget(setup):
+    """The signatures cost nothing, so the spend gate has no say over them.
+
+    Deferring one left it re-decided every poll, for the same verdict.
+    """
+    daemon, logfile, agent, github, store, remote = setup
+    daemon.config.daemon.max_usd_per_day = 0.01
+    seed_spend(store, "earlier", 0.02)
+    screen = with_screen(daemon, FakeScreen("investigate"))
+
+    with open(logfile, "a") as f:
+        f.write("ERROR ValidationError: email is not an address\nINFO end\n")
+    handled = await daemon.poll_once()
+
+    assert handled == []
+    assert screen.prompts == []  # nothing was paid for
+    assert agent.prompts == []
+    assert store.ignored()[0]["status"] == "ignored"
 
 
 async def test_a_broken_screen_never_costs_an_error_its_report(setup):
