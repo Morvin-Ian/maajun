@@ -37,7 +37,7 @@ PRICING: dict[str, dict[str, float]] = {
         "input": 1.00, "cached_input": 0.10, "cache_write": 1.25, "output": 5.00,
     },
     "claude-sonnet-5": {
-        "input": 3.00, "cached_input": 0.30, "cache_write": 3.75, "output": 15.00,
+        "input": 2.00, "cached_input": 0.20, "cache_write": 2.50, "output": 10.00,
     },
     "claude-opus-5": {
         "input": 5.00, "cached_input": 0.50, "cache_write": 6.25, "output": 25.00,
