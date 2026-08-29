@@ -103,14 +103,19 @@ def base_pricing(model: str | None) -> tuple[dict[str, float], str | None]:
     if not model:
         warn_once("(unnamed)")
         return DEFAULT_PRICING, None
-    found = table_entry(model)
-    if found is None and "/" in model:
-        # A gateway names the same model vendor/model; the table is keyed on
-        # the model. Without this every model reached through one is charged
-        # at the dearest rate maajun knows.
-        found = table_entry(model.rpartition("/")[2])
-    if found is not None:
-        return found
+    # A gateway names the same model vendor/model, and writes the version
+    # with dots where the vendor's own id uses hyphens — claude-haiku-4.5
+    # for claude-haiku-4-5. The table is keyed on the vendor's id, so both
+    # differences are undone before giving up; either alone would charge a
+    # priced model at the dearest rate maajun knows.
+    spellings = [model]
+    if "/" in model:
+        spellings.append(model.rpartition("/")[2])
+    spellings += [name.replace(".", "-") for name in spellings]
+    for spelling in spellings:
+        found = table_entry(spelling)
+        if found is not None:
+            return found
     warn_once(model)
     return DEFAULT_PRICING, None
 
