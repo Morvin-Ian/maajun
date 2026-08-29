@@ -5,7 +5,8 @@ from typer.testing import CliRunner
 
 from maajun.auth import AuthManager
 from maajun.cli import app
-from maajun.cli.setup import detect_repo_from_git
+from maajun.cli.setup import detect_repo_from_git, model_line, setup_model
+from maajun.cli.shared import Asker
 from maajun.config import Config, DeploymentConfig, RepoConfig
 from maajun.discovery import Discovered
 from maajun.inspection import Inspection
@@ -556,3 +557,89 @@ def test_setup_finishes_unattended_without_a_keyring(
 
     assert result.exit_code == 0
     assert config_path.exists()
+
+
+# ---------------------------------------------------------------------------
+# Model selection
+# ---------------------------------------------------------------------------
+
+
+class Answer(Asker):
+    """An Asker that gives one canned reply to every prompt."""
+
+    def __init__(self, reply: str = ""):
+        super().__init__(interactive=True)
+        self.reply = reply
+        self.prompts: list[str] = []
+
+    def text(self, prompt: str, default: str = "") -> str:
+        self.prompts.append(prompt)
+        return self.reply or default
+
+
+def test_setup_model_takes_a_number_from_the_catalog():
+    config = Config()
+    setup_model(Answer("3"), config, "anthropic", None)
+    assert config.ai.model == "claude-opus-5"
+
+
+def test_choosing_the_provider_default_leaves_the_model_unset():
+    """Pinning it would freeze the cheap tier where the provider replaces it."""
+    config = Config()
+    setup_model(Answer("1"), config, "anthropic", None)
+    assert config.ai.model is None
+
+
+def test_setup_model_takes_an_id_that_is_not_in_the_catalog():
+    config = Config()
+    setup_model(Answer("claude-sonnet-5-20260101"), config, "anthropic", None)
+    assert config.ai.model == "claude-sonnet-5-20260101"
+
+
+def test_the_model_flag_wins_and_never_prompts():
+    config = Config()
+    ask = Answer("1")
+    setup_model(ask, config, "openai", "gpt-4o")
+    assert config.ai.model == "gpt-4o"
+    assert ask.prompts == []
+
+
+def test_non_interactive_setup_leaves_the_model_alone():
+    config = Config()
+    config.ai.model = "gpt-4o"
+    setup_model(Asker(interactive=False), config, "openai", None)
+    assert config.ai.model == "gpt-4o"
+
+
+def test_a_gateway_asks_for_a_model_id_rather_than_a_list():
+    config = Config()
+    ask = Answer("anthropic/claude-opus-5")
+    setup_model(ask, config, "openrouter", None)
+    assert config.ai.model == "anthropic/claude-opus-5"
+    assert "vendor/model" not in "".join(ask.prompts)  # that is said, not asked
+
+
+def test_a_gateway_left_blank_sets_no_model():
+    """It has no default to fall back to, so this has to stay unset."""
+    config = Config()
+    setup_model(Answer(""), config, "straitly", None)
+    assert config.ai.model is None
+
+
+def test_a_catalog_line_carries_the_price_and_the_role():
+    from maajun.providers.anthropic import AnthropicProvider
+
+    line = model_line(AnthropicProvider, AnthropicProvider.models[0])
+    assert "claude-haiku-4-5" in line
+    assert "$1.00 in / $5.00 out" in line
+    assert "default" in line
+
+
+def test_changing_provider_clears_a_model_chosen_for_the_old_one():
+    """Sending one provider's model id to another only fails on the first
+    real call, which is a long way from the command that caused it."""
+    config = Config()
+    config.ai.provider = "anthropic"
+    config.ai.model = "claude-opus-5"
+    config.set("ai.provider", "openai")
+    assert config.ai.model is None

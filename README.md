@@ -300,8 +300,8 @@ report — the issue says why.
 
 ## AI providers
 
-Three are supported and interchangeable. `maajun setup` offers them in this
-order — cheapest first — and defaults to the first:
+Three vendors and two gateways, all interchangeable. `maajun setup` offers
+them in this order — cheapest first — and defaults to the first:
 
 | | DeepSeek | OpenAI | Anthropic |
 |---|---|---|---|
@@ -309,6 +309,58 @@ order — cheapest first — and defaults to the first:
 | Default model | `deepseek-v4-flash` | `gpt-4o-mini` | `claude-haiku-4-5` |
 | With `ai.thinking_mode` | `deepseek-v4-pro` | `gpt-4o` | `claude-opus-5` |
 | API key | [platform.deepseek.com](https://platform.deepseek.com) | [platform.openai.com](https://platform.openai.com/api-keys) | [console.anthropic.com](https://console.anthropic.com/settings/keys) |
+
+### Choosing a model
+
+`maajun setup` lists what the provider offers with its price and its role, so
+the choice is made with the cost in view:
+
+```
+  Models:
+    1. claude-haiku-4-5 — $1.00 in / $5.00 out per 1M tokens (default)
+       The fastest and cheapest Claude.
+    2. claude-sonnet-5 — $3.00 in / $15.00 out per 1M tokens
+       Mid tier: more capable than Haiku, well under Opus in price.
+    3. claude-opus-5 — $5.00 in / $25.00 out per 1M tokens (thinking_mode picks this)
+       The most capable, and the dearest.
+
+  > Model (number, or an id to use one not listed) [claude-haiku-4-5]:
+```
+
+Answer with a number or with any model id — a dated snapshot, or something
+released after this build. Choosing the provider's own default leaves
+`ai.model` unset, so the default moves when the provider replaces its cheap
+tier. `maajun setup --model gpt-4o` skips the prompt.
+
+Changing provider afterwards clears `ai.model`, because a model id belongs to
+the provider it was chosen for:
+
+```bash
+maajun config ai.provider anthropic   # clears ai.model, and says so
+maajun config ai.model claude-opus-5
+```
+
+### Gateways
+
+`openrouter` and `straitly` are gateways: one key reaching many vendors'
+models, named `vendor/model`.
+
+| | OpenRouter | Straitly |
+|---|---|---|
+| `ai.provider` | `openrouter` | `straitly` |
+| Models | [openrouter.ai/models](https://openrouter.ai/models) | [straitly.ai/models](https://straitly.ai/models) |
+| API key | [openrouter.ai](https://openrouter.ai/settings/keys) | [straitly.ai](https://straitly.ai/) |
+
+Neither has a default model — their catalogues change, and nothing here should
+guess which one your key can reach — so `ai.model` is required:
+
+```bash
+maajun setup --provider openrouter --model anthropic/claude-opus-5
+```
+
+Costs still come from the table below: `anthropic/claude-opus-5` is priced as
+`claude-opus-5`. A model with no entry is costed at the dearest rate maajun
+knows, and setup says so when you pick one.
 
 Switch at any time — the key for each provider is stored separately, so moving
 back and forth costs nothing:
@@ -319,9 +371,10 @@ maajun config ai.model gpt-4o        # override the default model
 maajun provider-list                 # which providers have a key stored
 ```
 
-DeepSeek and OpenAI both speak `/chat/completions`, so any compatible
-gateway, proxy, or self-hosted server works too — point `ai.base_url` at it,
-and `ai.provider` still selects the request dialect and model defaults.
+DeepSeek, OpenAI, and both gateways speak `/chat/completions`, so any other
+compatible gateway, proxy, or self-hosted server works too — point
+`ai.base_url` at it, and `ai.provider` still selects the request dialect and
+model defaults.
 Anthropic runs on the Messages API through the official SDK instead, and gets
 an explicit cache breakpoint on every request: without one Anthropic caches
 nothing, and each tool round would re-read the whole prompt at full price.
