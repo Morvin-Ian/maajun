@@ -142,7 +142,8 @@ def test_every_supported_provider_has_priced_defaults():
     for provider_type in ProviderFactory.get_supported_providers():
         provider_class = ProviderFactory.providers[provider_type]
         for model in (provider_class.default_model, provider_class.thinking_model):
-            assert pricing_for(model) is not DEFAULT_PRICING, model
+            if model:  # a gateway declares neither
+                assert pricing_for(model) is not DEFAULT_PRICING, model
 
 
 def test_the_default_rate_is_above_every_known_model():
@@ -155,10 +156,7 @@ def test_the_default_rate_is_above_every_known_model():
 
 
 def test_the_thinking_model_costs_more_than_the_default_one():
-    """If these ever invert, thinking_mode has stopped being the premium path.
-
-    Ox is exempt: one free model serves both, so there is nothing to invert.
-    """
+    """If these ever invert, thinking_mode has stopped being the premium path."""
     from maajun.providers.anthropic import AnthropicProvider
     from maajun.providers.deepseek import DeepSeekProvider
     from maajun.providers.openai import OpenAIProvider
@@ -170,13 +168,41 @@ def test_the_thinking_model_costs_more_than_the_default_one():
 
 
 def test_every_shipped_model_has_a_price():
-    """A provider default with no entry would silently fall back to guesswork."""
+    """A default with no entry would silently fall back to guesswork.
+
+    A gateway declares neither: its catalogue is the vendors' models, named
+    vendor/model, and ai.model has to say which.
+    """
     from maajun.providers.factory import ProviderFactory
     from maajun.providers.pricing import PRICING
 
     for provider in ProviderFactory.providers.values():
-        assert provider.default_model in PRICING, provider.name
-        assert provider.thinking_model in PRICING, provider.name
+        for model in (provider.default_model, provider.thinking_model):
+            if model:
+                assert model in PRICING, provider.name
+
+
+def test_every_catalogued_model_has_a_price():
+    """setup prints the price beside each one, so an unpriced entry shows as
+    "costed at the dearest rate" in the list people choose from."""
+    from maajun.providers.factory import ProviderFactory
+    from maajun.providers.pricing import PRICING
+
+    for provider in ProviderFactory.providers.values():
+        for model in provider.models:
+            assert model.id in PRICING, f"{provider.name}: {model.id}"
+
+
+def test_a_gateway_declares_no_default_model():
+    """It would be a guess at which vendor's model the key can reach."""
+    from maajun.providers.bai import BAIProvider
+    from maajun.providers.openrouter import OpenRouterProvider
+    from maajun.providers.straitly import StraitlyProvider
+
+    for gateway in (OpenRouterProvider, StraitlyProvider, BAIProvider):
+        assert not gateway.default_model
+        assert not gateway.models
+        assert gateway.catalog_url
 
 
 # ---------------------------------------------------------------------------
@@ -229,7 +255,6 @@ def test_a_provider_that_reports_no_cache_is_charged_in_full():
 
 
 def test_every_model_has_a_cache_hit_rate_at_or_below_its_miss_rate():
-    """Equal only where both are zero — a free model."""
     from maajun.providers.pricing import PRICING
 
     for model, rates in PRICING.items():
@@ -306,19 +331,8 @@ def test_the_vision_model_is_priced():
 
 
 # ---------------------------------------------------------------------------
-# Ox Alpha, Anthropic
+# Anthropic
 # ---------------------------------------------------------------------------
-
-
-def test_ox_alpha_costs_nothing():
-    """The whole reason it is offered first."""
-    assert compute_cost(10_000_000, 10_000_000, "stealth/ox-alpha", at=PEAK) == 0.0
-
-
-def test_a_free_model_is_still_costed_from_the_table_not_special_cased():
-    from maajun.providers.pricing import DEFAULT_PRICING, pricing_for
-
-    assert pricing_for("stealth/ox-alpha", PEAK) is not DEFAULT_PRICING
 
 
 def test_anthropic_charges_a_premium_to_write_the_cache():
@@ -374,3 +388,34 @@ def test_a_provider_with_no_cache_write_rate_pays_the_fresh_rate():
 
     for model in ("deepseek-v4-flash", "gpt-4o", "gpt-4o-mini", "deepseek-v4-pro"):
         assert PRICING[model]["cache_write"] == PRICING[model]["input"]
+
+
+# ---------------------------------------------------------------------------
+# Gateway model ids
+# ---------------------------------------------------------------------------
+
+
+def test_a_gateway_model_id_prices_off_the_vendor_table():
+    """OpenRouter and Straitly name the same model vendor/model. Without the
+    prefix stripped, every model reached through one was costed at the
+    dearest rate maajun knows."""
+    from maajun.providers.pricing import base_pricing
+
+    assert base_pricing("anthropic/claude-opus-5")[1] == "claude-opus-5"
+    assert base_pricing("openai/gpt-4o")[1] == "gpt-4o"
+    assert compute_cost(1_000_000, 0, "anthropic/claude-opus-5", at=PEAK) == (
+        compute_cost(1_000_000, 0, "claude-opus-5", at=PEAK)
+    )
+
+
+def test_a_prefixed_deepseek_id_still_gets_the_off_peak_discount():
+    """The schedule is matched on the table name, not the id as written."""
+    peak = compute_cost(1_000_000, 0, "deepseek/deepseek-v4-pro", at=PEAK)
+    off = compute_cost(1_000_000, 0, "deepseek/deepseek-v4-pro", at=OFF_PEAK)
+    assert off == peak / 2
+
+
+def test_an_unknown_gateway_model_still_falls_back_to_the_dearest_rate():
+    from maajun.providers.pricing import DEFAULT_PRICING, pricing_for
+
+    assert pricing_for("some-vendor/never-heard-of-it") is DEFAULT_PRICING

@@ -27,7 +27,7 @@ Nothing merges without your review, in either mode.
 ## Requirements
 
 - Python 3.11 or newer
-- An API key for one of Ox Alpha (free), DeepSeek, OpenAI, or Anthropic — see
+- An API key for one of DeepSeek, OpenAI, or Anthropic — see
   [AI providers](#ai-providers)
 - Optional, to open issues and pull requests: GitHub access, set up with
   `maajun login` — the GitHub CLI, a token, or SSH keys
@@ -300,23 +300,108 @@ report — the issue says why.
 
 ## AI providers
 
-Four are supported and interchangeable. `maajun setup` offers them in this
-order — cheapest first — and defaults to the first:
+Three vendors and three gateways, all interchangeable. `maajun setup` lists
+them grouped by kind, cheapest first, and defaults to the first:
 
-| | Ox Alpha **(free)** | DeepSeek | OpenAI | Anthropic |
-|---|---|---|---|---|
-| `ai.provider` | `ox-alpha` | `deepseek` | `openai` | `anthropic` |
-| Default model | `stealth/ox-alpha` | `deepseek-v4-flash` | `gpt-4o-mini` | `claude-haiku-4-5` |
-| With `ai.thinking_mode` | *(same model)* | `deepseek-v4-pro` | `gpt-4o` | `claude-opus-5` |
-| API key | [openrouter.ai](https://openrouter.ai/settings/keys) | [platform.deepseek.com](https://platform.deepseek.com) | [platform.openai.com](https://platform.openai.com/api-keys) | [console.anthropic.com](https://console.anthropic.com/settings/keys) |
+```
+  Vendors (their own models)
+    1. deepseek
+    2. openai
+    3. anthropic
 
-**Ox Alpha is free.** It is a stealth model on OpenRouter — a 1M-token
-reasoning model whose operator has not been named — offered at no charge for
-the length of its preview. You still need an OpenRouter key, but nothing is
-billed against it. It is one model with no cheap/premium split, so
-`thinking_mode` does nothing there. When the preview ends it stops being free
-without warning: watch what `maajun incidents` reports, and switch providers
-if the cost stops reading zero.
+  Gateways (one key, many vendors' models)
+    4. openrouter
+    5. straitly
+    6. bai
+
+  > AI provider (number, or a name) [deepseek]:
+```
+
+| | DeepSeek | OpenAI | Anthropic |
+|---|---|---|---|
+| `ai.provider` | `deepseek` | `openai` | `anthropic` |
+| Default model | `deepseek-v4-flash` | `gpt-4o-mini` | `claude-haiku-4-5` |
+| With `ai.thinking_mode` | `deepseek-v4-pro` | `gpt-4o` | `claude-opus-5` |
+| API key | [platform.deepseek.com](https://platform.deepseek.com) | [platform.openai.com](https://platform.openai.com/api-keys) | [console.anthropic.com](https://console.anthropic.com/settings/keys) |
+
+### Choosing a model
+
+`maajun setup` lists what the provider offers with its price and its role, so
+the choice is made with the cost in view:
+
+```
+  Models:
+    1. claude-haiku-4-5 — $1.00 in / $5.00 out per 1M tokens (default)
+       The fastest and cheapest Claude.
+    2. claude-sonnet-5 — $2.00 in / $10.00 out per 1M tokens
+       Mid tier: more capable than Haiku, well under Opus in price.
+    3. claude-opus-5 — $5.00 in / $25.00 out per 1M tokens (thinking_mode picks this)
+       The most capable, and the dearest.
+
+  > Model (number, or an id to use one not listed) [claude-haiku-4-5]:
+```
+
+Answer with a number or with any model id — a dated snapshot, or something
+released after this build. Choosing the provider's own default leaves
+`ai.model` unset, so the default moves when the provider replaces its cheap
+tier. `maajun setup --model gpt-4o` skips the prompt.
+
+Changing provider afterwards clears `ai.model`, because a model id belongs to
+the provider it was chosen for:
+
+```bash
+maajun config ai.provider anthropic   # clears ai.model, and says so
+maajun config ai.model claude-opus-5
+```
+
+### Gateways
+
+`openrouter`, `straitly` and `bai` are gateways: one key reaching many
+vendors' models.
+
+| | OpenRouter | Straitly | BAI |
+|---|---|---|---|
+| `ai.provider` | `openrouter` | `straitly` | `bai` |
+| Model ids | `anthropic/claude-opus-5` | `anthropic/claude-opus-5` | `gpt-5.2` |
+| Models | [openrouter.ai/models](https://openrouter.ai/models) | [straitly.ai/models](https://straitly.ai/models) | [docs.b.ai](https://docs.b.ai) |
+| API key | [openrouter.ai](https://openrouter.ai/settings/keys) | [straitly.ai](https://straitly.ai/) | [chat.b.ai](https://chat.b.ai) |
+
+None has a default model — their catalogues change, and nothing here should
+guess which one your key can reach — so `ai.model` is required.
+
+Rather than ship a list that goes stale, `maajun setup` asks the gateway
+itself: every one of them serves `GET /v1/models`, which names each model and
+prices it. Vendor first, because a gateway carries hundreds:
+
+```
+  openrouter carries 396 models from 51 vendors:
+    1. anthropic (32)
+    2. deepseek (17)
+    ...
+  > Vendor (number, or a model id to skip ahead): 1
+
+  Models:
+    1. anthropic/claude-haiku-4.5 — $1.00 in / $5.00 out per 1M tokens
+    2. anthropic/claude-opus-5 — $5.00 in / $25.00 out per 1M tokens
+    ...
+  > Model (number, or an id):
+```
+
+Either prompt also takes an id outright, and a gateway that cannot be reached
+falls back to asking for one. `--model` skips the whole step:
+
+```bash
+maajun setup --provider openrouter --model anthropic/claude-opus-5
+maajun setup --provider bai --model gpt-5.2
+```
+
+The prices in that list are the gateway's own — a reseller discounts some
+models and gives others away — but the spend cap still costs a run from the
+table below, which it reaches through both the vendor prefix and the dots a
+gateway writes versions with: `anthropic/claude-haiku-4.5` is priced as
+`claude-haiku-4-5`. A model with no entry there is costed at the dearest rate
+maajun knows, and setup says so, alongside what the gateway quoted, when you
+pick one.
 
 Switch at any time — the key for each provider is stored separately, so moving
 back and forth costs nothing:
@@ -327,9 +412,10 @@ maajun config ai.model gpt-4o        # override the default model
 maajun provider-list                 # which providers have a key stored
 ```
 
-Ox Alpha, DeepSeek, and OpenAI all speak `/chat/completions`, so any compatible
-gateway, proxy, or self-hosted server works too — point `ai.base_url` at it,
-and `ai.provider` still selects the request dialect and model defaults.
+DeepSeek, OpenAI, and all three gateways speak `/chat/completions`, so any other
+compatible gateway, proxy, or self-hosted server works too — point
+`ai.base_url` at it, and `ai.provider` still selects the request dialect and
+model defaults.
 Anthropic runs on the Messages API through the official SDK instead, and gets
 an explicit cache breakpoint on every request: without one Anthropic caches
 nothing, and each tool round would re-read the whole prompt at full price.
@@ -351,7 +437,7 @@ A minimal config:
 
 ```toml
 [ai]
-provider = "ox-alpha"         # or "deepseek", "openai", "anthropic"
+provider = "deepseek"         # or "openai", "anthropic"
 # model = "gpt-4o-mini"       # provider default if omitted
 # thinking_mode = true        # use the provider's reasoning model
 
@@ -447,22 +533,19 @@ off part-way.
 Every incident's exact token count and cost is recorded and shown by
 `maajun incidents`, and `--dry-run` prints what an analysis *would* have cost.
 
-The cheapest thing you can do is run on Ox Alpha, which bills nothing at all.
-For the rest, costs are computed from published list prices, in USD per 1M
-tokens. Input is priced three ways: a prompt prefix the provider has seen
+Costs are computed from published list prices, in USD per 1M tokens. Input is priced three ways: a prompt prefix the provider has seen
 before is re-served from its cache far more cheaply than a fresh one, and
 maajun counts each from the token counts the provider reports.
 
 | Model | Input (fresh) | Input (cache hit) | Input (cache write) | Output |
 |---|---|---|---|---|
-| `stealth/ox-alpha` | **free** | **free** | **free** | **free** |
 | `deepseek-v4-flash` | $0.44 | $0.014 | $0.44 | $1.32 |
 | `deepseek-v4-flash-vision-exp` | $0.44 | $0.014 | $0.44 | $1.32 |
 | `deepseek-v4-pro` | $1.32 | $0.044 | $1.32 | $3.96 |
 | `gpt-4o-mini` | $0.15 | $0.075 | $0.15 | $0.60 |
 | `gpt-4o` | $2.50 | $1.25 | $2.50 | $10.00 |
 | `claude-haiku-4-5` | $1.00 | $0.10 | $1.25 | $5.00 |
-| `claude-sonnet-5` | $3.00 | $0.30 | $3.75 | $15.00 |
+| `claude-sonnet-5` | $2.00 | $0.20 | $2.50 | $10.00 |
 | `claude-opus-5` | $5.00 | $0.50 | $6.25 | $25.00 |
 
 Anthropic is the one provider that charges to *write* the cache — 1.25x a
@@ -479,14 +562,13 @@ of its input tokens are cache hits — so the same run costs a fraction of what
 the cache-miss column suggests. `maajun incidents` and `--dry-run` report what
 was actually billed.
 
-On either provider's default model a single analysis costs cents, not dollars —
+On any provider's default model a single analysis costs cents, not dollars —
 but measure your own workload with `--dry-run` rather than trusting an
 estimate. Rates change; verify them against
 [DeepSeek](https://api-docs.deepseek.com/quick_start/pricing),
-[OpenAI](https://developers.openai.com/api/docs/pricing),
-[Anthropic](https://docs.claude.com/en/docs/about-claude/pricing), or
-[OpenRouter](https://openrouter.ai/stealth/ox-alpha) before relying on the
-cap. A model with no entry is costed at the most expensive rate in the table
+[OpenAI](https://developers.openai.com/api/docs/pricing), or
+[Anthropic](https://docs.claude.com/en/docs/about-claude/pricing) before
+relying on the cap. A model with no entry is costed at the most expensive rate in the table
 above, with no cache discount and no off-peak discount, so the cap errs
 towards stopping early rather than overshooting. The same goes for a gateway
 that reports no cache hits: every input token is charged at the miss rate.

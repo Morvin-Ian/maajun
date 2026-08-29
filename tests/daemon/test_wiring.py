@@ -47,7 +47,7 @@ def test_one_log_file_can_feed_two_repos(fake_keyring):
         RepoConfig(repo="acme/web", log_files=["/var/log/shared.log"]),
     )
     monitors, monitor_to_repo = build_monitors(
-        config, config.github.get_all_repos()
+        config, config.github.repos
     )
 
     assert routing(monitors, monitor_to_repo) == [
@@ -64,7 +64,7 @@ def test_a_log_file_is_not_watched_twice_for_the_same_repo(fake_keyring):
         log_files=["/var/log/api.log"],
     )
     monitors, monitor_to_repo = build_monitors(
-        config, config.github.get_all_repos()
+        config, config.github.repos
     )
 
     assert routing(monitors, monitor_to_repo) == [
@@ -79,7 +79,7 @@ def test_global_log_files_attach_to_the_first_repo(fake_keyring):
         log_files=["/var/log/app.log"],
     )
     monitors, monitor_to_repo = build_monitors(
-        config, config.github.get_all_repos()
+        config, config.github.repos
     )
 
     assert routing(monitors, monitor_to_repo) == [
@@ -99,7 +99,7 @@ def test_every_deployment_source_routes_to_its_own_repo(fake_keyring):
         )),
     )
     monitors, monitor_to_repo = build_monitors(
-        config, config.github.get_all_repos()
+        config, config.github.repos
     )
 
     assert routing(monitors, monitor_to_repo) == [
@@ -122,7 +122,7 @@ def test_the_older_repo_log_files_spelling_still_works(fake_keyring):
         ),
     )
     monitors, monitor_to_repo = build_monitors(
-        config, config.github.get_all_repos()
+        config, config.github.repos
     )
 
     assert routing(monitors, monitor_to_repo) == [
@@ -140,7 +140,7 @@ def test_the_same_source_can_feed_two_repos(fake_keyring):
             docker_containers=["nginx"])),
     )
     monitors, monitor_to_repo = build_monitors(
-        config, config.github.get_all_repos()
+        config, config.github.repos
     )
 
     assert routing(monitors, monitor_to_repo) == [
@@ -156,7 +156,7 @@ def test_a_journald_monitor_gets_a_cursor_under_the_workdir(fake_keyring, tmp_pa
             journald_units=["api.service"])),
     )
     config.daemon.workdir = str(tmp_path)
-    monitors, _ = build_monitors(config, config.github.get_all_repos())
+    monitors, _ = build_monitors(config, config.github.repos)
 
     cursor = monitors[0].cursor_file
     assert cursor.parent == tmp_path / "cursors"
@@ -219,7 +219,7 @@ def test_backfill_reaches_every_kind_of_source(fake_keyring, tmp_path):
     config.daemon.workdir = str(tmp_path)
 
     monitors, _ = build_monitors(
-        config, config.github.get_all_repos(), backfill=True
+        config, config.github.repos, backfill=True
     )
 
     assert [m.backfill for m in monitors] == [True, True, True]
@@ -232,7 +232,7 @@ def test_without_the_flag_nothing_backfills(fake_keyring, tmp_path):
     )
     config.daemon.workdir = str(tmp_path)
 
-    monitors, _ = build_monitors(config, config.github.get_all_repos())
+    monitors, _ = build_monitors(config, config.github.repos)
 
     assert monitors[0].backfill is False
 
@@ -244,7 +244,7 @@ def test_a_log_monitor_keeps_its_cursor_under_the_workdir(fake_keyring, tmp_path
     )
     config.daemon.workdir = str(tmp_path)
 
-    monitors, _ = build_monitors(config, config.github.get_all_repos())
+    monitors, _ = build_monitors(config, config.github.repos)
 
     assert monitors[0].cursor_file.parent == tmp_path / "cursors"
     assert monitors[0].cursor_file.suffix == ".offset"

@@ -160,6 +160,59 @@ async def test_glob_missing_path():
     assert "Error" in result
 
 
+async def test_glob_does_not_descend_into_vendored_dirs(tmp_path, monkeypatch):
+    """Path.glob has no prune hook, so **/*.py walked all of node_modules
+    and then discarded the matches."""
+    from maajun.agent.tools import search
+
+    visited: list[str] = []
+    real_walk = search.os.walk
+
+    def recording_walk(top, *args, **kwargs):
+        for dirpath, dirnames, filenames in real_walk(top, *args, **kwargs):
+            visited.append(dirpath)
+            yield dirpath, dirnames, filenames
+
+    monkeypatch.setattr(search.os, "walk", recording_walk)
+
+    root = tmp_path
+    (root / "src").mkdir()
+    (root / "src" / "keep.py").write_text("")
+    (root / "node_modules" / "pkg" / "deep").mkdir(parents=True)
+    (root / "node_modules" / "pkg" / "deep" / "skip.py").write_text("")
+
+    result = await GLOB.executor(pattern="**/*.py", path=str(root))
+
+    assert "keep.py" in result
+    assert "skip.py" not in result
+    assert not any("node_modules" in seen for seen in visited)
+
+
+@pytest.mark.parametrize(
+    "pattern,expected",
+    [
+        ("*.py", ["a.py"]),
+        ("**/*.py", ["a.py", "src/deep/mod.py", "src/keep.py"]),
+        ("src/*.py", ["src/keep.py"]),
+        ("src/**/*.py", ["src/deep/mod.py", "src/keep.py"]),
+        ("?.py", ["a.py"]),
+        ("src/**", ["src/", "src/deep/"]),
+        ("**/deep/*", ["src/deep/mod.py"]),
+    ],
+)
+async def test_glob_pattern_forms(tmp_path, pattern, expected):
+    """The walk matches patterns itself now, so hold the forms."""
+    root = tmp_path
+    (root / "src" / "deep").mkdir(parents=True)
+    (root / "a.py").write_text("")
+    (root / "b.txt").write_text("")
+    (root / "src" / "keep.py").write_text("")
+    (root / "src" / "deep" / "mod.py").write_text("")
+
+    result = await GLOB.executor(pattern=pattern, path=str(root))
+    assert sorted(result.splitlines()) == expected
+
+
 # ---------------------------------------------------------------------------
 # grep
 # ---------------------------------------------------------------------------

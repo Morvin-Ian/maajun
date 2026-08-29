@@ -12,7 +12,9 @@ The one command that configures everything. Writes
 Three steps, of which only the first is required:
 
 1. **AI provider** — picks the provider (skipped when only one is
-   implemented) and stores a validated API key in the keyring.
+   implemented), stores a validated API key in the keyring, and picks the
+   model. A vendor's models are listed with their prices; a gateway's are
+   read from its own `/v1/models` and offered by vendor.
 2. **GitHub** *(optional)* — target repo, base branch, and
    [mode](monitoring.md#modes). Suggests the repo from your `origin`
    remote, and reports whether a token is already stored. Checks that the

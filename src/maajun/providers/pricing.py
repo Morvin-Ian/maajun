@@ -13,11 +13,6 @@ log = logging.getLogger(__name__)
 #
 # The DeepSeek rows are its peak rates; off-peak is half of them.
 PRICING: dict[str, dict[str, float]] = {
-    # Free for the length of OpenRouter's preview.
-    # https://openrouter.ai/stealth/ox-alpha
-    "stealth/ox-alpha": {
-        "input": 0.0, "cached_input": 0.0, "cache_write": 0.0, "output": 0.0,
-    },
     # https://api-docs.deepseek.com/quick_start/pricing
     "deepseek-v4-flash": {
         "input": 0.44, "cached_input": 0.014, "cache_write": 0.44, "output": 1.32,
@@ -42,7 +37,7 @@ PRICING: dict[str, dict[str, float]] = {
         "input": 1.00, "cached_input": 0.10, "cache_write": 1.25, "output": 5.00,
     },
     "claude-sonnet-5": {
-        "input": 3.00, "cached_input": 0.30, "cache_write": 3.75, "output": 15.00,
+        "input": 2.00, "cached_input": 0.20, "cache_write": 2.50, "output": 10.00,
     },
     "claude-opus-5": {
         "input": 5.00, "cached_input": 0.50, "cache_write": 6.25, "output": 25.00,
@@ -86,19 +81,41 @@ def on_off_peak_schedule(model: str) -> bool:
     return model.startswith(OFF_PEAK_DISCOUNTED)
 
 
+def table_entry(model: str) -> tuple[dict[str, float], str] | None:
+    """The table row a model id resolves to, longest prefix first.
+
+    Longest first so a dated id resolves to its family rather than to a
+    shorter name that happens to prefix it.
+    """
+    for name in sorted(PRICING, key=len, reverse=True):
+        if model.startswith(name):
+            return PRICING[name], name
+    return None
+
+
 def base_pricing(model: str | None) -> tuple[dict[str, float], str | None]:
     """Undiscounted rates for a model, and the table name they came from.
 
-    Longest prefix first, so dated ids resolve to their family. Anything
-    unrecognised costs at DEFAULT_PRICING: a cheap fallback would make the
-    unknown case under-report, the one direction a spend cap must not fail in.
+    Anything unrecognised costs at DEFAULT_PRICING: a cheap fallback would
+    make the unknown case under-report, the one direction a spend cap must
+    not fail in.
     """
     if not model:
         warn_once("(unnamed)")
         return DEFAULT_PRICING, None
-    for name in sorted(PRICING, key=len, reverse=True):
-        if model.startswith(name):
-            return PRICING[name], name
+    # A gateway names the same model vendor/model, and writes the version
+    # with dots where the vendor's own id uses hyphens — claude-haiku-4.5
+    # for claude-haiku-4-5. The table is keyed on the vendor's id, so both
+    # differences are undone before giving up; either alone would charge a
+    # priced model at the dearest rate maajun knows.
+    spellings = [model]
+    if "/" in model:
+        spellings.append(model.rpartition("/")[2])
+    spellings += [name.replace(".", "-") for name in spellings]
+    for spelling in spellings:
+        found = table_entry(spelling)
+        if found is not None:
+            return found
     warn_once(model)
     return DEFAULT_PRICING, None
 

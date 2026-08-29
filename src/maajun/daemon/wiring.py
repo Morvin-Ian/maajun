@@ -50,7 +50,7 @@ class DaemonDeps:
         self, config: Config, auth: AuthManager, workdir: Path, api_key: str
     ) -> None:
         """Everything that can fail after the database is already open."""
-        repos = config.github.get_all_repos()
+        repos = config.github.repos
         # GitHub is optional: with no repo, reports land on disk.
         self.local_mode = not repos
         if self.local_mode:

@@ -216,7 +216,7 @@ def discover_command(
     """
     config = load_config(config_path)
     auth = AuthManager()
-    repos = config.github.get_all_repos()
+    repos = config.github.repos
     if not repos:
         console.print(
             "[yellow]⚠ No repositories configured, so there is no deployment "

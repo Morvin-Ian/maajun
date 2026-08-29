@@ -17,7 +17,7 @@ def chat_sandbox(config: Config) -> Sandbox:
     one rather than by their directory — /var/log is not the project.
     """
     log_files = list(config.monitor.log_files)
-    for repo_config in config.github.get_all_repos():
+    for repo_config in config.github.repos:
         log_files.extend(repo_config.log_files)
     return Sandbox([
         Path.cwd(),

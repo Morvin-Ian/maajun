@@ -274,17 +274,17 @@ async def test_no_retry_on_auth_error(monkeypatch):
     assert call_count == 1  # no retries
 
 
-def test_prepared_tools_are_rebuilt_every_call():
-    """No memoization: an id()-keyed cache can serve a freed list's entry."""
+def test_prepared_tools_are_built_once_per_set():
+    """Keyed on the names, not id(): the tool loop asks once per round for
+    the same list, and a freed address can be reused."""
     from maajun.providers.base import ToolDefinition
 
     provider = DeepSeekProvider({"api_key": "x"})
     tools = [ToolDefinition("t", "d", {"type": "object", "properties": {}})]
 
     first = provider.prepared_tools(tools)
-    again = provider.prepared_tools(tools)
-    assert first == again
-    assert first is not again
+    again = provider.prepared_tools(list(tools))
+    assert first is again
 
     assert provider.prepared_tools(None) is None
 
