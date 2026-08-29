@@ -81,19 +81,36 @@ def on_off_peak_schedule(model: str) -> bool:
     return model.startswith(OFF_PEAK_DISCOUNTED)
 
 
+def table_entry(model: str) -> tuple[dict[str, float], str] | None:
+    """The table row a model id resolves to, longest prefix first.
+
+    Longest first so a dated id resolves to its family rather than to a
+    shorter name that happens to prefix it.
+    """
+    for name in sorted(PRICING, key=len, reverse=True):
+        if model.startswith(name):
+            return PRICING[name], name
+    return None
+
+
 def base_pricing(model: str | None) -> tuple[dict[str, float], str | None]:
     """Undiscounted rates for a model, and the table name they came from.
 
-    Longest prefix first, so dated ids resolve to their family. Anything
-    unrecognised costs at DEFAULT_PRICING: a cheap fallback would make the
-    unknown case under-report, the one direction a spend cap must not fail in.
+    Anything unrecognised costs at DEFAULT_PRICING: a cheap fallback would
+    make the unknown case under-report, the one direction a spend cap must
+    not fail in.
     """
     if not model:
         warn_once("(unnamed)")
         return DEFAULT_PRICING, None
-    for name in sorted(PRICING, key=len, reverse=True):
-        if model.startswith(name):
-            return PRICING[name], name
+    found = table_entry(model)
+    if found is None and "/" in model:
+        # A gateway names the same model vendor/model; the table is keyed on
+        # the model. Without this every model reached through one is charged
+        # at the dearest rate maajun knows.
+        found = table_entry(model.rpartition("/")[2])
+    if found is not None:
+        return found
     warn_once(model)
     return DEFAULT_PRICING, None
 
