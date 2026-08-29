@@ -142,19 +142,6 @@ def prompt_mode(current: str = "suggest") -> str:
     return current
 
 
-def pick_provider(configured: list[str]) -> str:
-    if len(configured) == 1:
-        return configured[0]
-    console.print("\n[bold]Select a provider:[/bold]\n")
-    for i, p in enumerate(configured, 1):
-        console.print(f"  [cyan]{i}.[/cyan] {p}")
-    while True:
-        choice = prompt_line("\n> Choice: ").strip()
-        if choice.isdigit() and 1 <= int(choice) <= len(configured):
-            return configured[int(choice) - 1]
-        console.print("[red]Invalid choice.[/red]")
-
-
 def pick_repo(repos: list[RepoConfig]) -> RepoConfig:
     console.print("\n[bold]Select a repository:[/bold]\n")
     for i, rc in enumerate(repos, 1):

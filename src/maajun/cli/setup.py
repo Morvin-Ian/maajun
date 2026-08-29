@@ -43,8 +43,6 @@ PROVIDER_SIGNUP_URLS = {
     "anthropic": "https://console.anthropic.com/settings/keys",
 }
 
-GITHUB_TOKEN_URL = "https://github.com/settings/personal-access-tokens"
-
 GITHUB_REMOTE_RE = re.compile(r"github\.com[:/]([^/\s]+/[^/\s]+?)(?:\.git)?/?$")
 
 
