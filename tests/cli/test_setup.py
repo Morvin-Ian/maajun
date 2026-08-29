@@ -6,8 +6,10 @@ from typer.testing import CliRunner
 from maajun.auth import AuthManager
 from maajun.cli import app
 from maajun.cli.setup import (
+    catalog_line,
     detect_repo_from_git,
     model_line,
+    pick_from_gateway,
     pick_provider,
     setup_model,
     split_by_kind,
@@ -16,6 +18,7 @@ from maajun.cli.shared import Asker, implemented_providers
 from maajun.config import Config, DeploymentConfig, RepoConfig
 from maajun.discovery import Discovered
 from maajun.inspection import Inspection
+from maajun.providers.catalog import CatalogEntry
 
 runner = CliRunner()
 
@@ -692,3 +695,119 @@ def test_nothing_is_listed_when_nobody_is_there_to_read_it(capsys):
     ask = Asker(interactive=False)
     assert pick_provider(ask, implemented_providers(), "openai") == "openai"
     assert capsys.readouterr().out == ""
+
+
+# ---------------------------------------------------------------------------
+# A gateway's fetched catalogue
+# ---------------------------------------------------------------------------
+
+
+class Replies(Asker):
+    """An Asker that answers each prompt in turn."""
+
+    def __init__(self, *replies: str):
+        super().__init__(interactive=True)
+        self.replies = list(replies)
+        self.prompts: list[str] = []
+
+    def text(self, prompt: str, default: str = "") -> str:
+        self.prompts.append(prompt)
+        return self.replies.pop(0) if self.replies else default
+
+
+def entry(model_id, vendor, input_rate=1.0, output_rate=5.0):
+    return CatalogEntry(id=model_id, vendor=vendor, input=input_rate, output=output_rate)
+
+
+CATALOG = (
+    entry("anthropic/claude-opus-5", "anthropic", 5.0, 25.0),
+    entry("anthropic/claude-haiku-4.5", "anthropic", 1.0, 5.0),
+    entry("openai/gpt-5.2", "openai", 1.75, 14.0),
+)
+
+
+def gateway():
+    from maajun.cli.setup import provider_class
+
+    return provider_class("openrouter")
+
+
+def test_a_gateway_lists_vendors_first_then_that_vendors_models(capsys):
+    """396 models do not fit in one list, and their own catalogues are
+    grouped this way too."""
+    ask = Replies("1", "2")
+
+    # Sorted by id, so within anthropic the second is opus, not haiku.
+    assert pick_from_gateway(ask, gateway(), CATALOG, None) == "anthropic/claude-opus-5"
+
+    output = flat(capsys.readouterr().out)
+    assert "3 models from 2 vendors" in output
+    assert "1. anthropic (2)" in output
+    assert "2. openai (1)" in output
+    # The models of the vendor picked, and only those.
+    assert "claude-haiku-4.5" in output
+    assert "gpt-5.2" not in output
+
+
+def test_an_id_typed_at_the_vendor_prompt_skips_the_second_step():
+    ask = Replies("openai/gpt-5.4")
+    assert pick_from_gateway(ask, gateway(), CATALOG, None) == "openai/gpt-5.4"
+    assert len(ask.prompts) == 1
+
+
+def test_an_id_typed_at_the_model_prompt_is_taken_as_it_is():
+    ask = Replies("1", "anthropic/claude-opus-5:batch")
+    chosen = pick_from_gateway(ask, gateway(), CATALOG, None)
+    assert chosen == "anthropic/claude-opus-5:batch"
+
+
+def test_answering_nothing_leaves_the_model_unset():
+    assert pick_from_gateway(Replies("", ""), gateway(), CATALOG, None) is None
+
+
+def test_setup_model_reads_the_catalogue_when_there_is_a_key(monkeypatch):
+    config = Config()
+    monkeypatch.setattr(
+        "maajun.cli.setup.fetch_catalog", lambda base_url, api_key: CATALOG
+    )
+
+    setup_model(Replies("2", "1"), config, "openrouter", None, api_key="k")
+
+    assert config.ai.model == "openai/gpt-5.2"
+
+
+def test_setup_model_asks_for_an_id_when_the_catalogue_cannot_be_read(monkeypatch):
+    """An unreachable gateway costs a nicer prompt, not a failed setup."""
+    config = Config()
+    monkeypatch.setattr("maajun.cli.setup.fetch_catalog", lambda base_url, api_key: ())
+
+    ask = Replies("anthropic/claude-opus-5")
+    setup_model(ask, config, "openrouter", None, api_key="k")
+
+    assert config.ai.model == "anthropic/claude-opus-5"
+    assert any("e.g." in prompt for prompt in ask.prompts)
+
+
+def test_an_unpriced_choice_repeats_what_the_gateway_charges(monkeypatch, capsys):
+    """Being shown a price and then told there is none reads as a bug."""
+    config = Config()
+    monkeypatch.setattr(
+        "maajun.cli.setup.fetch_catalog", lambda base_url, api_key: CATALOG
+    )
+
+    setup_model(Replies("2", "1"), config, "openrouter", None, api_key="k")
+
+    output = flat(capsys.readouterr().out)
+    assert "No published price for openai/gpt-5.2" in output
+    assert "gateway quotes $1.75 in / $14.00 out" in output
+
+
+def test_a_free_model_says_free_rather_than_zero_dollars():
+    line = catalog_line(entry("z-ai/glm-5.3-flash", "z-ai", 0.0, 0.0))
+    assert "free" in line
+
+
+def test_a_model_the_gateway_does_not_price_says_so():
+    line = catalog_line(CatalogEntry(id="x/y", vendor="x", input=None, output=None))
+    assert "not quoted" in line
+
