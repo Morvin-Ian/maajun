@@ -536,6 +536,11 @@ class Config(Base):
                 "Use 'maajun add-repo <owner/name>' to add one."
             )
         set_field(obj, field_name, value)
+        if obj is self.ai and field_name == "provider":
+            # A model belongs to the provider it was chosen for, and sending
+            # one provider's model id to another only fails on the first real
+            # call. Chat's /provider already clears it.
+            self.ai.model = None
 
     def get(self, key: str, repo: str | None = None) -> str:
         """Get a config value using dot notation. Secrets are masked."""
