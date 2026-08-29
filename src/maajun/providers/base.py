@@ -8,7 +8,6 @@ from typing import Any
 class ProviderType(Enum):
     """Declaration order is the order they are offered in, cheapest first."""
 
-    OX_ALPHA = "ox-alpha"
     DEEPSEEK = "deepseek"
     OPENAI = "openai"
     ANTHROPIC = "anthropic"
@@ -51,7 +50,6 @@ class AIProvider(ABC):
     base_url: str | None = None
     default_model: str = ""
     thinking_model: str = ""
-    free: bool = False  # offered first, and never weighed against a paid one
 
     def __init__(self, config: dict[str, Any]):
         self.config = config

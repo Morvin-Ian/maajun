@@ -709,8 +709,8 @@ priced at its cache-hit rate rather than in full — most of an
 investigation's input, since every tool round resends a growing prefix —
 tokens Anthropic stored into its cache at the write rate, and DeepSeek's
 off-peak half price applied from the clock. The `prompt_tokens` column is the
-total either way; only `cost_usd` reflects the split. On Ox Alpha every row
-records zero, because nothing is billed. The cost is also logged when the PR opens, and `--dry-run`
+total either way; only `cost_usd` reflects the split. The cost is also
+logged when the PR opens, and `--dry-run`
 logs what an analysis would have cost. To audit spend:
 
 ```bash

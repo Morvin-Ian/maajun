@@ -42,7 +42,7 @@ def default_data_dir() -> Path:
 
 
 class AIProviderConfig(Base):
-    provider: str = ProviderType.OX_ALPHA.value
+    provider: str = ProviderType.DEEPSEEK.value
     model: str | None = None
     # Model for the one-line "is this even a defect?" screen. Unset means the
     # provider's own base model, which is the cheap tier for all of them.
