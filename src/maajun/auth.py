@@ -26,11 +26,6 @@ def credentials_file() -> Path:
 
 
 def keyring_works() -> bool:
-    """Whether this machine has a keyring that can actually hold a secret.
-
-    A headless server usually does not, and finding that out *after* someone
-    has typed a key is how a secret gets thrown away.
-    """
     try:
         backend = keyring.get_keyring()
     except Exception:
@@ -54,7 +49,6 @@ def read_file_store() -> dict[str, str]:
 
 
 def write_file_store(values: dict[str, str]) -> None:
-    """Replace the file, never widening its permissions."""
     path = credentials_file()
     path.parent.mkdir(parents=True, exist_ok=True)
     os.chmod(path.parent, DIR_MODE)
@@ -67,7 +61,6 @@ def write_file_store(values: dict[str, str]) -> None:
 
 
 def file_store_in_use() -> bool:
-    """Whether credentials are being kept in maajun's own file."""
     return credentials_file().exists()
 
 
@@ -81,13 +74,6 @@ def get_stored(name: str) -> str | None:
 
 
 def set_stored(name: str, value: str) -> None:
-    """Store a secret where this machine can keep it.
-
-    The keyring when there is one, and maajun's own file when there is not —
-    which on a server is most of the time. Failing instead would be correct
-    only if there were something better to do, and there is not: the usual
-    advice, keyrings.alt, is the same file with an extra package in front.
-    """
     try:
         keyring.set_password(SERVICE_NAME, name, value)
         return
@@ -115,7 +101,6 @@ def delete_stored(name: str) -> None:
 
 
 def install_backend_command() -> str:
-    """How to add a keyring backend, for the way maajun was installed."""
     prefix = sys.prefix
     if "/pipx/" in prefix or "\\pipx\\" in prefix:
         return "pipx inject maajun keyrings.alt"
@@ -188,7 +173,6 @@ class AuthManager:
         return self.gh_token or None
 
     def github_token_source(self) -> str:
-        """Where the token comes from: "keyring", "file", "gh", or ""."""
         try:
             if keyring.get_password(SERVICE_NAME, GITHUB_KEY_NAME):
                 return "keyring"
@@ -206,7 +190,6 @@ class AuthManager:
 
     def clear_github_token(self) -> None:
         delete_stored(GITHUB_KEY_NAME)
-        # Only maajun's own copy is cleared; a gh login is not ours to undo.
         self.gh_token = None
 
     def clear_all(self) -> None:

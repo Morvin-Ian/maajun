@@ -234,7 +234,7 @@ def login(
         raise typer.Exit(1)
 
     config.save(path)
-    repos = config.github.get_all_repos()
+    repos = config.github.repos
     if not repos:
         console.print(
             "\n[dim]No repository configured yet. "

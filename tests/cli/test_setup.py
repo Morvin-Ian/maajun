@@ -115,7 +115,7 @@ def test_setup_never_writes_the_placeholder_repo(fake_keyring, api_key, tmp_path
     runner.invoke(app, ["setup", "--non-interactive", "--config", str(config_path)])
 
     assert 'repo = "owner/name"' not in config_path.read_text()
-    assert Config.load(config_path).github.get_all_repos() == []
+    assert Config.load(config_path).github.repos == []
 
 
 def test_setup_records_repo_logs_and_mode(fake_keyring, api_key, tmp_path):
@@ -131,7 +131,7 @@ def test_setup_records_repo_logs_and_mode(fake_keyring, api_key, tmp_path):
     assert result.exit_code == 0, result.output
 
     config = Config.load(config_path)
-    repos = config.github.get_all_repos()
+    repos = config.github.repos
     assert repos[0].repo == "acme/webapp"
     assert repos[0].mode == "fix"
     assert repos[0].base_branch == "develop"
@@ -146,7 +146,7 @@ def test_setup_rejects_a_malformed_repo_without_aborting(fake_keyring, api_key, 
     ])
     assert result.exit_code == 0, result.output
     assert "owner/name form" in result.output
-    assert Config.load(config_path).github.get_all_repos() == []
+    assert Config.load(config_path).github.repos == []
 
 
 def test_setup_rejects_an_unknown_provider(fake_keyring, api_key, tmp_path):
@@ -169,8 +169,8 @@ def test_setup_is_idempotent(fake_keyring, api_key, no_git_detect, tmp_path):
     runner.invoke(app, args)
 
     config = Config.load(config_path)
-    assert len(config.github.get_all_repos()) == 1
-    assert config.github.get_all_repos()[0].mode == "fix"
+    assert len(config.github.repos) == 1
+    assert config.github.repos[0].mode == "fix"
 
 
 def test_setup_preserves_a_second_repo(fake_keyring, api_key, tmp_path):
@@ -184,7 +184,7 @@ def test_setup_preserves_a_second_repo(fake_keyring, api_key, tmp_path):
         "--repo", "acme/second",
     ])
 
-    repos = [rc.repo for rc in Config.load(config_path).github.get_all_repos()]
+    repos = [rc.repo for rc in Config.load(config_path).github.repos]
     assert repos == ["acme/first", "acme/second"]
 
 
@@ -262,7 +262,7 @@ def test_setup_records_a_test_command(fake_keyring, api_key, tmp_path):
         "--repo", "acme/webapp", "--mode", "fix", "--test-command", "pytest -q",
     ])
     assert result.exit_code == 0, result.output
-    assert Config.load(config_path).github.get_all_repos()[0].test_command == "pytest -q"
+    assert Config.load(config_path).github.repos[0].test_command == "pytest -q"
 
 
 def test_fix_mode_without_a_test_command_warns(fake_keyring, api_key, tmp_path):

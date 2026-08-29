@@ -577,7 +577,7 @@ class ChatSession:
 
 
     def greet(self) -> None:
-        repos = [rc.repo for rc in self.config.github.get_all_repos()]
+        repos = [rc.repo for rc in self.config.github.repos]
         where = ", ".join(repos) if repos else "local mode (no repo configured)"
         self.console.print(Panel(
             "[bold]Maajun chat[/bold]\n\n"

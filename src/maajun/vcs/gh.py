@@ -27,7 +27,6 @@ Install the GitHub CLI and log in once — maajun then needs no token of its own
 
 
 def gh_token() -> str:
-    """The token from a `gh` login, or "" if gh is absent or logged out."""
     result = run_text(["gh", "auth", "token"], timeout=10)
     if result.error:
         log.debug("no gh token: %s", result.error)
