@@ -319,7 +319,7 @@ the choice is made with the cost in view:
   Models:
     1. claude-haiku-4-5 — $1.00 in / $5.00 out per 1M tokens (default)
        The fastest and cheapest Claude.
-    2. claude-sonnet-5 — $3.00 in / $15.00 out per 1M tokens
+    2. claude-sonnet-5 — $2.00 in / $10.00 out per 1M tokens
        Mid tier: more capable than Haiku, well under Opus in price.
     3. claude-opus-5 — $5.00 in / $25.00 out per 1M tokens (thinking_mode picks this)
        The most capable, and the dearest.
@@ -504,7 +504,7 @@ maajun counts each from the token counts the provider reports.
 | `gpt-4o-mini` | $0.15 | $0.075 | $0.15 | $0.60 |
 | `gpt-4o` | $2.50 | $1.25 | $2.50 | $10.00 |
 | `claude-haiku-4-5` | $1.00 | $0.10 | $1.25 | $5.00 |
-| `claude-sonnet-5` | $3.00 | $0.30 | $3.75 | $15.00 |
+| `claude-sonnet-5` | $2.00 | $0.20 | $2.50 | $10.00 |
 | `claude-opus-5` | $5.00 | $0.50 | $6.25 | $25.00 |
 
 Anthropic is the one provider that charges to *write* the cache — 1.25x a
