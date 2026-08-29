@@ -38,13 +38,6 @@ class ChatCompletionsProvider(AIProvider):
         self.client: AsyncOpenAI | None = None
         self.stream_usage = True
 
-    def prepared_tools(self, tools: list[ToolDefinition] | None) -> list[dict[str, Any]] | None:
-        # Not memoized on id(tools): CPython reuses freed addresses, so a
-        # cache could serve stale tools.
-        if not tools:
-            return None
-        return self.prepare_tools(tools)
-
     async def initialize(self) -> None:
         if not self.api_key:
             raise ProviderError("API key is required. Run `maajun setup` to set one.")
