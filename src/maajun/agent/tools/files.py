@@ -5,8 +5,12 @@ import asyncio
 from maajun.agent.tools.base import Tool, json_schema, resolve_path
 from maajun.providers.base import ToolDefinition
 
+# Lines returned when the call does not say. A result is resent every round
+# of the tool loop, so a whole large file is paid for dozens of times.
+DEFAULT_READ_LIMIT = 400
 
-async def read_file(path: str, offset: int = 0, limit: int = 2000) -> str:
+
+async def read_file(path: str, offset: int = 0, limit: int = DEFAULT_READ_LIMIT) -> str:
     p = resolve_path(path)
     if not p.exists():
         return f"Error: {p} does not exist"
@@ -30,8 +34,11 @@ READ_FILE: Tool = Tool(
     ToolDefinition(
         name="read_file",
         description=(
-            "Read a file's contents. Returns numbered lines. "
-            "Use offset/limit for large files."
+            "Read a file's contents. Returns numbered lines, "
+            f"{DEFAULT_READ_LIMIT} of them unless limit says otherwise. "
+            "When you know the line you want — a traceback frame, a grep hit "
+            "— pass offset to read around it instead of reading the file "
+            "whole; the header says how many lines it has either way."
         ),
         parameters=json_schema(
             {
@@ -42,7 +49,7 @@ READ_FILE: Tool = Tool(
                 },
                 "limit": {
                     "type": "integer",
-                    "description": "Max lines to return (default 2000)",
+                    "description": "Max lines to return (default 400)",
                 },
             },
             required=["path"],
