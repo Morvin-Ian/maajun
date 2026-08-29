@@ -178,7 +178,7 @@ class Daemon:
         self.github = github
         self.agent_factory_for_repo = agent_factory_for_repo
         self.screen_factory = screen_factory
-        self.repo_configs = repo_configs or config.github.get_all_repos()
+        self.repo_configs = repo_configs or config.github.repos
         self.report_dir = report_dir or Path(config.daemon.workdir).expanduser() / "reports"
         self.local_mode = local_mode
         self.progress = progress or no_operation

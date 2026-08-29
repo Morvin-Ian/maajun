@@ -180,7 +180,7 @@ def setup_github(
     test_command: str | None,
     reconfigure: bool,
 ) -> None:
-    existing = config.github.get_all_repos()
+    existing = config.github.repos
     current = existing[0].repo if existing else ""
     # A suggestion only; adopting the surrounding checkout silently would
     # be a surprising side effect.
@@ -310,7 +310,7 @@ def setup_error_sources(
 ) -> None:
     # Always: without knowing where this app's errors land, the daemon has
     # nothing to watch, and a finished setup would be a lie.
-    for entry in config.github.get_all_repos():
+    for entry in config.github.repos:
         record_deployment(entry, config, auth)
 
     # Only asked when it is still needed: a repo that already knows where its
@@ -424,7 +424,7 @@ def start_watching(config: Config, config_path: Path) -> None:
 
 
 def print_summary(config: Config, auth: AuthManager) -> bool:
-    repos = config.github.get_all_repos()
+    repos = config.github.repos
     has_token = auth.has_github_token()
     sections, ok = build_status(
         config,

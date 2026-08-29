@@ -23,7 +23,7 @@ def test_all_green(tmp_path):
         github=GitHubConfig(repos=[RepoConfig(repo="owner/name")]),
         monitor=MonitorConfig(log_files=[str(logf)]),
     )
-    repos = config.github.get_all_repos()
+    repos = config.github.repos
 
     sections, ok = build_status(
         config, provider="deepseek", has_key=True, has_token=True,
@@ -42,7 +42,7 @@ def test_missing_credentials_fail(tmp_path):
                     monitor=MonitorConfig(log_files=[str(tmp_path / "a.log")]))
     sections, ok = build_status(
         config, provider="deepseek", has_key=False, has_token=False,
-        repos=config.github.get_all_repos(), network=None,
+        repos=config.github.repos, network=None,
     )
     assert ok is False
 
@@ -79,7 +79,7 @@ def test_missing_log_file_is_warning_not_failure(tmp_path):
     )
     sections, ok = build_status(
         config, provider="deepseek", has_key=True, has_token=True,
-        repos=config.github.get_all_repos(), network=("x", {"owner/name": True}),
+        repos=config.github.repos, network=("x", {"owner/name": True}),
     )
     # A missing log file is informational; overall status stays green.
     assert ok is True
@@ -98,7 +98,7 @@ def test_reachability_not_checked_does_not_fail(tmp_path):
     )
     sections, ok = build_status(
         config, provider="deepseek", has_key=True, has_token=True,
-        repos=config.github.get_all_repos(), network=None,  # skipped probe
+        repos=config.github.repos, network=None,  # skipped probe
     )
     assert ok is True
     assert any("reachability not checked" in c.detail for s in sections for c in s.checks)
@@ -113,7 +113,7 @@ def test_cannot_push_fails(tmp_path):
     )
     sections, ok = build_status(
         config, provider="deepseek", has_key=True, has_token=True,
-        repos=config.github.get_all_repos(), network=("morvin", {"owner/name": False}),
+        repos=config.github.repos, network=("morvin", {"owner/name": False}),
     )
     assert ok is False
 

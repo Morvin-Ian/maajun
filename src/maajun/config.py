@@ -24,84 +24,6 @@ class ConfigError(ValueError):
     """A config file that cannot be used as written."""
 
 
-STARTER_CONFIG = """\
-# Maajun daemon configuration.
-
-[ai]
-provider = "ox-alpha"
-# thinking_mode = true
-# Model for the cheap pre-investigation screen (default: the provider's own
-# base model).
-# triage_model = "claude-haiku-4-5"
-
-# Repositories the daemon documents errors in and opens PRs against. One
-# [[github.repos]] entry each, added with `maajun add-repo owner/name`.
-# Optional: with no entries, maajun analyzes errors and writes reports under
-# daemon.workdir instead of opening pull requests.
-# [[github.repos]]
-# repo = "owner/name"
-# base_branch = "main"
-# "suggest": a GitHub issue with the incident report and suggested fix.
-# "fix": the agent also edits code in its isolated clone and opens a PR.
-# mode = "suggest"
-# Log files watched for this repo, on top of the global monitor.log_files.
-# log_files = ["/var/log/myapp/error.log"]
-# Run after a fix-mode edit to verify it; the result goes in the PR body.
-# test_command = "pytest -q"
-
-# How and where this repo is deployed, and where its runtime errors land.
-# Fill it in with `maajun discover --repo owner/name --save`.
-# [github.repos.deployment]
-# path = "/srv/myapp"          # the app's folder on the server
-# port = 8000                  # what it listens on
-# runs = "docker compose"      # free text: how it is started
-# stack = "Django 5 + gunicorn"  # what it is built with, from reading the code
-# Errors reach maajun from any mix of these three, whatever the deploy
-# method: a file, a systemd unit's journal, or a container's stdout.
-# log_files = ["/srv/myapp/logs/error.log", "/var/log/nginx/error.log"]
-# journald_units = ["myapp.service"]
-# docker_containers = ["myapp-web-1"]
-# Set runtime = "none" to say a repo deliberately has no runtime source,
-# which is the only thing that silences the `maajun status` failure.
-
-[monitor]
-# Log files to watch for tracebacks and error lines.
-log_files = ["/var/log/myapp/error.log"]
-error_pattern = "\\\\b(ERROR|CRITICAL|FATAL)\\\\b"
-poll_interval = 30
-
-# Detection tuning (optional).
-# json_level_field = "level"        # also match structured JSON logs
-# json_level_values = "error,critical,fatal"
-# burst_threshold = 1               # only report after N errors in the window
-# burst_window_seconds = 60
-
-[daemon]
-# Where clones, the incident database, and state live.
-# workdir = "~/.local/share/maajun"
-# Local checkout to analyze when no repositories are configured (default: cwd).
-# repo_path = "/srv/myapp"
-# Stop analyzing once this much has been spent in a UTC day (0 = no cap).
-# max_usd_per_day = 5.0            # default: 5.0
-# Most one incident may spend before it has to report from what it has read
-# (0 = no cap). The daily cap is only read between incidents.
-# max_usd_per_incident = 1.0       # default: 1.0
-# Most incidents analyzed per poll cycle (0 = unlimited).
-# max_incidents_per_cycle = 10
-# Ask a cheap model whether each new error is a defect at all before paying
-# for the investigation. What it sets aside is listed by
-# `maajun incidents --ignored`, with the reason.
-# screen_errors = true             # default: true
-# Report an error again if it returns after this long away (0 = never).
-# reopen_after_days = 7.0
-
-[chat]
-# Stop answering in `maajun chat` once this much has been spent in a UTC day
-# (0 = no cap). Separate from the daemon's budget.
-# max_usd_per_day = 5.0
-"""
-
-
 class Base(BaseModel):
     """Base model that re-validates on assignment so `config.set(...)` and
     direct attribute writes are checked against the field validators."""
@@ -198,25 +120,17 @@ class RepoConfig(Base):
     test_command: str = ""
     deployment: DeploymentConfig = Field(default_factory=DeploymentConfig)
 
-    def runtime_log_files(self) -> list[str]:
-        """Files watched for this repo: the older spelling plus deployment.
+    def runtime_sources(self) -> list[tuple[str, str]]:
+        """Every runtime error source for this repo, as (kind, target).
 
         `log_files` on the repo predates the deployment block and stays
         supported, so a config written before this exists keeps working.
         """
-        merged = list(self.log_files)
-        merged.extend(
-            path for path in self.deployment.log_files if path not in merged
-        )
-        return merged
-
-    def runtime_sources(self) -> list[tuple[str, str]]:
-        """Every runtime error source for this repo, as (kind, target)."""
-        return [
-            *(("file", path) for path in self.runtime_log_files()),
-            *(("journald", unit) for unit in self.deployment.journald_units),
-            *(("docker", name) for name in self.deployment.docker_containers),
-        ]
+        sources = [("file", path) for path in self.log_files]
+        for source in self.deployment.sources():
+            if source not in sources:
+                sources.append(source)
+        return sources
 
     @field_validator("mode")
     @classmethod
@@ -269,9 +183,6 @@ class GitHubConfig(Base):
         if value not in ("auto", "ssh", "https"):
             raise ValueError('transport must be "auto", "ssh", or "https"')
         return value
-
-    def get_all_repos(self) -> list[RepoConfig]:
-        return self.repos
 
 
 class MonitorConfig(Base):
@@ -478,7 +389,7 @@ class Config(Base):
         first repo. `repos` overrides the configured list for local mode,
         which runs against one synthetic entry.
         """
-        repos = self.github.get_all_repos() if repos is None else repos
+        repos = self.github.repos if repos is None else repos
         shared = [("file", path) for path in self.monitor.log_files]
         if not repos:
             return [(None, shared)]
