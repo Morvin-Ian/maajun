@@ -367,17 +367,41 @@ vendors' models.
 | API key | [openrouter.ai](https://openrouter.ai/settings/keys) | [straitly.ai](https://straitly.ai/) | [chat.b.ai](https://chat.b.ai) |
 
 None has a default model — their catalogues change, and nothing here should
-guess which one your key can reach — so `ai.model` is required:
+guess which one your key can reach — so `ai.model` is required.
+
+Rather than ship a list that goes stale, `maajun setup` asks the gateway
+itself: every one of them serves `GET /v1/models`, which names each model and
+prices it. Vendor first, because a gateway carries hundreds:
+
+```
+  openrouter carries 396 models from 51 vendors:
+    1. anthropic (32)
+    2. deepseek (17)
+    ...
+  > Vendor (number, or a model id to skip ahead): 1
+
+  Models:
+    1. anthropic/claude-haiku-4.5 — $1.00 in / $5.00 out per 1M tokens
+    2. anthropic/claude-opus-5 — $5.00 in / $25.00 out per 1M tokens
+    ...
+  > Model (number, or an id):
+```
+
+Either prompt also takes an id outright, and a gateway that cannot be reached
+falls back to asking for one. `--model` skips the whole step:
 
 ```bash
 maajun setup --provider openrouter --model anthropic/claude-opus-5
 maajun setup --provider bai --model gpt-5.2
 ```
 
-Costs still come from the table below: `anthropic/claude-opus-5` is priced as
-`claude-opus-5`. BAI drops the vendor prefix, so its ids are looked up as
-they are. A model with no entry is costed at the dearest rate maajun knows,
-and setup says so when you pick one.
+The prices in that list are the gateway's own — a reseller discounts some
+models and gives others away — but the spend cap still costs a run from the
+table below, which it reaches through both the vendor prefix and the dots a
+gateway writes versions with: `anthropic/claude-haiku-4.5` is priced as
+`claude-haiku-4-5`. A model with no entry there is costed at the dearest rate
+maajun knows, and setup says so, alongside what the gateway quoted, when you
+pick one.
 
 Switch at any time — the key for each provider is stored separately, so moving
 back and forth costs nothing:
