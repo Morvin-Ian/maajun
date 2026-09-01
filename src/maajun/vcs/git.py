@@ -8,6 +8,8 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
+from maajun.vcs.github import GitHubClient, GitHubError
+
 ASKPASS_SCRIPT = '#!/bin/sh\necho "$MAAJUN_GIT_TOKEN"\n'
 
 COMMIT_AUTHOR = "maajun"
@@ -47,6 +49,7 @@ class GitWorkspace:
         self.remote_url = remote_url or f"https://x-access-token@github.com/{repo}.git"
         self.path = self.root / repo.replace("/", "__")
         self.env: dict[str, str] | None = None
+        self.commit_email: str | None = None
 
     def auth_env(self) -> dict[str, str]:
         """Build the git environment once and reuse it across commands.
@@ -192,12 +195,35 @@ class GitWorkspace:
             raise GitError(f"git apply failed: {proc.stderr.strip()}")
 
     async def commit_all(self, message: str) -> None:
+        commit_email = await self.resolve_commit_email()
         await self.git("add", "-A")
         await self.git(
             "-c", f"user.name={COMMIT_AUTHOR}",
-            "-c", f"user.email={COMMIT_EMAIL}",
+            "-c", f"user.email={commit_email}",
             "commit", "-m", message,
         )
+
+    async def resolve_commit_email(self) -> str:
+        """Attribute generated commits to the GitHub account doing the push.
+
+        The visible author remains maajun. GitHub maps its ID-based noreply
+        address back to the authenticated user, which lets deployment tools
+        verify that the commit author can access their project.
+        """
+        if self.commit_email:
+            return self.commit_email
+        if not self.token:
+            return COMMIT_EMAIL
+
+        client = GitHubClient(self.token)
+        try:
+            account = await client.authenticated_account()
+        except GitHubError as error:
+            raise GitError(f"could not identify GitHub commit author: {error}") from error
+        finally:
+            await client.aclose()
+        self.commit_email = account.noreply_email
+        return self.commit_email
 
     async def push(self, branch: str) -> None:
         await self.git("push", "--force-with-lease", "origin", f"{branch}:{branch}")

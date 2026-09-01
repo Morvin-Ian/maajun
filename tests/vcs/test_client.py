@@ -13,10 +13,20 @@ def make_client(handler):
 async def test_validate_token_returns_login():
     def handler(request):
         assert request.headers["Authorization"] == "Bearer token"
-        return httpx.Response(200, json={"login": "morvin"})
+        return httpx.Response(200, json={"login": "morvin", "id": 123})
 
     client = make_client(handler)
     assert await client.validate_token() == "morvin"
+
+
+async def test_authenticated_account_has_a_github_noreply_email():
+    client = make_client(
+        lambda request: httpx.Response(200, json={"login": "morvin", "id": 123})
+    )
+
+    account = await client.authenticated_account()
+
+    assert account.noreply_email == "123+morvin@users.noreply.github.com"
 
 
 async def test_validate_token_rejects_bad_token():
@@ -87,7 +97,7 @@ async def test_client_is_reused_across_requests():
 
     def handler(request):
         calls["n"] += 1
-        return httpx.Response(200, json={"login": "morvin"})
+        return httpx.Response(200, json={"login": "morvin", "id": 123})
 
     client = make_client(handler)
     await client.validate_token()
@@ -99,7 +109,9 @@ async def test_client_is_reused_across_requests():
 
 
 async def test_aclose_releases_client():
-    client = make_client(lambda request: httpx.Response(200, json={"login": "x"}))
+    client = make_client(
+        lambda request: httpx.Response(200, json={"login": "x", "id": 123})
+    )
     await client.validate_token()
     assert client.client is not None
     await client.aclose()

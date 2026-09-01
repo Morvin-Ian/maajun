@@ -3,6 +3,7 @@ import subprocess
 import pytest
 
 from maajun.vcs import GitError, GitWorkspace
+from maajun.vcs.github import GitHubAccount
 
 
 async def test_run_command_captures_output_and_exit_code(tmp_path):
@@ -221,3 +222,27 @@ async def test_committed_files_is_empty_on_the_base_branch(tmp_path):
     await workspace.sync("main")
 
     assert await workspace.committed_files("main") == []
+
+
+async def test_commits_use_the_authenticated_github_accounts_noreply_email(
+    monkeypatch, tmp_path
+):
+    class Client:
+        def __init__(self, token):
+            assert token == "github-token"
+
+        async def authenticated_account(self):
+            return GitHubAccount(login="octocat", user_id=583231)
+
+        async def aclose(self):
+            pass
+
+    monkeypatch.setattr("maajun.vcs.git.GitHubClient", Client, raising=False)
+    workspace = seeded_workspace(tmp_path)
+    workspace.token = "github-token"
+    (workspace.path / "main.py").write_text("items = [1]\n")
+
+    await workspace.commit_all("maajun: fix the cart")
+
+    author = await workspace.git("show", "-s", "--format=%an <%ae>")
+    assert author == "maajun <583231+octocat@users.noreply.github.com>"

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any
 
 import httpx
@@ -11,6 +12,16 @@ API_URL = "https://api.github.com"
 
 class GitHubError(Exception):
     """A GitHub API call failed. Message is safe to show the user."""
+
+
+@dataclass(frozen=True)
+class GitHubAccount:
+    login: str
+    user_id: int
+
+    @property
+    def noreply_email(self) -> str:
+        return f"{self.user_id}+{self.login}@users.noreply.github.com"
 
 
 class GitHubClient:
@@ -50,14 +61,23 @@ class GitHubClient:
     async def __aexit__(self, *exc: object) -> None:
         await self.aclose()
 
-    async def validate_token(self) -> str:
-        """Return the authenticated login, or raise GitHubError."""
+    async def authenticated_account(self) -> GitHubAccount:
+        """Return the account a token acts as, or raise GitHubError."""
         resp = await self.request("GET", "/user")
         if resp.status_code == 401:
             raise GitHubError("GitHub rejected the token. Check it and try again.")
         if resp.status_code != 200:
             raise GitHubError(f"GitHub /user returned {resp.status_code}: {resp.text[:200]}")
-        return resp.json().get("login", "")
+        data = resp.json()
+        login = data.get("login")
+        user_id = data.get("id")
+        if not isinstance(login, str) or not login or not isinstance(user_id, int):
+            raise GitHubError("GitHub /user did not return an account ID and login.")
+        return GitHubAccount(login=login, user_id=user_id)
+
+    async def validate_token(self) -> str:
+        """Return the authenticated login, or raise GitHubError."""
+        return (await self.authenticated_account()).login
 
     async def can_push(self, repo: str) -> bool:
         """Whether the token has push (contents write) access to the repo."""
