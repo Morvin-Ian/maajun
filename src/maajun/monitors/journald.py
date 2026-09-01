@@ -5,7 +5,7 @@ import time
 from pathlib import Path
 
 from maajun.monitors.cursors import cursor_path, usable
-from maajun.monitors.shell import CommandStreamMonitor
+from maajun.monitors.shell import CommandOutput, CommandStreamMonitor
 
 log = logging.getLogger(__name__)
 
@@ -53,11 +53,12 @@ class JournaldMonitor(CommandStreamMonitor):
         cmd = ["journalctl", "-u", self.unit, "--no-pager", "-o", "cat"]
         self.pending_since = time.time()
         if self.cursor_file:
-            cmd.append(f"--cursor-file={self.cursor_file}")
-            # Both flags together would let --since skip entries the cursor
-            # says are unread, so the window is only for the first run.
             if self.cursor_file.exists():
-                return cmd
+                return [*cmd, f"--cursor-file={self.cursor_file}"]
+            # --cursor-file and --since are mutually exclusive. Ask
+            # journalctl to print the cursor after the initial time window,
+            # then persist it in read_output for later polls.
+            cmd.append("--show-cursor")
         if self.backfill and not self.read_once:
             # The newest BACKFILL_LINES the journal still holds for this
             # unit. Guarded by read_once as well as the cursor, since without
@@ -65,6 +66,31 @@ class JournaldMonitor(CommandStreamMonitor):
             return [*cmd, "-n", str(BACKFILL_LINES)]
         cmd += ["--since", f"@{int(self.since)}"]
         return cmd
+
+    def read_output(self, output: CommandOutput) -> str:
+        text = super().read_output(output)
+        if not self.cursor_file or self.cursor_file.exists():
+            return text
+
+        lines = text.splitlines(keepends=True)
+        last_content = next(
+            (index for index in range(len(lines) - 1, -1, -1) if lines[index].strip()),
+            None,
+        )
+        if last_content is None:
+            return text
+
+        prefix = "-- cursor: "
+        marker = lines[last_content].strip()
+        if not marker.startswith(prefix):
+            return text
+
+        try:
+            self.cursor_file.write_text(marker.removeprefix(prefix))
+        except OSError as error:
+            log.debug("could not write %s: %s", self.cursor_file, error)
+        del lines[last_content]
+        return "".join(lines)
 
     def on_success(self) -> None:
         self.since = self.pending_since
