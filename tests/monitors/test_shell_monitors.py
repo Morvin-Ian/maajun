@@ -65,19 +65,22 @@ def test_a_non_zero_exit_reports_the_first_line_of_stderr():
 def test_journald_reads_a_window_until_a_cursor_exists(stub, tmp_path):
     """Reading the whole journal on first run would file every historical
     error at once, so a time window stands in until journalctl writes one."""
-    calls = stub()
+    calls = stub(CommandOutput(stdout=f"{TRACEBACK}-- cursor: s=abc\n"))
     monitor = JournaldMonitor("kfl.service", cursor_dir=tmp_path)
 
-    await_poll(monitor)
+    events = await_poll(monitor)
     assert "--since" in calls[0]
     cursor = cursor_path(tmp_path, "kfl.service")
-    assert f"--cursor-file={cursor}" in calls[0]
+    assert f"--cursor-file={cursor}" not in calls[0]
+    assert "--show-cursor" in calls[0]
+    assert cursor.read_text() == "s=abc"
+    assert len(events) == 1
+    assert "-- cursor:" not in events[0].details
 
-    cursor.write_text("s=abc")
     await_poll(monitor)
-    # Both flags together would let --since skip entries the cursor has not
-    # handed over yet.
+    assert f"--cursor-file={cursor}" in calls[1]
     assert "--since" not in calls[1]
+    assert "--show-cursor" not in calls[1]
 
 
 def test_journald_output_is_the_message_alone(stub, tmp_path):
