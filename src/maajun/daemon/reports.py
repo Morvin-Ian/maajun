@@ -8,6 +8,7 @@ from rich.console import Console
 
 from maajun.config import RepoConfig
 from maajun.daemon.followups import FollowUpTask
+from maajun.daemon.verification import VerificationCheck, VerificationSummary
 from maajun.monitors import ErrorEvent
 from maajun.render import render
 from maajun.utils import truncate, truncate_tail
@@ -307,10 +308,9 @@ def pr_body(
     repo_config: RepoConfig,
     event: ErrorEvent,
     report: str,
-    verification: CommandResult | None = None,
+    verification: VerificationSummary | None = None,
     *,
     previous_url: str = "",
-    unrelated_failure: bool = False,
     closes_issue_url: str = "",
 ) -> str:
     """Fix mode's artifact: the analysis, the test verdict, and provenance.
@@ -324,52 +324,96 @@ def pr_body(
         + (f"Fixes {closes_issue_url}\n\n" if closes_issue_url else "")
         + f"{report}\n\n---\n"
         "This PR contains the applied fix and the incident report.\n\n"
-        f"{verification_section(repo_config, verification, unrelated_failure)}"
+        f"{verification_section(repo_config, verification)}"
         f"{provenance(event)}"
     )
 
 
 def verification_section(
     repo_config: RepoConfig,
-    verification: CommandResult | None,
-    unrelated_failure: bool = False,
+    verification: VerificationSummary | None,
 ) -> str:
-    """A verdict on the fix, so the diff isn't reviewed on trust alone.
-
-    `unrelated_failure` says the suite failed without naming anything this
-    change touched, so no repair was attempted. A reviewer who is not told
-    reads a pre-existing red suite as a fact about the fix.
-    """
-    if verification is None:
+    """Every owner-configured verdict, rendered separately for review."""
+    if verification is None or not verification.configured:
         return (
-            "> ⚠️ **Unverified** — no `test_command` is configured for this "
-            "repo, so the fix was not tested.\n\n"
+            "> ⚠️ **Unverified** — no verification commands are configured "
+            "for this repo.\n\n"
         )
-    if verification.passed:
-        verdict = f"✅ **Tests pass** — `{repo_config.test_command}`"
-    elif verification.exit_code is None:
-        verdict = f"⚠️ **Could not run** `{repo_config.test_command}`"
+    sections = []
+    if verification.reproduction_command:
+        sections.append(reproduction_section(verification))
     else:
-        verdict = (
-            f"❌ **Tests fail** (exit {verification.exit_code}) — "
-            f"`{repo_config.test_command}`"
+        sections.append(
+            "> ℹ️ **Reproduction unconfigured** — no targeted before/after "
+            "command is set.\n"
         )
-        if unrelated_failure:
-            verdict += (
-                "\n\n> The failure names none of the files this change "
-                "touches, so the suite was most likely already red. No repair "
-                "was attempted; the output is below."
-            )
-    # The tail: what failed is printed last, which is what the details block
-    # was opened for.
+    sections.extend(
+        check_section(check, is_legacy_test=check.command == repo_config.test_command)
+        for check in verification.checks
+    )
+    if not verification.checks:
+        sections.append(
+            "> ⚠️ No post-fix verification commands are configured; only the "
+            "targeted reproduction was checked.\n"
+        )
+    return "## Verification\n\n" + "\n".join(sections)
+
+
+def command_output(result: CommandResult) -> str:
     output = truncate_tail(
-        verification.output, MAX_TEST_OUTPUT, "… (earlier output truncated)\n"
+        result.output, MAX_TEST_OUTPUT, "… (earlier output truncated)\n"
     )
     return (
-        f"{verdict}\n\n"
-        f"<details><summary>Output</summary>\n\n"
+        "<details><summary>Output</summary>\n\n"
         f"```\n{output or '(no output)'}\n```\n\n</details>\n\n"
     )
+
+
+def reproduction_section(verification: VerificationSummary) -> str:
+    command = verification.reproduction_command
+    before = verification.reproduction_before
+    after = verification.reproduction_after
+    if before is not None and before.exit_code is None and before.output.startswith("Timed out"):
+        before_verdict = "⚠️ **Before edit: timed out**"
+    elif before is None or before.exit_code is None:
+        before_verdict = "⚠️ **Before edit: inconclusive**"
+    elif before.exit_code == 0:
+        before_verdict = "⚠️ **Before edit: did not reproduce**"
+    else:
+        before_verdict = f"✅ **Before edit: reproduced** (exit {before.exit_code})"
+    if after is not None and after.exit_code is None and after.output.startswith("Timed out"):
+        after_verdict = "⚠️ **After edit: timed out**"
+    elif after is None or after.exit_code is None:
+        after_verdict = "⚠️ **After edit: inconclusive**"
+    elif after.exit_code == 0:
+        after_verdict = "✅ **After edit: no longer reproduces**"
+    else:
+        after_verdict = f"❌ **After edit: still reproduces** (exit {after.exit_code})"
+    outputs = ""
+    if before is not None:
+        outputs += "**Before edit output**\n\n" + command_output(before)
+    if after is not None:
+        outputs += "**After edit output**\n\n" + command_output(after)
+    return f"### Reproduction — `{command}`\n\n{before_verdict}\n\n{after_verdict}\n\n{outputs}"
+
+
+def check_section(check: VerificationCheck, *, is_legacy_test: bool) -> str:
+    noun = "Tests" if is_legacy_test else "Check"
+    result = check.result
+    if result.exit_code == 0:
+        verdict = f"✅ **{noun} pass**"
+    elif result.exit_code is None and result.output.startswith("Timed out"):
+        verdict = f"⚠️ **{noun} timed out**"
+    elif result.exit_code is None:
+        verdict = f"⚠️ **{noun} could not run**"
+    else:
+        verdict = f"❌ **{noun} fail** (exit {result.exit_code})"
+        if check.unrelated:
+            verdict += (
+                "\n\n> The failure names none of the files this change touches, "
+                "so it was most likely already failing. No repair was attempted."
+            )
+    return f"### `{check.command}`\n\n{verdict}\n\n{command_output(result)}"
 
 
 def report_markdown(event: ErrorEvent, report: str) -> str:

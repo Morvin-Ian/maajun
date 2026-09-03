@@ -666,6 +666,42 @@ def test_add_repo_records_a_test_command(fake_keyring, tmp_path):
     assert repo_config(config_path).test_command == "pytest -q"
 
 
+def test_add_repo_records_separate_verification_commands(fake_keyring, tmp_path):
+    config_path = tmp_path / "config.toml"
+
+    result = runner.invoke(app, [
+        "add-repo", "acme/api", "--config", str(config_path),
+        "--mode", "fix",
+        "--verify-command", "ruff check .",
+        "--verify-command", "mypy src",
+        "--reproduction-command", "pytest -q tests/test_bug.py",
+    ])
+
+    assert result.exit_code == 0, result.output
+    entry = repo_config(config_path)
+    assert entry.verification_commands == ["ruff check .", "mypy src"]
+    assert entry.reproduction_command == "pytest -q tests/test_bug.py"
+
+
+def test_readding_a_repo_leaves_verification_untouched_when_flags_are_omitted(
+    fake_keyring, tmp_path
+):
+    config_path = tmp_path / "config.toml"
+    runner.invoke(app, [
+        "add-repo", "acme/api", "--config", str(config_path),
+        "--verify-command", "ruff check .",
+        "--reproduction-command", "pytest -q tests/test_bug.py",
+    ])
+
+    runner.invoke(app, [
+        "add-repo", "acme/api", "--config", str(config_path), "--mode", "fix",
+    ])
+
+    entry = repo_config(config_path)
+    assert entry.verification_commands == ["ruff check ."]
+    assert entry.reproduction_command == "pytest -q tests/test_bug.py"
+
+
 def test_re_adding_a_repo_leaves_its_deployment_alone(fake_keyring, tmp_path):
     """The "None means leave as is" contract, extended to deployment flags."""
     config_path = tmp_path / "config.toml"

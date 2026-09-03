@@ -433,6 +433,14 @@ def add_repo(
         None, "--test-command",
         help="Command that verifies a fix-mode edit, e.g. 'pytest -q'",
     ),
+    verification_commands: list[str] | None = typer.Option(
+        None, "--verify-command",
+        help="Post-fix command to run independently; repeat for more commands",
+    ),
+    reproduction_command: str | None = typer.Option(
+        None, "--reproduction-command",
+        help="Command expected to fail before a fix and pass after it",
+    ),
     non_interactive: bool = typer.Option(
         False, "--non-interactive",
         help="Never prompt; take everything from flags and the host probes",
@@ -498,13 +506,24 @@ def add_repo(
         entry.deployment.docker_containers = containers
     if test_command is not None:
         entry.test_command = test_command
+    if verification_commands is not None:
+        entry.verification_commands = verification_commands
+    if reproduction_command is not None:
+        entry.reproduction_command = reproduction_command
 
     # Prompting is off unless a person is actually at the terminal. add-repo
     # is used from scripts and from the chat tool, and a prompt there would
     # hang waiting on a stdin nobody is typing into.
     ask = Asker(interactive=not non_interactive and at_a_terminal())
-    configure_repo(entry, config, AuthManager(), ask, asked_branch=base_branch,
-                   asked_mode=mode, asked_test_command=test_command)
+    configure_repo(
+        entry,
+        config,
+        AuthManager(),
+        ask,
+        asked_branch=base_branch,
+        asked_mode=mode,
+        asked_test_command=test_command,
+    )
 
     config.save(config_path)
 
@@ -547,9 +566,12 @@ def configure_repo(
         entry.test_command = ask.text(
             "Test command (Enter to skip)", entry.test_command
         )
-    if entry.mode == "fix" and not entry.test_command:
+    if entry.mode == "fix" and not (
+        entry.post_fix_commands() or entry.reproduction_command
+    ):
         console.print(
-            "  [yellow]⚠ No test command — fix-mode PRs will be marked "
+            "  [yellow]⚠ No test command or other verification commands — "
+            "fix-mode PRs will be marked "
             "unverified.[/yellow]"
         )
 

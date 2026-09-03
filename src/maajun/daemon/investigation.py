@@ -25,7 +25,7 @@ from maajun.daemon.followups import (
 )
 from maajun.daemon.prompts import (
     DEPLOYMENT_SECTION,
-    FAILED_TESTS_SUFFIX,
+    FAILED_VERIFICATION_SUFFIX,
     FIX_PROMPT_SUFFIX,
     FOLLOW_UP_RETRY_SUFFIX,
     REGRESSION_SECTION,
@@ -39,6 +39,7 @@ from maajun.daemon.store import (
     ARTIFACT_PR,
     ARTIFACT_REPORT,
 )
+from maajun.daemon.verification import VerificationCheck, VerificationSummary
 from maajun.monitors import ErrorEvent
 from maajun.providers.pricing import extract_usage
 from maajun.utils import truncate_tail
@@ -105,6 +106,7 @@ class Investigation:
     artifact_kind: str | None = None
     ignored_reason: str = ""
     follow_up_source: str = ""
+    reproduction_before: CommandResult | None = None
 
     def __post_init__(self) -> None:
         self.opens_pull_request = self.repo_config.mode == "fix"
@@ -120,6 +122,7 @@ class Investigation:
     async def run(self) -> str:
         """Returns the issue or PR URL, or "" when nothing was published."""
         await self.prepare()
+        await self.reproduce_before_edit()
         prompt = await self.build_prompt()
         self.progress("Analyzing with AI")
         agent_repo_config = self.repo_config
@@ -315,7 +318,7 @@ class Investigation:
         nothing was pushed and the caller files the analysis as an issue.
         """
         follow_ups = await self.prepare_follow_ups()
-        verification, unrelated = await self.verified_fix()
+        verification = await self.verified_fix()
         follow_ups = self.finalize_follow_ups(follow_ups)
         self.progress("Opening PR")
         # Filed apart: a reviewer should not have to work out which lines of
@@ -344,7 +347,6 @@ class Investigation:
             body=reports.pr_body(
                 self.repo_config, self.event, self.report, verification,
                 previous_url=self.previous["url"] if self.previous else "",
-                unrelated_failure=unrelated,
                 closes_issue_url=self.plan.closes_issue_url,
             ),
         )
@@ -446,37 +448,63 @@ class Investigation:
         log.info("applied %d patch(es) from the report", len(patches))
         return True
 
-    async def verified_fix(self) -> tuple[CommandResult | None, bool]:
-        """The test verdict for the PR body, and whether a repair was skipped.
+    async def verified_fix(self) -> VerificationSummary | None:
+        """Run every configured check, with at most one repair round.
 
-        A suite that ran and failed earns one repair round, then runs a second
-        and final time so a repair that made things worse cannot hide.
+        A still-reproducing bug always earns the round. Other failures earn it
+        only when they name an edited file, preserving the existing safeguard
+        against spending a repair on a suite that was already red.
         """
         verification = await self.verify()
-        if verification is None or verification.passed:
-            return verification, False
-        # Only a failure this run caused earns a repair round. A timed out or
-        # unstartable command earns none either — nothing actionable to send.
-        if verification.exit_code is None:
-            return verification, False
-        if not blames_our_edits(
-            verification.output, await self.workspace.changed_files()
-        ):
-            log.info(
-                "the failing suite for fp=%s names nothing this run changed; "
-                "skipping the repair round", self.event.fingerprint,
-            )
-            return verification, True
+        if verification is None:
+            return None
+        verification, repairable = await self.classify_failures(verification)
+        if not repairable:
+            return verification
         try:
-            await self.repair_failing_tests(verification)
+            await self.repair_failing_verification(repairable)
         except Exception:
             log.exception(
                 "repair round failed fp=%s; publishing the fix as it stands",
                 self.event.fingerprint,
             )
-        return await self.verify(), False
+        final = await self.verify()
+        if final is None:
+            return None
+        final, _ = await self.classify_failures(final)
+        return final
 
-    async def repair_failing_tests(self, verification: CommandResult) -> None:
+    async def classify_failures(
+        self, verification: VerificationSummary
+    ) -> tuple[VerificationSummary, list[VerificationCheck]]:
+        changed = await self.workspace.changed_files()
+        repairable: list[VerificationCheck] = []
+        reproduction = verification.reproduction_after
+        if reproduction and reproduction.exit_code not in (0, None):
+            repairable.append(VerificationCheck(
+                verification.reproduction_command, reproduction
+            ))
+
+        checks = []
+        for check in verification.checks:
+            unrelated = (
+                check.result.exit_code not in (0, None)
+                and not blames_our_edits(check.result.output, changed)
+            )
+            classified = VerificationCheck(check.command, check.result, unrelated)
+            checks.append(classified)
+            if check.result.exit_code not in (0, None) and not unrelated:
+                repairable.append(classified)
+        return VerificationSummary(
+            reproduction_command=verification.reproduction_command,
+            reproduction_before=verification.reproduction_before,
+            reproduction_after=verification.reproduction_after,
+            checks=tuple(checks),
+        ), repairable
+
+    async def repair_failing_verification(
+        self, failures: list[VerificationCheck]
+    ) -> None:
         """One round to let the agent fix its own fix before the PR ships.
 
         The suite output is what a reviewer would paste back anyway. The
@@ -484,18 +512,23 @@ class Investigation:
         insist_on_the_edit.
         """
         log.info(
-            "tests failed after the edit (exit %s); asking once for a repair",
-            verification.exit_code,
+            "%d verification command(s) failed after the edit; asking once for a repair",
+            len(failures),
         )
         self.progress("Repairing the failing tests")
         response = await self.ask(
-            FAILED_TESTS_SUFFIX.format(
-                command=self.repo_config.test_command,
-                status=verification.exit_code,
-                output=truncate_tail(
-                    verification.output,
-                    MAX_TEST_OUTPUT_IN_PROMPT,
-                    "… (earlier output truncated)\n",
+            FAILED_VERIFICATION_SUFFIX.format(
+                failures="\n\n".join(
+                    "`{command}` exited {status}:\n\n```\n{output}\n```".format(
+                        command=failure.command,
+                        status=failure.result.exit_code,
+                        output=truncate_tail(
+                            failure.result.output,
+                            MAX_TEST_OUTPUT_IN_PROMPT,
+                            "… (earlier output truncated)\n",
+                        ),
+                    )
+                    for failure in failures
                 ),
                 workspace=self.workspace.path,
             )
@@ -507,23 +540,48 @@ class Investigation:
         if not report_problem(second):
             self.report = second
 
-    async def verify(self) -> CommandResult | None:
-        """Run the repo's test_command against the agent's edits.
-
-        Not an agent capability: the command comes from config, so the model
-        cannot choose what runs. A failure is reported in the PR, not raised —
-        "the fix breaks the suite" is exactly the thing a reviewer needs to
-        see, and suppressing the PR would hide the analysis too.
-        """
-        if not self.repo_config.test_command:
-            return None
-        self.progress("Running tests")
-        result = await self.workspace.run_command(self.repo_config.test_command)
-        log.info(
-            "test_command %r exited %s in repo=%s",
-            self.repo_config.test_command, result.exit_code, self.repo_config.repo,
+    async def reproduce_before_edit(self) -> None:
+        """Run the owner-supplied reproduction before the agent changes code."""
+        if not self.applies_a_fix or not self.repo_config.reproduction_command:
+            return
+        self.progress("Reproducing issue")
+        self.reproduction_before = await self.workspace.run_command(
+            self.repo_config.reproduction_command
         )
-        return result
+
+    async def verify(self) -> VerificationSummary | None:
+        """Run reproduction and every post-fix command independently.
+
+        These are not agent capabilities: every command comes from owner config.
+        Failures are reported in the PR rather than raised, and one failure
+        never prevents later commands from running.
+        """
+        commands = self.repo_config.post_fix_commands()
+        reproduce = self.repo_config.reproduction_command
+        if not commands and not reproduce:
+            return None
+        reproduction_after = None
+        if reproduce:
+            self.progress("Checking reproduction")
+            reproduction_after = await self.workspace.run_command(reproduce)
+        checks = []
+        for index, command in enumerate(commands, start=1):
+            if command == self.repo_config.test_command:
+                self.progress("Running tests")
+            else:
+                self.progress(f"Running verification {index}/{len(commands)}")
+            result = await self.workspace.run_command(command)
+            log.info(
+                "verification command %r exited %s in repo=%s",
+                command, result.exit_code, self.repo_config.repo,
+            )
+            checks.append(VerificationCheck(command, result))
+        return VerificationSummary(
+            reproduction_command=reproduce,
+            reproduction_before=self.reproduction_before,
+            reproduction_after=reproduction_after,
+            checks=tuple(checks),
+        )
 
     async def prepare_follow_ups(self) -> list[FollowUpTask]:
         """Validate deferred tasks and give invalid ones one read-only rewrite."""

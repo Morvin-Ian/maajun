@@ -93,6 +93,8 @@ def config(
       maajun config github.mode fix      # Set mode to fix, on every repo
       maajun config github.mode fix -r acme/api          # ...on one repo
       maajun config github.test_command "pytest -q" -r acme/api
+      maajun config github.verification_commands "ruff check .,mypy src" -r acme/api
+      maajun config github.reproduction_command "pytest -q tests/test_bug.py" -r acme/api
       maajun config monitor.log_files /var/log/app/error.log,/var/log/app2/error.log
     """
     config = load_config(config_path)

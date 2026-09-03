@@ -337,18 +337,20 @@ maajun/
    and the pull request cannot disagree.
 10. **Publish** — depends on the repo's [mode](monitoring.md#modes). In
    `suggest` mode the report is filed as a GitHub **issue**: no branch, no
-   commit, no push, because there is no diff to review. In `fix` mode the
-   repo's `test_command` (if set) is run in the workspace first and its
-   verdict is put at the top of the PR body — it comes from config, not from
-   the model, since the agent has no shell access. A suite that ran and
-   failed earns one repair round — but only a failure this run caused. The
+   commit, no push, because there is no diff to review. In `fix` mode an
+   optional `reproduction_command` runs before and after the edit, then the
+   legacy `test_command` and ordered `verification_commands` each run
+   independently. Every verdict is put in the PR body. Commands come from
+   config, not from the model, since the agent has no shell access. A failed
+   post-fix check earns one repair round — but only when this run caused it.
+   A reproduction that still fails always earns that round. The
    agent has no shell, so it cannot tell its own breakage from a suite that
    was already red; `blames_our_edits` asks the output instead, and a failure
    that names none of the changed files is reported in the PR body as
    pre-existing rather than paid for. When it is ours, the failing output is
-   pasted back with `FAILED_TESTS_SUFFIX` — tail first, because a runner
-   prints what failed last — and the command runs a second and final time, so
-   a repair that did not help ships with its failure stated honestly.
+   pasted back with `FAILED_VERIFICATION_SUFFIX` — tail first, because a runner
+   prints what failed last — and all post-fix commands run a second and final
+   time, so a repair that did not help ships with its failures stated honestly.
 
    `reports.split_follow_up` then takes the "## Follow-up" section out of the
    report. `followups.parse_follow_ups` requires each deferred task to carry

@@ -111,6 +111,8 @@ repo = "team/api"
 base_branch = "main"
 mode = "fix"
 log_files = ["/var/log/api/error.log"]
+verification_commands = ["ruff check .", "pytest -q"]
+reproduction_command = "pytest -q tests/test_checkout_bug.py"
 
 [[github.repos]]
 repo = "team/web"
@@ -538,19 +540,22 @@ switch to `fix` once you trust the reports.
 
 ### Verifying a fix
 
-A fix-mode diff nobody ran is a diff reviewed on trust. Set `test_command`
-and maajun runs it in the workspace after the agent's edits, then puts the
-verdict at the top of the PR body:
+A fix-mode diff nobody ran is a diff reviewed on trust. Configure an ordered
+list of post-fix commands; Maajun runs each independently in the workspace and
+puts every verdict in the PR body. The older `test_command` remains supported
+and runs first:
 
 ```bash
 maajun config github.test_command "pytest -q"
+maajun config github.verification_commands "ruff check .,mypy src"
 ```
 
 ```
 ✅ Tests pass — `pytest -q`      ❌ Tests fail (exit 1) — `pytest -q`
 ```
 
-Either way the PR still opens — "this fix breaks the suite" is precisely
+One failed command does not skip the commands after it. Either way the PR still
+opens — "this fix breaks the suite" is precisely
 what a reviewer needs to know, and suppressing the PR would bury the
 analysis with it. A failure **this change caused** earns one repair round:
 the failing output is pasted back to the agent — exactly what a reviewer
@@ -563,11 +568,23 @@ and a repo in that state would otherwise buy a repair round on every
 incident, forever, for a failure nothing in the diff can fix. The PR body
 says so instead, which is also what a reviewer needs to know.
 
-Output is collapsed in a `<details>` block, and it is the **last** 3 000
-characters — a runner prints what failed at the end — with a 10-minute
-timeout. With no `test_command` the PR is labelled **Unverified**.
+For a targeted regression, set a command that exits nonzero while the defect
+exists and zero after it is fixed:
 
-The command comes from your config, never from the model: the agent has no
+```bash
+maajun config github.reproduction_command "pytest -q tests/test_checkout_bug.py"
+```
+
+Maajun runs it before editing and again afterwards. A nonzero-before/zero-after
+pair is reported as reproduced and fixed; an unexpected pass before the edit,
+a remaining failure, or an unstartable command is shown explicitly.
+
+Output is collapsed in a `<details>` block, and each result keeps the **last**
+3 000 characters — a runner prints what failed at the end — with a 10-minute
+timeout per command. With no configured command the PR is labelled
+**Unverified**.
+
+Every command comes from your config, never from the model: the agent has no
 shell access in either mode, so verification cannot be redirected to run
 something else.
 

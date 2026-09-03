@@ -5,13 +5,17 @@ exception surfaces in one place and the defect is regularly in another, so an
 issue called `KeyError: 'discount'` would send a reader to the wrong file.
 """
 
+from maajun.config import RepoConfig
 from maajun.daemon.reports import (
     artifact_title,
     commit_subject,
     extract_patches,
     headline,
     headline_problem,
+    verification_section,
 )
+from maajun.daemon.verification import VerificationCheck, VerificationSummary
+from maajun.vcs import CommandResult
 
 REPORT = """# cart/totals.py assumes promotions.apply() always writes a discount
 
@@ -136,6 +140,35 @@ def test_a_dry_run_shows_the_title_it_would_file(capsys):
     )
     out = capsys.readouterr().out
     assert "Would be titled: [maajun] cart/totals.py assumes" in out
+
+
+def test_verification_rendering_distinguishes_timeouts_and_start_failures():
+    summary = VerificationSummary(
+        reproduction_command="pytest -q tests/test_bug.py",
+        reproduction_before=CommandResult(None, "Timed out after 120s."),
+        reproduction_after=CommandResult(None, "Could not run: executable missing"),
+        checks=(
+            VerificationCheck("ruff check .", CommandResult(None, "Timed out after 120s.")),
+            VerificationCheck("mypy src", CommandResult(None, "Could not run: denied")),
+        ),
+    )
+
+    rendered = verification_section(RepoConfig(repo="owner/name"), summary)
+
+    assert "Before edit: timed out" in rendered
+    assert "After edit: inconclusive" in rendered
+    assert "Check timed out" in rendered
+    assert "Check could not run" in rendered
+
+
+def test_verification_rendering_calls_out_an_unconfigured_reproduction():
+    summary = VerificationSummary(
+        checks=(VerificationCheck("pytest -q", CommandResult(0, "ok")),)
+    )
+
+    rendered = verification_section(RepoConfig(repo="owner/name"), summary)
+
+    assert "Reproduction unconfigured" in rendered
 
 
 # ---------------------------------------------------------------------------

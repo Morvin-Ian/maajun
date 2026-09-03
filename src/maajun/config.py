@@ -16,8 +16,14 @@ from maajun.providers.base import ProviderType
 from maajun.utils import PLACEHOLDER_REPO, is_valid_repo
 
 LIST_SEP = ","
-LEGACY_GITHUB_SCALARS = ("repo", "base_branch", "mode", "test_command")
-PER_REPO_FIELDS = ("base_branch", "mode", "log_files", "test_command")
+LEGACY_GITHUB_SCALARS = (
+    "repo", "base_branch", "mode", "test_command", "verification_commands",
+    "reproduction_command",
+)
+PER_REPO_FIELDS = (
+    "base_branch", "mode", "log_files", "test_command", "verification_commands",
+    "reproduction_command",
+)
 
 
 class ConfigError(ValueError):
@@ -118,7 +124,14 @@ class RepoConfig(Base):
     mode: str = "suggest"
     log_files: list[str] = Field(default_factory=list)
     test_command: str = ""
+    verification_commands: list[str] = Field(default_factory=list)
+    reproduction_command: str = ""
     deployment: DeploymentConfig = Field(default_factory=DeploymentConfig)
+
+    def post_fix_commands(self) -> list[str]:
+        """Owner-configured commands, preserving legacy test_command and order."""
+        commands = [self.test_command, *self.verification_commands]
+        return list(dict.fromkeys(command for command in commands if command))
 
     def runtime_sources(self) -> list[tuple[str, str]]:
         """Every runtime error source for this repo, as (kind, target).
@@ -321,6 +334,10 @@ class Config(Base):
                     repo_table["log_files"] = repo_config.log_files
                 if repo_config.test_command:
                     repo_table["test_command"] = repo_config.test_command
+                if repo_config.verification_commands:
+                    repo_table["verification_commands"] = repo_config.verification_commands
+                if repo_config.reproduction_command:
+                    repo_table["reproduction_command"] = repo_config.reproduction_command
                 # Attached only once there is something to say, or every
                 # existing config grows an empty [github.repos.deployment].
                 if repo_config.deployment.describes_a_deployment():
@@ -739,6 +756,16 @@ def render_config(config: "Config") -> str:
             if repo_config.test_command:
                 parts.append(
                     f'    test_command = [green]"{repo_config.test_command}"[/green]'
+                )
+            if repo_config.verification_commands:
+                parts.append(
+                    "    verification_commands = "
+                    f"[green]{repo_config.verification_commands}[/green]"
+                )
+            if repo_config.reproduction_command:
+                parts.append(
+                    "    reproduction_command = "
+                    f'[green]"{repo_config.reproduction_command}"[/green]'
                 )
             if repo_config.log_files:
                 parts.append(f"    log_files = [green]{repo_config.log_files}[/green]")

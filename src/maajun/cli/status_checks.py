@@ -152,6 +152,37 @@ def build_monitor_checks(
     return checks
 
 
+def build_verification_checks(repos: list[RepoConfig]) -> list[Check]:
+    """Show whether each fix-mode repository has owner-controlled checks.
+
+    An unverified fix is still allowed to produce a PR, so this is a warning
+    rather than a failed preflight. Surfacing it in ``maajun status`` lets an
+    owner fix the configuration before the first incident arrives.
+    """
+    checks = []
+    for repo_config in repos:
+        if repo_config.mode != "fix":
+            continue
+        commands = repo_config.post_fix_commands()
+        reproduction = repo_config.reproduction_command
+        configured = bool(commands or reproduction)
+        detail_parts = []
+        if reproduction:
+            detail_parts.append("reproduction before/after")
+        if commands:
+            detail_parts.append(f"{len(commands)} post-fix command(s)")
+        checks.append(Check(
+            f"Verification for {repo_config.repo}",
+            configured,
+            ", ".join(detail_parts) if configured else (
+                "none configured — fix PRs will be marked unverified"
+            ),
+            warn=not configured,
+            counts=False,
+        ))
+    return checks
+
+
 def build_status(
     config: Config,
     *,
@@ -210,9 +241,13 @@ def build_status(
                         "" if can_push else "check token repo access / Contents perm",
                     ))
 
+    verification = Section("Verification", build_verification_checks(repos))
     monitors = Section("Monitors", build_monitor_checks(config, repos, probe))
 
-    sections = [ai, github, monitors]
+    sections = [ai, github]
+    if verification.checks:
+        sections.append(verification)
+    sections.append(monitors)
     ok = all(
         check.ok for section in sections for check in section.checks if check.counts
     )

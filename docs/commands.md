@@ -40,6 +40,8 @@ instruction.
 | `-b, --base-branch NAME` | Branch to open PRs against |
 | `-m, --mode MODE` | `suggest` or `fix` |
 | `--test-command CMD` | Command that verifies a fix-mode edit, e.g. `pytest -q` |
+| `--verify-command CMD` | Additional independent post-fix command; repeat the flag for more |
+| `--reproduction-command CMD` | Command expected to fail before the fix and pass after it |
 | `-l, --logs PATHS` | Comma-separated log files to watch |
 | `--non-interactive` | Never prompt; take everything from flags |
 | `--reconfigure` | Ask again for credentials that are already stored |
@@ -100,6 +102,9 @@ repo is the one global `monitor.log_files` attach to, so order matters.
 | `--runs TEXT` | How it runs, e.g. `docker compose` |
 | `--journald-units NAMES` | Comma-separated systemd units to read the journal of |
 | `--docker-containers NAMES` | Comma-separated containers to read logs from |
+| `--test-command CMD` | Legacy test command, run first after a fix |
+| `--verify-command CMD` | Independent post-fix command; repeat to replace the ordered list |
+| `--reproduction-command CMD` | Command expected to fail before the fix and pass after it |
 | `-c, --config PATH` | Config file location |
 
 The deployment flags are usually easier to fill in with
@@ -155,7 +160,10 @@ systemd unit or container fails, a stopped one is a warning (its past logs
 are still readable), and a missing log file is a warning too (it may not
 exist until the app first logs). A repo with **no** runtime source fails,
 unless it says `deployment.runtime = "none"` on purpose. Exits non-zero if
-any required check fails, so it works in scripts and CI.
+any required check fails, so it works in scripts and CI. Fix-mode repositories
+also show their configured reproduction and post-fix checks. Missing
+verification is a warning rather than a failure because Maajun still opens the
+PR and labels it unverified.
 
 | Flag | Meaning |
 |------|---------|
@@ -173,6 +181,8 @@ maajun config github.mode          # print one value (secrets show as ***)
 maajun config github.mode fix      # set a value
 maajun config monitor.log_files /var/log/a.log,/var/log/b.log
 maajun config github.test_command "pytest -q" -r team/api   # one repo only
+maajun config github.verification_commands "ruff check .,mypy src" -r team/api
+maajun config github.reproduction_command "pytest -q tests/test_bug.py" -r team/api
 ```
 
 | Flag | Meaning |
@@ -181,13 +191,15 @@ maajun config github.test_command "pytest -q" -r team/api   # one repo only
 | `-c, --config PATH` | Config file location |
 
 Keys use dot notation (`ai.*`, `github.repo/base_branch/mode/test_command`,
+`github.verification_commands/reproduction_command`,
 `monitor.*`, `daemon.*`). Values are type-checked and validated before
 saving — an invalid value (e.g. an unknown mode) is rejected and the file
 is left unchanged. Writes are comment-preserving: your comments and
 formatting survive.
 
 A `github.*` key that also exists per repo (`base_branch`, `mode`,
-`test_command`, `log_files`) is written to **every** configured repo, so
+`test_command`, `verification_commands`, `reproduction_command`, `log_files`)
+is written to **every** configured repo, so
 one command still covers wanting the same setting everywhere. Use
 `--repo` to change a single repository instead.
 

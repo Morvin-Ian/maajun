@@ -470,6 +470,8 @@ repo = "owner/name"
 base_branch = "main"
 mode = "suggest"
 # test_command = "pytest -q"  # verifies a fix-mode edit; result goes in the PR
+# verification_commands = ["ruff check .", "mypy src"]  # each runs independently
+# reproduction_command = "pytest -q tests/test_checkout_bug.py"  # fail before, pass after
 
 # Where and how it runs, and where its runtime errors land. Any mix of the
 # three sinks; fill it in with `maajun discover --save`.
@@ -611,8 +613,10 @@ that reports no cache hits: every input token is charged at the miss rate.
   incident database cannot be opened by any tool, even when they sit inside an
   allowed directory. What a tool reads goes to your AI provider — and, from the
   daemon, into an issue or pull request.
-- **Verification you control.** `test_command` comes from your config, not from
-  the model, so a fix cannot redirect its own verification.
+- **Verification you control.** `test_command`, `verification_commands`, and
+  `reproduction_command` come from your config, not from the model, so a fix
+  cannot redirect its own verification. Every post-fix command runs even when
+  an earlier one fails, and reproduction is reported before and after the edit.
 - **Chat proposes, you approve.** `maajun chat` runs read-only commands freely,
   but anything that writes config or opens a pull request shows the exact
   command line and waits for a yes — or for a reason not to, which is passed

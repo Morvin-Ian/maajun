@@ -15,7 +15,7 @@ from maajun.cli.setup import (
     split_by_kind,
 )
 from maajun.cli.shared import Asker, implemented_providers
-from maajun.config import Config, DeploymentConfig, RepoConfig
+from maajun.config import Config, DeploymentConfig, GitHubConfig, RepoConfig
 from maajun.discovery import Discovered
 from maajun.inspection import Inspection
 from maajun.providers.catalog import CatalogEntry
@@ -273,6 +273,58 @@ def test_setup_records_a_test_command(fake_keyring, api_key, tmp_path):
     ])
     assert result.exit_code == 0, result.output
     assert Config.load(config_path).github.repos[0].test_command == "pytest -q"
+
+
+def test_setup_records_repeated_verification_and_reproduction_flags(
+    fake_keyring, api_key, tmp_path
+):
+    config_path = tmp_path / "config.toml"
+    result = runner.invoke(app, [
+        "setup", "--non-interactive", "--config", str(config_path),
+        "--repo", "acme/webapp", "--mode", "suggest",
+        "--verify-command", "ruff check .",
+        "--verify-command", "mypy src",
+        "--reproduction-command", "pytest -q tests/test_bug.py",
+    ])
+
+    assert result.exit_code == 0, result.output
+    entry = Config.load(config_path).github.repos[0]
+    assert entry.mode == "suggest"
+    assert entry.verification_commands == ["ruff check .", "mypy src"]
+    assert entry.reproduction_command == "pytest -q tests/test_bug.py"
+
+
+def test_setup_preserves_the_target_repos_verification_when_flags_are_omitted(
+    fake_keyring, api_key, tmp_path
+):
+    config_path = tmp_path / "config.toml"
+    config = Config(
+        github=GitHubConfig(repos=[
+            RepoConfig(
+                repo="acme/first",
+                mode="fix",
+                verification_commands=["ruff check ."],
+            ),
+            RepoConfig(
+                repo="acme/second",
+                mode="suggest",
+                verification_commands=["mypy src"],
+                reproduction_command="pytest -q tests/test_second_bug.py",
+            ),
+        ])
+    )
+    config.save(config_path)
+
+    result = runner.invoke(app, [
+        "setup", "--non-interactive", "--config", str(config_path),
+        "--repo", "acme/second",
+    ])
+
+    assert result.exit_code == 0, result.output
+    second = Config.load(config_path).github.repos[1]
+    assert second.mode == "suggest"
+    assert second.verification_commands == ["mypy src"]
+    assert second.reproduction_command == "pytest -q tests/test_second_bug.py"
 
 
 def test_fix_mode_without_a_test_command_warns(fake_keyring, api_key, tmp_path):
@@ -810,4 +862,3 @@ def test_a_free_model_says_free_rather_than_zero_dollars():
 def test_a_model_the_gateway_does_not_price_says_so():
     line = catalog_line(CatalogEntry(id="x/y", vendor="x", input=None, output=None))
     assert "not quoted" in line
-

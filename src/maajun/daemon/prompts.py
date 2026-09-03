@@ -293,20 +293,16 @@ you changed.
 # Sent once when the project's test command fails against the applied fix,
 # with the failing output pasted in. One round, then the pull request ships
 # either way — a second failure is reported in its body rather than looped on.
-FAILED_TESTS_SUFFIX = """
+FAILED_VERIFICATION_SUFFIX = """
 
-Your change is applied, but the project's test command `{command}` exits
-{status}:
+Your change is applied, but one or more owner-configured verification commands
+still fail:
 
-```
-{output}
-```
+{failures}
 
 Fix your own fix, with edit_file or write_file inside {workspace}: make the
-smallest further change that makes that command pass. Do not weaken, skip,
-or delete a test to go green — a silenced test is not a fix. If the failure
-is not yours — the same test fails without your edit — change nothing and
-say so under "## Applied fix".
+smallest further change that makes these commands pass. Do not weaken, skip,
+or delete a check to go green — a silenced check is not a fix.
 
 Then output the full report again, with "## Applied fix" covering every file
 you changed.
