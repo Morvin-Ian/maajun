@@ -24,6 +24,15 @@ class GitHubAccount:
         return f"{self.user_id}+{self.login}@users.noreply.github.com"
 
 
+@dataclass(frozen=True)
+class GitHubIssue:
+    number: int
+    title: str
+    body: str
+    html_url: str
+    state: str
+
+
 class GitHubClient:
     def __init__(self, token: str, *, api_url: str = API_URL,
                  transport: httpx.AsyncBaseTransport | None = None):
@@ -122,6 +131,26 @@ class GitHubClient:
             return resp.json()["html_url"]
         raise GitHubError(
             f"Could not create issue ({resp.status_code}): {self.error_detail(resp)}"
+        )
+
+    async def get_issue(self, repo: str, number: int) -> GitHubIssue:
+        """Read a repository issue, rejecting pull requests returned by this endpoint."""
+        resp = await self.request("GET", f"/repos/{repo}/issues/{number}")
+        if resp.status_code == 404:
+            raise GitHubError(f"Issue {repo}#{number} was not found or is not accessible.")
+        if resp.status_code != 200:
+            raise GitHubError(
+                f"Could not read issue ({resp.status_code}): {self.error_detail(resp)}"
+            )
+        data = resp.json()
+        if "pull_request" in data:
+            raise GitHubError(f"{repo}#{number} is a pull request, not an issue.")
+        return GitHubIssue(
+            number=number,
+            title=str(data.get("title") or ""),
+            body=str(data.get("body") or ""),
+            html_url=str(data.get("html_url") or ""),
+            state=str(data.get("state") or ""),
         )
 
     async def find_pull_request(self, repo: str, *, head: str) -> str | None:

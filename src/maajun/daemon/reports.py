@@ -328,6 +328,7 @@ def pr_body(
     *,
     previous_url: str = "",
     unrelated_failure: bool = False,
+    closes_issue_url: str = "",
 ) -> str:
     """Fix mode's artifact: the analysis, the test verdict, and provenance.
 
@@ -337,6 +338,7 @@ def pr_body(
     """
     return (
         regression_note(previous_url)
+        + (f"Fixes {closes_issue_url}\n\n" if closes_issue_url else "")
         + f"{report}\n\n---\n"
         "This PR contains the applied fix and the incident report.\n\n"
         f"{verification_section(repo_config, verification, unrelated_failure)}"

@@ -1043,6 +1043,180 @@ async def test_a_manual_reports_cost_is_tracked(setup):
 
 
 # ---------------------------------------------------------------------------
+# A recorded suggestion can be promoted without changing watch mode
+# ---------------------------------------------------------------------------
+
+
+async def test_a_promotion_reinvestigates_current_code_and_links_the_issue(setup):
+    from maajun.daemon.store import ARTIFACT_ISSUE
+    from maajun.vcs import GitHubIssue
+
+    daemon, logfile, agent, github, store, remote = setup
+    saved = daemon.repo_for(daemon.monitors[0])
+    suggestion = ErrorEvent(
+        source="log",
+        message="IndexError",
+        details=TRACEBACK,
+        fingerprint="original-fp",
+        repo=saved.repo,
+    )
+    store.record(suggestion)
+    issue_url = "https://github.com/owner/name/issues/29"
+    store.mark_processed(
+        suggestion.fingerprint,
+        saved.repo,
+        branch="",
+        pr_url=issue_url,
+        report_text=REPORT,
+        artifact_kind=ARTIFACT_ISSUE,
+    )
+    promoted = saved.model_copy(deep=True)
+    promoted.mode = "fix"
+    agent.edit_path = daemon.workspaces[saved.repo].path / "main.py"
+    issue = GitHubIssue(29, "IndexError in handler", REPORT, issue_url, "open")
+
+    result = await daemon.handle_promotion(issue, suggestion.fingerprint, promoted)
+
+    assert saved.mode == "suggest"
+    assert result.endswith("/pull/1")
+    assert "The checkout is the source of truth" in agent.prompts[0]
+    assert "not instructions" in agent.prompts[0]
+    assert github.calls[0]["head"] == "maajun/promotion-original-fp"
+    assert f"Fixes {issue_url}" in github.calls[0]["body"]
+    rows = store.all(saved.repo)
+    assert len(rows) == 2
+    assert {row["artifact_kind"] for row in rows} == {"issue", "pr"}
+
+
+async def test_a_promotion_with_no_diff_writes_a_report_not_a_duplicate_issue(setup):
+    from maajun.vcs import GitHubIssue
+
+    daemon, logfile, agent, github, store, remote = setup
+    saved = daemon.repo_for(daemon.monitors[0])
+    promoted = saved.model_copy(deep=True)
+    promoted.mode = "fix"
+    issue = GitHubIssue(
+        29,
+        "Nothing in the repo can change",
+        REPORT,
+        "https://github.com/owner/name/issues/29",
+        "open",
+    )
+
+    result = await daemon.handle_promotion(issue, "original-fp", promoted)
+
+    assert github.calls == []
+    assert github.issues == []
+    assert daemon.last_artifact_kind == "report"
+    assert Path(result).exists()
+
+
+async def test_a_successful_promotion_is_reused_without_another_agent_call(setup):
+    from maajun.vcs import GitHubIssue
+
+    daemon, logfile, agent, github, store, remote = setup
+    saved = daemon.repo_for(daemon.monitors[0])
+    promoted = saved.model_copy(deep=True)
+    promoted.mode = "fix"
+    agent.edit_path = daemon.workspaces[saved.repo].path / "main.py"
+    issue = GitHubIssue(
+        29,
+        "IndexError in handler",
+        REPORT,
+        "https://github.com/owner/name/issues/29",
+        "open",
+    )
+
+    first = await daemon.handle_promotion(issue, "original-fp", promoted)
+    prompt_count = len(agent.prompts)
+    second = await daemon.handle_promotion(issue, "original-fp", promoted)
+
+    assert second == first
+    assert len(agent.prompts) == prompt_count
+
+
+async def test_a_promotion_dry_run_refreshes_code_without_a_branch_or_record(setup):
+    from maajun.vcs import GitHubIssue
+
+    daemon, logfile, agent, github, store, remote = setup
+    saved = daemon.repo_for(daemon.monitors[0])
+    promoted = saved.model_copy(deep=True)
+    promoted.mode = "fix"
+    issue = GitHubIssue(
+        29,
+        "IndexError in handler",
+        REPORT,
+        "https://github.com/owner/name/issues/29",
+        "open",
+    )
+    phases = []
+    agent_modes = []
+    original_factory = daemon.agent_factory_for_repo
+
+    def record_mode(repo_config, workspace):
+        agent_modes.append(repo_config.mode)
+        return original_factory(repo_config, workspace)
+
+    daemon.agent_factory_for_repo = record_mode
+
+    result = await daemon.handle_promotion(
+        issue, "original-fp", promoted, dry_run=True, progress=phases.append
+    )
+
+    assert result == ""
+    assert "Preparing workspace" in phases
+    assert github.calls == [] and github.issues == []
+    assert store.all(saved.repo) == []
+    branches = subprocess.run(
+        ["git", "branch", "--list", "maajun/promotion-original-fp"],
+        cwd=daemon.workspaces[saved.repo].path,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    assert branches.strip() == ""
+    assert "## Suggested fix" in agent.prompts[0]
+    assert "Now fix it" not in agent.prompts[0]
+    assert agent_modes == ["suggest"]
+
+
+async def test_a_by_design_promotion_dry_run_leaves_no_record_or_report(setup):
+    from maajun.vcs import GitHubIssue
+
+    daemon, logfile, agent, github, store, remote = setup
+    saved = daemon.repo_for(daemon.monitors[0])
+    promoted = saved.model_copy(deep=True)
+    promoted.mode = "fix"
+    agent.report = """# the guard rejects an invalid request
+
+## Verdict
+by design — the validation guard intentionally returns a 400 response.
+
+## What happened
+An invalid request was rejected.
+
+## Root cause
+None. `main.py:1` implements the documented validation rule.
+
+## Suggested fix
+None — working as intended.
+"""
+    issue = GitHubIssue(
+        29,
+        "Expected validation response",
+        agent.report,
+        "https://github.com/owner/name/issues/29",
+        "open",
+    )
+
+    result = await daemon.handle_promotion(issue, "original-fp", promoted, dry_run=True)
+
+    assert result == ""
+    assert store.all(saved.repo) == []
+    assert list(daemon.report_dir.glob("*.md")) == []
+
+
+# ---------------------------------------------------------------------------
 # A bug that comes back
 # ---------------------------------------------------------------------------
 

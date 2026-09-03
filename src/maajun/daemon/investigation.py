@@ -64,6 +64,9 @@ class Plan:
     forget_on_dry_run: bool = False
     blame_deploy: bool = False
     dry_run: bool = False
+    sync_on_dry_run: bool = False
+    issue_fallback: bool = True
+    closes_issue_url: str = ""
 
 
 @dataclass
@@ -111,8 +114,18 @@ class Investigation:
         await self.prepare()
         prompt = await self.build_prompt()
         self.progress("Analyzing with AI")
+        agent_repo_config = self.repo_config
+        if (
+            self.plan.dry_run
+            and self.plan.sync_on_dry_run
+            and self.repo_config.mode == "fix"
+        ):
+            # Dry runs may refresh the local clone for current evidence, but
+            # they never grant the agent permission to edit it.
+            agent_repo_config = self.repo_config.model_copy(deep=True)
+            agent_repo_config.mode = "suggest"
         self.agent = self.daemon.agent_factory_for_repo(
-            self.repo_config, self.workspace
+            agent_repo_config, self.workspace
         )()
         try:
             await self.investigate(prompt)
@@ -124,13 +137,15 @@ class Investigation:
 
     async def prepare(self) -> None:
         """Sync the clone, and branch it when there will be a diff."""
-        if self.plan.dry_run or self.daemon.local_mode:
+        if self.daemon.local_mode:
+            return
+        if self.plan.dry_run and not self.plan.sync_on_dry_run:
             return
         self.progress("Preparing workspace")
         # The agent reads code from the clone either way; only fix mode
         # needs a branch.
         await self.workspace.sync(self.repo_config.base_branch)
-        if self.opens_pull_request:
+        if self.opens_pull_request and not self.plan.dry_run:
             await self.workspace.create_branch(
                 self.plan.branch, self.repo_config.base_branch
             )
@@ -152,7 +167,9 @@ class Investigation:
         prompt += deployment_section(
             self.repo_config, self.daemon.monitors_for(self.repo_config)
         )
-        if self.opens_pull_request:
+        if self.opens_pull_request and not (
+            self.plan.dry_run and self.plan.sync_on_dry_run
+        ):
             prompt += FIX_PROMPT_SUFFIX.format(workspace=self.workspace.path)
         return prompt
 
@@ -220,7 +237,9 @@ class Investigation:
         )
 
         if reports.verdict(self.report) == reports.BY_DESIGN:
-            return self.close_as_intended()
+            if self.plan.dry_run or self.plan.issue_fallback:
+                return self.close_as_intended()
+            return self.save_local_report()
 
         problem = report_problem(self.report)
         if problem and not self.plan.dry_run:
@@ -245,6 +264,8 @@ class Investigation:
                 self.event.fingerprint, self.repo_config.repo,
             )
             self.opens_pull_request = False
+            if not self.plan.issue_fallback:
+                return self.save_local_report()
 
         if self.opens_pull_request:
             url = await self.open_pull_request()
@@ -309,6 +330,7 @@ class Investigation:
                 self.repo_config, self.event, self.report, verification,
                 previous_url=self.previous["url"] if self.previous else "",
                 unrelated_failure=unrelated,
+                closes_issue_url=self.plan.closes_issue_url,
             ),
         )
         await self.file_follow_up(follow_up, url)

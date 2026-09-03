@@ -5,6 +5,7 @@ from maajun.cli import (  # noqa: F401,E402  register commands
     github_auth,
     incidents,
     monitor,
+    promotion,
     settings,
     setup,
 )
