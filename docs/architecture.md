@@ -351,13 +351,14 @@ maajun/
    a repair that did not help ships with its failure stated honestly.
 
    `reports.split_follow_up` then takes the "## Follow-up" section out of the
-   report: the pull request carries the change, and what the change
-   deliberately left undone is filed as its own issue, linked back to the PR.
-   In one body they compete, and a reviewer cannot tell which lines the diff
-   already covers — which is the other half of how a fix comes to read as a
-   list of suggestions. A follow-up that says "None" files nothing, and one
-   that cannot be filed is a log line: the pull request is already open and
-   it has the fix. The report is then committed as
+   report. `followups.parse_follow_ups` requires each deferred task to carry
+   an action title, concrete code evidence, a change, and acceptance criteria.
+   Valid tasks are preserved; invalid tasks get one focused retry with edit
+   permission disabled. Each valid result becomes its own specifically titled
+   issue linked to the PR, capped at three. A follow-up that says "None" files
+   nothing, and a task that remains vague is logged and skipped. An individual
+   GitHub failure does not stop later tasks: the pull request is already open
+   and has the fix. The report is then committed as
    `docs/incidents/<fingerprint>.md` alongside the agent's edits, and the
    commit is then measured against the base branch one last time. That is the
    only check that reads what the Files tab will show rather than what the

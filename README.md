@@ -194,6 +194,13 @@ behind — the clone is reset to the base branch before each investigation, and
 the commit is checked against that branch one last time before the branch is
 pushed. Nothing to merge means an issue, not a push.
 
+Work deliberately left outside a fix is not dumped into a generic companion
+issue. Each follow-up must name a concrete code location, the change to make,
+and an observable acceptance check. Maajun gives vague tasks one read-only
+rewrite attempt, then files each valid task as its own specifically titled
+issue linked to the PR (at most three). Missing evidence, environment notes,
+unrelated test failures, and generic cleanup are not filed as follow-ups.
+
 > ✅ **Tests pass** — `pytest -q`
 
 A failing suite (`❌ Tests fail (exit 1)`) still opens the PR — a fix that

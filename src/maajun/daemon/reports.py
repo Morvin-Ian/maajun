@@ -7,6 +7,7 @@ from pathlib import Path
 from rich.console import Console
 
 from maajun.config import RepoConfig
+from maajun.daemon.followups import FollowUpTask
 from maajun.monitors import ErrorEvent
 from maajun.render import render
 from maajun.utils import truncate, truncate_tail
@@ -37,13 +38,6 @@ SECTION_HEADINGS = REPORT_HEADINGS + (
     "how to reproduce", "blast radius", "likely cause commit", "follow-up",
     "follow up", "error details", "verdict",
 )
-
-# A follow-up section saying the change is complete. An issue for one of
-# these is worse than no issue.
-NOTHING_TO_FOLLOW_UP = ("none", "n/a", "nothing", "no follow")
-
-# Shorter than this is "None" with extra words, not a piece of work.
-MIN_FOLLOW_UP_CHARS = 30
 
 HEADING_RE = re.compile(r"^\s{0,3}#{1,3}\s+(.+?)\s*#*\s*$", re.MULTILINE)
 
@@ -181,7 +175,8 @@ def code_changes(paths: Iterable[str]) -> list[str]:
 
 
 FOLLOW_UP_RE = re.compile(
-    r"^\s{0,3}#{1,3}\s+follow[\s-]?up\s*#*\s*$", re.IGNORECASE | re.MULTILINE
+    r"^\s{0,3}(?P<marks>#{1,3})\s+follow[\s-]?up\s*#*\s*$",
+    re.IGNORECASE | re.MULTILINE,
 )
 
 
@@ -196,39 +191,27 @@ def split_follow_up(report: str) -> tuple[str, str]:
     if not match:
         return report, ""
     rest = report[match.end():]
-    # The next heading closes the section, whatever its level.
-    following = HEADING_RE.search(rest)
+    # Task headings are nested under Follow-up, so only a heading at the same
+    # or a higher level closes the section.
+    level = len(match.group("marks"))
+    following = re.search(rf"^\s{{0,3}}#{{1,{level}}}\s+", rest, re.MULTILINE)
     if following:
         rest = rest[: following.start()]
     return report[: match.start()].rstrip() + "\n", rest.strip()
 
 
-def worth_following_up(text: str) -> bool:
-    """Whether a follow-up section names work rather than saying "None"."""
-    stripped = text.strip().strip("<>").strip()
-    if len(stripped) < MIN_FOLLOW_UP_CHARS:
-        return False
-    return not stripped.lower().startswith(NOTHING_TO_FOLLOW_UP)
+def follow_up_title(task: FollowUpTask) -> str:
+    return f"[maajun] Follow-up: {truncate(task.title, MAX_TITLE_CHARS)}"
 
 
-def follow_up_title(report: str, fallback: str) -> str:
+def follow_up_body(event: ErrorEvent, task: FollowUpTask, pr_url: str) -> str:
+    """One independently actionable task linked to the fix that deferred it."""
     return (
-        "[maajun] Follow-up: "
-        f"{truncate(headline(report) or fallback, MAX_TITLE_CHARS)}"
-    )
-
-
-def follow_up_body(event: ErrorEvent, follow_up: str, pr_url: str) -> str:
-    """The companion issue: what the fix left for later, and where the fix is.
-
-    A link is enough — GitHub cross-references the mention, so the pull
-    request shows the issue too.
-    """
-    return (
-        f"The fix for this is in {pr_url}.\n\n"
-        "These are the parts it deliberately left alone, filed here so the "
-        "pull request stays reviewable and none of it is lost:\n\n"
-        f"{follow_up}\n\n---\n\n"
+        f"This work was deliberately left out of {pr_url} so that fix stays "
+        "reviewable.\n\n"
+        f"## Evidence\n\n{task.evidence}\n\n"
+        f"## Change\n\n{task.change}\n\n"
+        f"## Acceptance criteria\n\n{task.acceptance}\n\n---\n\n"
         f"{provenance(event)}"
     )
 

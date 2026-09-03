@@ -99,14 +99,20 @@ a second version for the reviewer to check the first against.
 Write "None — working as intended" when the verdict is "by design".>
 
 ## Follow-up
-<what this change deliberately does not do, if anything: the other call sites
-from "Blast radius" that need the same treatment, hardening that belongs in a
-change of its own, a test you could not write here. One bullet each, concrete
-enough to act on without re-reading the code.
+<what this change deliberately does not do, if anything. Write at most three
+independent tasks, using this exact structure for each:
+
+### <action-oriented title>
+- Evidence: `<path:line or symbol>` — <what the current code proves>
+- Change: <the specific change a new PR should make>
+- Acceptance: <an observable result or test that proves it is done>
 
 This section is filed as a separate issue, so nothing in it is lost by being
 left out of the fix — and a fix that grows to cover all of it is a fix nobody
-can review. Write "None" when the change is complete.>
+can review. Include only in-repository work supported by code you read. Missing
+traceback evidence, environment commentary, unrelated verification failures,
+generic cleanup, more investigation, and work already in this PR are not
+follow-up tasks. Write "None" when the change is complete.>
 """
 
 
@@ -282,4 +288,23 @@ say so under "## Applied fix".
 
 Then output the full report again, with "## Applied fix" covering every file
 you changed.
+"""
+
+
+FOLLOW_UP_RETRY_SUFFIX = """
+
+Some deferred work in your Follow-up section is not actionable enough to file:
+
+{invalid}
+
+Rewrite only those invalid tasks. Do not change files, revisit the applied fix,
+or repeat valid tasks. Respond only with zero or more blocks in this format:
+
+### <action-oriented title>
+- Evidence: `<path:line or symbol>` — <what the current code proves>
+- Change: <the specific change a new PR should make>
+- Acceptance: <an observable result or test that proves it is done>
+
+Omit anything that cannot meet all four fields. Write "None" if none of the
+invalid material is a real, separately actionable code change.
 """

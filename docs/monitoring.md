@@ -507,11 +507,25 @@ to merge.
 "## Applied fix", which records what it already changed, in the past tense,
 with no diff pasted back: the pull request shows the diff, and a copy in the
 body is a second version to check the first against. Anything it decided not
-to do goes under "## Follow-up" and is filed as a **separate issue** linked
-to the pull request — the sibling call site with the same bug, hardening that
-deserves its own change, a test that needs a fixture this change does not
-build. In the PR body those read as things the diff does; as an issue they
-read as what they are. If the change is complete, no issue is filed.
+to do goes under "## Follow-up" as one or more structured tasks. Each task
+must have an action title, evidence anchored to code, a specific change, and
+observable acceptance criteria. Maajun gives invalid tasks one read-only
+rewrite attempt, then files each valid task as its **own issue** linked to the
+PR. It files at most three per PR.
+
+```markdown
+## Follow-up
+### Guard empty order line access
+- Evidence: `handlers/orders.py:44` indexes `lines[0]` although callers allow an empty list.
+- Change: Return the established empty-order response before indexing the collection.
+- Acceptance: A regression test passes for an order with an empty lines collection.
+```
+
+Missing traceback evidence, environment commentary, unrelated verification
+failures, generic cleanup, and work already in the PR are kept out of follow-up
+issues. A task still lacking evidence or acceptance criteria after its rewrite
+is skipped; it never blocks or retracts the fix PR. If the change is complete,
+no issue is filed.
 
 **Nothing is ever filed empty.** A report that comes back blank, or with
 none of its sections filled in, is asked for once more; if it is still
@@ -871,4 +885,3 @@ log files in one shot and points at whatever is missing.
   held back on purpose until the threshold is met. For HTTP monitors, run
   with `-v` and check for fetch errors — a monitor that can't reach its
   API logs the failure and returns nothing rather than crashing.
-
