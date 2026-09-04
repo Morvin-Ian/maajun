@@ -124,7 +124,7 @@ def prompt_secret(text: str) -> str:
 
 
 def prompt_mode(current: str = "suggest") -> str:
-    """Prompt for suggest/fix mode, defaulting to `current`."""
+    """Prompt for a monitoring mode, defaulting to `current`."""
     console.print("\n[bold]Mode[/bold]")
     console.print(
         "  [cyan]1.[/cyan] suggest — Github issues contain only the incident "
@@ -133,8 +133,15 @@ def prompt_mode(current: str = "suggest") -> str:
     console.print(
         "  [cyan]2.[/cyan] fix — the agent may also change code inside its workspace"
     )
-    default = "1" if current != "fix" else "2"
-    choice = prompt_line(f"> Mode (1/2) [{default}]: ").strip() or default
+    console.print(
+        "  [cyan]3.[/cyan] automatic — fix only with deployment, reproduction, "
+        "and verification evidence; otherwise suggest"
+    )
+    defaults = {"suggest": "1", "fix": "2", "automatic": "3"}
+    default = defaults.get(current, "1")
+    choice = prompt_line(f"> Mode (1/2/3) [{default}]: ").strip() or default
+    if choice == "3":
+        return "automatic"
     if choice == "2":
         return "fix"
     if choice == "1":

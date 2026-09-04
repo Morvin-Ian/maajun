@@ -27,6 +27,7 @@ from maajun.daemon.store import (
     ARTIFACT_REPORT,
     IncidentStore,
 )
+from maajun.modes import decide_run_mode
 from maajun.monitors import ErrorEvent, Monitor, fingerprint
 from maajun.utils import utc_day_start_iso
 from maajun.vcs import GitHubClient, GitHubIssue, GitWorkspace
@@ -60,6 +61,9 @@ EDIT_TOOLS = ("edit_file", "write_file")
 def make_permission_policy(mode: str, workspace: Path) -> PermissionCallback | None:
     """suggest -> None (every gated tool denied; the agent is read-only).
     fix     -> edits allowed anywhere inside the workspace clone.
+
+    Automatic mode is resolved to one of these effective modes before policy
+    creation. It never introduces a third or broader permission policy.
 
     Every refusal here is a `Correction`: nothing in fix mode is forbidden,
     the call was just made against the wrong path or the wrong tool. Sent as a
@@ -587,7 +591,7 @@ class Daemon:
                     timestamp=event.timestamp,
                     details=event.details[:MAX_DETAILS_IN_PROMPT],
                     rules=INVESTIGATION_RULES,
-                    format=report_format(repo_config.mode),
+                    format=report_format(decide_run_mode(repo_config).effective),
                 ),
                 # Only a fallback: the artifact is titled with what the report
                 # concludes, and this raw log line is used when it concludes
@@ -632,7 +636,7 @@ class Daemon:
                     workspace=workspace.path,
                     description=description[:MAX_DETAILS_IN_PROMPT],
                     rules=INVESTIGATION_RULES,
-                    format=report_format(repo_config.mode),
+                    format=report_format(decide_run_mode(repo_config).effective),
                 ),
                 subject_fallback=description,
                 commit_prefix="maajun: manual report for",

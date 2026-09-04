@@ -16,6 +16,7 @@ from maajun.providers.base import ProviderType
 from maajun.utils import PLACEHOLDER_REPO, is_valid_repo
 
 LIST_SEP = ","
+VALID_MODES = ("suggest", "fix", "automatic")
 LEGACY_GITHUB_SCALARS = (
     "repo", "base_branch", "mode", "test_command", "verification_commands",
     "reproduction_command",
@@ -179,8 +180,8 @@ class RepoConfig(Base):
     @field_validator("mode")
     @classmethod
     def validate_mode(cls, value: str) -> str:
-        if value not in ("suggest", "fix"):
-            raise ValueError('mode must be "suggest" or "fix"')
+        if value not in VALID_MODES:
+            raise ValueError('mode must be "suggest", "fix", or "automatic"')
         return value
 
     @field_validator("repo")

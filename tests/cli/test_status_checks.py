@@ -85,6 +85,54 @@ def test_fix_repo_lists_configured_verification_in_status(tmp_path):
     assert "2 post-fix command(s)" in check.detail
 
 
+def test_automatic_status_explains_why_it_is_read_only(tmp_path):
+    logf = tmp_path / "app.log"
+    logf.write_text("")
+    repo = RepoConfig(repo="owner/name", mode="automatic")
+    config = Config(
+        github=GitHubConfig(repos=[repo]),
+        monitor=MonitorConfig(log_files=[str(logf)]),
+    )
+
+    sections, ok = build_status(
+        config, provider="deepseek", has_key=True, has_token=True,
+        repos=[repo], network=("morvin", {"owner/name": True}),
+    )
+
+    check = find(sections, "Automatic mode for owner/name")
+    assert ok is True
+    assert check.warn is True
+    assert "suggestion path" in check.detail
+    assert "reproduction" in check.detail
+
+
+def test_automatic_status_reports_a_ready_fix_path(tmp_path):
+    logf = tmp_path / "app.log"
+    logf.write_text("")
+    repo = RepoConfig(
+        repo="owner/name",
+        mode="automatic",
+        test_command="pytest -q",
+        reproduction_command="pytest -q tests/test_bug.py",
+        deployment=DeploymentConfig(path="/srv/app", runs="docker compose"),
+    )
+    config = Config(
+        github=GitHubConfig(repos=[repo]),
+        monitor=MonitorConfig(log_files=[str(logf)]),
+    )
+
+    sections, ok = build_status(
+        config, provider="deepseek", has_key=True, has_token=True,
+        repos=[repo], network=("morvin", {"owner/name": True}),
+    )
+
+    check = find(sections, "Automatic mode for owner/name")
+    assert ok is True
+    assert check.ok is True
+    assert check.warn is False
+    assert "fix path ready" in check.detail
+
+
 def test_status_warns_when_verification_uses_a_stale_runtime(tmp_path):
     logf = tmp_path / "app.log"
     logf.write_text("")

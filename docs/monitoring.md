@@ -35,7 +35,7 @@ provider = "deepseek"
 [[github.repos]]
 repo = "owner/name"           # repository maajun reports to
 base_branch = "main"          # branch PRs target
-mode = "suggest"              # "suggest" or "fix" — see Modes below
+mode = "suggest"              # "suggest", "fix", or "automatic"
 # Passive runtime evidence is not published to a public repo by default.
 # runtime_artifact_repo = "owner/private-incidents"  # optional private/internal target
 # allow_public_runtime_artifacts = true               # explicit public opt-in
@@ -437,6 +437,7 @@ maajun watch --dry-run       # analyze errors, but skip git/PR — test your con
 maajun watch --once          # single poll cycle, then exit (cron)
 maajun watch -f              # stay attached to this terminal
 maajun watch -m fix          # override the configured mode for this run
+maajun watch -m automatic    # fix only when the evidence gate is ready
 ```
 
 `watch` detaches by default: the terminal comes back and the daemon keeps
@@ -491,19 +492,28 @@ updates the existing `maajun/report-<fingerprint>` branch and PR).
 
 ## Modes
 
-| | `suggest` (default) | `fix` |
-|---|---|---|
-| Artifact | A GitHub **issue**, always | A **pull request** with the diff |
-| Agent file access | Read-only | May edit files, but only inside its own clone |
-| Agent shell access | None | None |
-| Contains | Incident report + suggested fix | The change, and a report that records it |
-| Suggestions | In the issue, with a diff | Split off into a **follow-up issue** |
-| Verified | n/a — no diff | By `test_command`, if set |
-| You review | The suggestion | The actual diff |
+| | `suggest` (default) | `fix` | `automatic` |
+|---|---|---|---|
+| Artifact | A GitHub **issue**, always | A **pull request** with the diff | Suggestion issue or verified fix PR |
+| Agent file access | Read-only | May edit only its clone | Read-only unless evidence selects fix |
+| Agent shell access | None | None | None |
+| Contains | Report + suggested fix | Change + report | The selected path + decision reasons |
+| Verified | n/a — no diff | Configured checks, if any | Reproduction and post-fix checks required |
+| You review | The suggestion | The actual diff | The suggestion or actual diff |
 
 Suggest mode files an **issue**, not a pull request: an analysis with no
 diff is an issue, and it is cheaper — the repo is cloned to read, but no
 branch is created and nothing is pushed.
+
+Automatic mode is a per-incident evidence gate, not fix mode with a different
+name. It selects the fix path only when the repository records an active
+deployment identity (`deployment.path`, `runs`, or `service_command`), a
+before/after `reproduction_command`, and at least one post-fix `test_command`
+or `verification_commands` entry. A known Python runtime mismatch also keeps
+the run on the suggestion path. The agent receives the same read-only policy as
+suggest mode or the same clone-only edit policy as fix mode; automatic adds no
+new permission. The artifact records the decision and reasons, while the saved
+repository mode remains `automatic`.
 
 Fix mode ends in a **pull request that contains the fix**. A run that writes
 the report but edits nothing is asked once more for the edit; the escape
@@ -555,8 +565,8 @@ check: a public infrastructure repository requires the application's explicit
 local. The issue records that Maajun did not merge, deploy, reload, or restart
 anything.
 
-**The two modes are asked for different reports.** Suggest mode writes
-"## Suggested fix" — a proposal, with the diff in it. Fix mode writes
+**The two effective paths are asked for different reports.** Suggest writes
+"## Suggested fix" — a proposal, with the diff in it. Fix writes
 "## Applied fix", which records what it already changed, in the past tense,
 with no diff pasted back: the pull request shows the diff, and a copy in the
 body is a second version to check the first against. Anything it decided not
@@ -586,8 +596,9 @@ unusable, no issue or PR is created and the incident is recorded as failed.
 An artifact with nothing in it costs the reader more than it gives, and
 hides that the run went wrong — `maajun incidents` shows it instead.
 
-Either way, **nothing merges without your review**. Start with `suggest`;
-switch to `fix` once you trust the reports.
+In every mode, **nothing merges without your review**. Start with `suggest`,
+choose `automatic` when you want evidence to gate each incident, or use `fix`
+when you explicitly want every incident to attempt a repository change.
 
 ### Verifying a fix
 
@@ -640,7 +651,7 @@ timeout per command. With no configured command the PR is labelled
 **Unverified**.
 
 Every command comes from your config, never from the model: the agent has no
-shell access in either mode, so verification cannot be redirected to run
+shell access in any mode, so verification cannot be redirected to run
 something else.
 
 ## What you get
@@ -660,6 +671,13 @@ something else.
 - Diff: the applied fix, plus `docs/incidents/<fingerprint>.md` so the
   incident stays documented in-repo after the PR is closed
 - Body: the incident report, including an *Applied fix* section
+
+**`automatic` mode — one of the above:**
+
+- An issue when required evidence is missing or runtime-mismatched
+- A PR only after the fix path, verification, independent review, and
+  publication policy all allow it
+- An *Automatic mode decision* section stating which path was selected and why
 
 ## Deduplication
 

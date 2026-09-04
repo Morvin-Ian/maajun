@@ -8,11 +8,13 @@ issue called `KeyError: 'discount'` would send a reader to the wrong file.
 from maajun.config import RepoConfig
 from maajun.daemon.reports import (
     artifact_title,
+    automatic_mode_report,
     commit_subject,
     extract_patches,
     headline,
     headline_problem,
     infrastructure_route_report,
+    split_follow_up,
     verification_section,
     withheld_fix_report,
 )
@@ -54,6 +56,33 @@ def test_infrastructure_route_report_preserves_the_approval_boundary():
     assert "runtime incident belongs to `owner/app`" in rendered
     assert "`owner/infrastructure`" in rendered
     assert "did not merge, deploy, reload, or restart" in rendered
+
+
+def test_automatic_mode_report_explains_a_read_only_decision():
+    rendered = automatic_mode_report(
+        "# Upload failure",
+        effective_mode="suggest",
+        reasons=("no reproduction command is configured",),
+    )
+
+    assert "Automatic mode decision" in rendered
+    assert "kept this run read-only" in rendered
+    assert "no reproduction command" in rendered
+    assert "saved mode was not changed" in rendered
+
+
+def test_automatic_mode_decision_stays_outside_follow_up_tasks():
+    rendered = automatic_mode_report(
+        REPORT + "\n## Follow-up\n### Add coverage\n- Evidence: tests/cart.py:4\n",
+        effective_mode="fix",
+        reasons=("owner-controlled evidence is configured",),
+    )
+
+    report, follow_up = split_follow_up(rendered)
+
+    assert "Automatic mode decision" in report
+    assert "Automatic mode decision" not in follow_up
+    assert "Add coverage" in follow_up
 
 
 # ---------------------------------------------------------------------------

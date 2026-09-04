@@ -379,6 +379,37 @@ def infrastructure_route_report(
     )
 
 
+def automatic_mode_report(
+    report: str,
+    *,
+    effective_mode: str,
+    reasons: tuple[str, ...],
+) -> str:
+    """Make automatic mode's per-incident decision visible to the owner."""
+    outcome = (
+        "selected the fix path with owner-controlled verification"
+        if effective_mode == "fix"
+        else "kept this run read-only"
+    )
+    detail = "\n".join(f"- {reason}" for reason in reasons)
+    section = (
+        "## Automatic mode decision\n"
+        f"Maajun {outcome}.\n"
+        f"{detail}\n"
+        "The repository's saved mode was not changed."
+    )
+    follow_up = FOLLOW_UP_RE.search(report or "")
+    if follow_up:
+        parts = (
+            report[: follow_up.start()].rstrip(),
+            section,
+            report[follow_up.start():].lstrip(),
+        )
+    else:
+        parts = (report.rstrip(), section)
+    return "\n\n".join(part for part in parts if part).rstrip() + "\n"
+
+
 def pr_body(
     repo_config: RepoConfig,
     event: ErrorEvent,

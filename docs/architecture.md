@@ -147,6 +147,9 @@ policy:
   denied: the agent is strictly read-only.
 - **`maajun watch`, fix mode** — file edits are approved only for paths
   inside the daemon's isolated workspace clone.
+- **`maajun watch`, automatic mode** — `modes.decide_run_mode` first selects
+  one of those same two policies. Missing deployment identity, reproduction,
+  post-fix verification, or a known runtime match keeps it read-only.
 - **`maajun chat`** — read-only CLI commands are approved automatically;
   anything that writes prints the exact command line and waits for the
   user; `watch`, `reset`, and `sign-out` are refused outright.
@@ -269,12 +272,14 @@ maajun/
    report (what happened / root cause / likely cause commit / the fix) — the
    last few commits on the base branch are handed to it so the
    report can name the deploy that probably introduced the error. In fix mode it
-   may also edit files in the clone. The clone is synced in both modes —
-   the agent reads the code from it — but only fix mode branches. In a
+   may also edit files in the clone. Automatic mode resolves to suggest or fix
+   for this incident before the agent and branch are created, without changing
+   saved configuration. The clone is synced in every mode — the agent reads the
+   code from it — but only a fix-path run branches. In a
    [multi-repo](monitoring.md#multiple-repositories) config each monitor
    is bound to a repo, so its errors are analyzed against — and open PRs
    on — the right one, each with its own clone, branch, and mode.
-   `prompts.report_format` picks the fix section the mode calls for: suggest
+   `prompts.report_format` picks the fix section the effective mode calls for: suggest
    mode is asked for "## Suggested fix", a proposal with a diff in it, and
    fix mode for "## Applied fix" — what it already changed, in the past
    tense, with no diff pasted back — plus "## Follow-up" for what it left
@@ -376,6 +381,14 @@ maajun/
    pasted back with `FAILED_VERIFICATION_SUFFIX` — tail first, because a runner
    prints what failed last — and all post-fix commands run a second and final
    time, so a repair that did not help ships with its failures stated honestly.
+
+   In `automatic` mode, the fix path is available only when deployment
+   identity, `reproduction_command`, and at least one post-fix command are
+   configured and no known Python runtime mismatch exists. Otherwise the same
+   incident runs under suggest permissions and files an issue. Every automatic
+   artifact includes the selected path and its reasons. A fix-path decision
+   still passes applicability review, verification, visibility policy, and the
+   issue fallbacks above; automatic mode never merges or deploys.
 
    `reports.split_follow_up` then takes the "## Follow-up" section out of the
    report. `followups.parse_follow_ups` requires each deferred task to carry
