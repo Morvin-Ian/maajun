@@ -1524,18 +1524,18 @@ Requests to /items with an empty cart returned a 500.
 it: request /items with an empty cart and read a 200 back.
 
 ## Follow-up
-- `handlers/orders.py:44` makes the same assumption about `lines[0]` and needs
-  the same guard.
-- The empty-collection case has no fixture in this suite; adding one needs a
-  factory that does not exist yet.
+### Guard empty order line access
+- Evidence: `handlers/orders.py:44` reads `lines[0]` although callers allow an empty list.
+- Change: Return the established empty-order response before indexing the collection.
+- Acceptance: A regression test passes for an order whose lines collection is empty.
 """
 
 FIXED_AND_COMPLETE = FIXED_WITH_FOLLOW_UP.replace(
     """## Follow-up
-- `handlers/orders.py:44` makes the same assumption about `lines[0]` and needs
-  the same guard.
-- The empty-collection case has no fixture in this suite; adding one needs a
-  factory that does not exist yet.
+### Guard empty order line access
+- Evidence: `handlers/orders.py:44` reads `lines[0]` although callers allow an empty list.
+- Change: Return the established empty-order response before indexing the collection.
+- Acceptance: A regression test passes for an order whose lines collection is empty.
 """,
     "## Follow-up\nNone\n",
 )
@@ -1590,7 +1590,178 @@ async def test_the_follow_up_is_filed_as_its_own_issue(setup):
     issue = github.issues[0]
     assert issue["title"].startswith("[maajun] Follow-up: ")
     assert "handlers/orders.py:44" in issue["body"]
+    assert "## Acceptance criteria" in issue["body"]
     assert pr_url_of(github) in issue["body"]
+
+
+async def test_a_repair_response_cannot_put_follow_up_text_back_in_the_pr(setup):
+    daemon, logfile, agent, github, store, remote = setup
+    repo_config = daemon.repo_for(daemon.monitors[0])
+
+    class RepairWithFollowUp(FakeAgent):
+        async def chat(self, message):
+            self.prompts.append(message)
+            self.edit_path.write_text("items = [0]\n")
+            content = FIXED_AND_COMPLETE if len(self.prompts) == 1 else FIXED_WITH_FOLLOW_UP
+            return CompletionResponse(content=content, usage=dict(self.usage_per_call))
+
+    repairing = RepairWithFollowUp(
+        edit_path=daemon.workspaces["owner/name"].path / "main.py"
+    )
+    daemon.agent_factory_for_repo = lambda rc, ws: lambda: repairing
+    repo_config.mode = "fix"
+    repo_config.test_command = "echo 'FAILED main.py::test_items'; exit 1"
+
+    with open(logfile, "a") as f:
+        f.write(TRACEBACK)
+    await daemon.poll_once()
+
+    assert len(repairing.prompts) == 2
+    assert "## Follow-up" not in github.calls[0]["body"]
+    assert len(github.issues) == 1
+    assert "Guard empty order line access" in github.issues[0]["title"]
+
+
+async def test_each_valid_follow_up_task_gets_its_own_issue(setup):
+    daemon, logfile, agent, github, store, remote = setup
+    fix_mode(daemon, agent)
+    second = """
+### Add an empty collection factory
+- Evidence: `tests/factories.py:12` creates orders but requires at least one line.
+- Change: Allow the order factory to build an explicitly empty lines collection.
+- Acceptance: Factory tests pass when called with an empty lines collection.
+"""
+    agent.report = FIXED_WITH_FOLLOW_UP + second
+
+    with open(logfile, "a") as f:
+        f.write(TRACEBACK)
+    await daemon.poll_once()
+
+    assert len(github.issues) == 2
+    assert "Guard empty order line access" in github.issues[0]["title"]
+    assert "Add an empty collection factory" in github.issues[1]["title"]
+
+
+async def test_invalid_follow_up_is_rewritten_once_without_repeating_valid_tasks(setup):
+    daemon, logfile, agent, github, store, remote = setup
+    fix_mode(daemon, agent)
+    invalid = """
+### Maybe investigate later
+- Evidence: unknown
+- Change: Look into it.
+"""
+    rewritten = """### Add an empty collection factory
+- Evidence: `tests/factories.py:12` requires every order to contain a line.
+- Change: Allow the order factory to build an explicitly empty lines collection.
+- Acceptance: Factory tests pass when called with an empty lines collection.
+"""
+    agent.replies = [FIXED_WITH_FOLLOW_UP + invalid, rewritten]
+
+    with open(logfile, "a") as f:
+        f.write(TRACEBACK)
+    await daemon.poll_once()
+
+    assert len(agent.prompts) == 2
+    assert "Maybe investigate later" in agent.prompts[1]
+    assert "Guard empty order line access" not in agent.prompts[1]
+    assert len(github.issues) == 2
+
+
+async def test_invalid_follow_up_is_skipped_after_one_failed_rewrite(setup):
+    daemon, logfile, agent, github, store, remote = setup
+    fix_mode(daemon, agent)
+    invalid = """
+## Follow-up
+Maybe investigate an unrelated test failure and the SMTP environment.
+"""
+    agent.replies = [REPORT + invalid, "Still vague and unsupported."]
+
+    with open(logfile, "a") as f:
+        f.write(TRACEBACK)
+    await daemon.poll_once()
+
+    assert len(agent.prompts) == 2
+    assert github.issues == []
+    assert "Follow-up" not in github.calls[0]["body"]
+
+
+async def test_follow_up_issue_failures_do_not_stop_later_tasks(setup):
+    daemon, logfile, agent, github, store, remote = setup
+    fix_mode(daemon, agent)
+    second = """
+### Add an empty collection factory
+- Evidence: `tests/factories.py:12` requires every order to contain a line.
+- Change: Allow the order factory to build an explicitly empty lines collection.
+- Acceptance: Factory tests pass when called with an empty lines collection.
+"""
+    agent.report = FIXED_WITH_FOLLOW_UP + second
+    original_create = github.create_issue
+
+    async def fail_first(repo, *, title, body):
+        if "Guard empty" in title:
+            raise RuntimeError("422")
+        return await original_create(repo, title=title, body=body)
+
+    github.create_issue = fail_first
+
+    with open(logfile, "a") as f:
+        f.write(TRACEBACK)
+    handled = await daemon.poll_once()
+
+    assert len(handled) == 1
+    assert len(github.calls) == 1
+    assert len(github.issues) == 1
+    assert "Add an empty collection factory" in github.issues[0]["title"]
+
+
+async def test_follow_up_rewrite_temporarily_disables_edit_permission(setup):
+    daemon, logfile, agent, github, store, remote = setup
+    repo_config = daemon.repo_for(daemon.monitors[0])
+
+    class PermissionAwareAgent(FakeAgent):
+        def __init__(self, edit_path):
+            super().__init__(edit_path=edit_path)
+            self.approve = "write-policy"
+
+        async def chat(self, message):
+            if self.prompts:
+                assert self.approve is None
+            return await super().chat(message)
+
+    aware = PermissionAwareAgent(daemon.workspaces[repo_config.repo].path / "main.py")
+    aware.replies = [
+        REPORT + "\n## Follow-up\nMaybe inspect this later.",
+        "None",
+    ]
+    daemon.agent_factory_for_repo = lambda rc, ws: lambda: aware
+    repo_config.mode = "fix"
+
+    with open(logfile, "a") as f:
+        f.write(TRACEBACK)
+    await daemon.poll_once()
+
+    assert aware.approve == "write-policy"
+    assert len(aware.prompts) == 2
+
+
+async def test_no_more_than_three_follow_up_issues_are_filed(setup):
+    daemon, logfile, agent, github, store, remote = setup
+    fix_mode(daemon, agent)
+    tasks = "\n".join(
+        f"""### Add regression guard number {number}
+- Evidence: `handlers/orders{number}.py:44` indexes a collection that callers may leave empty.
+- Change: Return the established empty response before indexing this collection.
+- Acceptance: A regression test passes for handler number {number} with an empty collection.
+"""
+        for number in range(1, 5)
+    )
+    agent.report = REPORT + f"\n## Follow-up\n{tasks}"
+
+    with open(logfile, "a") as f:
+        f.write(TRACEBACK)
+    await daemon.poll_once()
+
+    assert len(github.issues) == 3
 
 
 async def test_a_complete_fix_files_no_follow_up(setup):

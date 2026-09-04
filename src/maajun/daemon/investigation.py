@@ -17,10 +17,17 @@ from typing import TYPE_CHECKING
 from maajun.agent.core import accumulate_usage
 from maajun.config import RepoConfig
 from maajun.daemon import reports
+from maajun.daemon.followups import (
+    MAX_FOLLOW_UP_ISSUES,
+    FollowUpTask,
+    InvalidFollowUp,
+    parse_follow_ups,
+)
 from maajun.daemon.prompts import (
     DEPLOYMENT_SECTION,
     FAILED_TESTS_SUFFIX,
     FIX_PROMPT_SUFFIX,
+    FOLLOW_UP_RETRY_SUFFIX,
     REGRESSION_SECTION,
     RETRY_SUFFIX,
     UNAPPLIED_FIX_SUFFIX,
@@ -94,6 +101,7 @@ class Investigation:
     # What this run produced, for the daemon to report to the CLI.
     artifact_kind: str | None = None
     ignored_reason: str = ""
+    follow_up_source: str = ""
 
     def __post_init__(self) -> None:
         self.opens_pull_request = self.repo_config.mode == "fix"
@@ -285,20 +293,27 @@ class Investigation:
         Returns "" when the commit turned out to carry no fix, in which case
         nothing was pushed and the caller files the analysis as an issue.
         """
+        follow_ups = await self.prepare_follow_ups()
         verification, unrelated = await self.verified_fix()
+        follow_ups = self.finalize_follow_ups(follow_ups)
         self.progress("Opening PR")
         # Filed apart: a reviewer should not have to work out which lines of
         # the report the diff already covers.
-        report, follow_up = reports.split_follow_up(self.report)
         reports.write_report_file(
-            self.workspace.path / reports.INCIDENT_REPORT_DIR, self.event, report
+            self.workspace.path / reports.INCIDENT_REPORT_DIR, self.event, self.report
         )
         await self.workspace.commit_all(self.commit_message)
         if not await self.committed_code_changes():
+            if self.follow_up_source:
+                self.report = (
+                    self.report.rstrip()
+                    + "\n\n## Follow-up\n"
+                    + self.follow_up_source.strip()
+                    + "\n"
+                )
             return ""
         # Past the gate, so the split is what gets published; before it, the
         # whole report — follow-up included — is still what the issue says.
-        self.report = report
         await self.workspace.push(self.plan.branch)
         url = await self.daemon.github.create_pull_request(
             self.repo_config.repo,
@@ -311,7 +326,7 @@ class Investigation:
                 unrelated_failure=unrelated,
             ),
         )
-        await self.file_follow_up(follow_up, url)
+        await self.file_follow_ups(follow_ups, url)
         return url
 
     async def committed_code_changes(self) -> list[str]:
@@ -488,32 +503,112 @@ class Investigation:
         )
         return result
 
-    async def file_follow_up(self, follow_up: str, pr_url: str) -> str:
-        """File what the fix left for later as its own issue. Returns its URL.
+    async def prepare_follow_ups(self) -> list[FollowUpTask]:
+        """Validate deferred tasks and give invalid ones one read-only rewrite."""
+        report, raw = reports.split_follow_up(self.report)
+        self.follow_up_source = raw
+        self.report = report
+        parsed = parse_follow_ups(raw)
+        tasks = list(parsed.tasks)
+        if parsed.invalid:
+            log.info(
+                "asking once to rewrite %d invalid follow-up task(s) for fp=%s",
+                len(parsed.invalid), self.event.fingerprint,
+            )
+            rewritten = await self.rewrite_follow_ups(parsed.invalid)
+            retried = parse_follow_ups(rewritten)
+            tasks.extend(retried.tasks)
+            for invalid in retried.invalid:
+                log.warning(
+                    "skipping invalid follow-up for fp=%s after rewrite: %s",
+                    self.event.fingerprint, "; ".join(invalid.problems),
+                )
 
-        The sibling call site with the same bug, the hardening, the test that
-        needs a fixture this change does not build. In the PR body those read
-        as things the diff does; as an issue they read as what they are.
+        return self.deduplicate_follow_ups(tasks)
 
-        Never fatal — the pull request is already open and carries the fix.
+    def finalize_follow_ups(
+        self, prepared: list[FollowUpTask]
+    ) -> list[FollowUpTask]:
+        """Keep repair responses from putting follow-up prose back in the PR.
+
+        A verification repair asks for the full report again, so it can repeat
+        or regenerate the Follow-up section after the one allowed rewrite has
+        already happened. At this point verification is complete: strip the
+        section, retain any valid tasks, and skip invalid material without
+        another model round.
         """
-        if not reports.worth_following_up(follow_up):
-            return ""
-        self.progress("Filing follow-up issue")
+        report, raw = reports.split_follow_up(self.report)
+        self.report = report
+        if not raw:
+            return prepared
+        parsed = parse_follow_ups(raw)
+        for invalid in parsed.invalid:
+            log.warning(
+                "skipping invalid follow-up for fp=%s after verification: %s",
+                self.event.fingerprint, "; ".join(invalid.problems),
+            )
+        return self.deduplicate_follow_ups([*prepared, *parsed.tasks])
+
+    def deduplicate_follow_ups(
+        self, tasks: list[FollowUpTask]
+    ) -> list[FollowUpTask]:
+        unique = []
+        seen = set()
+        for task in tasks:
+            key = (task.title.casefold(), task.evidence.casefold())
+            if key in seen:
+                continue
+            seen.add(key)
+            unique.append(task)
+        if len(unique) > MAX_FOLLOW_UP_ISSUES:
+            log.warning(
+                "follow-up for fp=%s has %d valid tasks; filing the first %d",
+                self.event.fingerprint, len(unique), MAX_FOLLOW_UP_ISSUES,
+            )
+        return unique[:MAX_FOLLOW_UP_ISSUES]
+
+    async def rewrite_follow_ups(self, invalid: tuple[InvalidFollowUp, ...]) -> str:
+        self.progress("Improving follow-up tasks")
+        details = "\n\n".join(
+            f"{item.text}\nProblems: {'; '.join(item.problems)}" for item in invalid
+        )
+        had_approve = hasattr(self.agent, "approve")
+        previous_approve = getattr(self.agent, "approve", None)
+        if had_approve:
+            self.agent.approve = None
         try:
-            url = await self.daemon.github.create_issue(
-                self.repo_config.repo,
-                title=reports.follow_up_title(self.report, self.plan.subject_fallback),
-                body=reports.follow_up_body(self.event, follow_up, pr_url),
-            )
-        except Exception:
-            log.exception(
-                "could not file the follow-up for fp=%s; %s still has the fix",
-                self.event.fingerprint, pr_url,
-            )
-            return ""
-        log.info("filed follow-up %s for the fix in %s", url, pr_url)
-        return url
+            response = await self.ask(FOLLOW_UP_RETRY_SUFFIX.format(invalid=details))
+        finally:
+            if had_approve:
+                self.agent.approve = previous_approve
+        return response.content.strip()
+
+    async def file_follow_ups(
+        self, follow_ups: list[FollowUpTask], pr_url: str
+    ) -> list[str]:
+        """File each deferred task independently. Failures never retract the PR.
+
+        A sibling call site and missing regression fixture are separate pieces
+        of work, so they get separate titles, evidence, and acceptance checks.
+        """
+        urls = []
+        for index, follow_up in enumerate(follow_ups, start=1):
+            self.progress(f"Filing follow-up issue {index}/{len(follow_ups)}")
+            try:
+                url = await self.daemon.github.create_issue(
+                    self.repo_config.repo,
+                    title=reports.follow_up_title(follow_up),
+                    body=reports.follow_up_body(self.event, follow_up, pr_url),
+                )
+            except Exception:
+                log.exception(
+                    "could not file follow-up %d for fp=%s; %s still has the fix",
+                    index, self.event.fingerprint, pr_url,
+                )
+                continue
+            log.info("filed follow-up %s for the fix in %s", url, pr_url)
+            urls.append(url)
+        return urls
 
     # -- the endings that publish nothing -----------------------------------
 
