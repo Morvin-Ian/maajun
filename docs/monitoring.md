@@ -546,8 +546,14 @@ independent read-only reviewer. The review checks the failing layer, product
 contract, numeric/protocol boundaries, bounded request handling, behavioral
 tests, isolated test storage, runtime relevance, unrelated work and sensitive
 evidence. One focused correction is allowed, followed by a complete
-verification rerun. A change still blocked after that becomes an issue in the
-target repository; no branch is pushed.
+verification rerun. A change still blocked after that remains in the
+application repository, except an unmapped operator-owned deployment edit is
+routed to `deployment.infra_repo` when configured; no branch is pushed.
+Passive findings sent to that repository pass the same visibility
+check: a public infrastructure repository requires the application's explicit
+`allow_public_runtime_artifacts = true` opt-in, while unknown visibility stays
+local. The issue records that Maajun did not merge, deploy, reload, or restart
+anything.
 
 **The two modes are asked for different reports.** Suggest mode writes
 "## Suggested fix" — a proposal, with the diff in it. Fix mode writes

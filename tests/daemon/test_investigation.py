@@ -119,6 +119,7 @@ async def test_inactive_deployment_config_is_withheld_as_an_issue(setup):
         proxy_config_path="/etc/nginx/sites-available/api.example.com",
         proxy_body_limit="1m (nginx default; no active directive found)",
         config_owner="operator",
+        infra_repo="owner/infrastructure",
     )
     author.edit_path = daemon.workspaces[repo.repo].path / "nginx.conf"
     first_critic = FakeAgent("PASS")
@@ -136,7 +137,7 @@ async def test_inactive_deployment_config_is_withheld_as_an_issue(setup):
 
     assert github.calls == []
     assert len(github.issues) == 1
-    assert github.issues[0]["repo"] == "owner/name"
+    assert github.issues[0]["repo"] == "owner/infrastructure"
     assert github.issues[0]["title"] == (
         "[maajun] Raise the active nginx request-body limit"
     )
@@ -146,6 +147,8 @@ async def test_inactive_deployment_config_is_withheld_as_an_issue(setup):
     assert "Draft repository change (not published)" in github.issues[0]["body"]
     assert "/etc/nginx/sites-available/api.example.com" in github.issues[0]["body"]
     assert "nginx.conf" in github.issues[0]["body"]
+    assert "Infrastructure routing" in github.issues[0]["body"]
+    assert "did not merge, deploy, reload, or restart" in github.issues[0]["body"]
     assert str(daemon.workspaces[repo.repo].path) in final_critic.prompts[0]
     assert "deployment folder is runtime evidence" in final_critic.prompts[0]
     assert "Active proxy request-body limit: 1m" in final_critic.prompts[0]
@@ -229,6 +232,8 @@ async def test_failed_quality_correction_withholds_the_fix(setup):
     fix_mode(daemon, dying)
     repo = daemon.repo_for(daemon.monitors[0])
     repo.deployment.service_command = "/usr/bin/python -m app"
+    repo.deployment.config_owner = "operator"
+    repo.deployment.infra_repo = "owner/infrastructure"
     critic = FakeAgent(
         "BLOCK\nIssue title: Add an upload boundary test\n"
         "The regression test does not exercise the request boundary."
@@ -242,6 +247,7 @@ async def test_failed_quality_correction_withholds_the_fix(setup):
 
     assert github.calls == []
     assert len(github.issues) == 1
+    assert github.issues[0]["repo"] == "owner/name"
     assert "Fix publication withheld" in github.issues[0]["body"]
     assert "one allowed correction could not run" in github.issues[0]["body"]
     assert len(dying.prompts) == 2

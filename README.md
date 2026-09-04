@@ -634,6 +634,10 @@ that reports no cache hits: every input token is charged at the miss rate.
   boundary and behavioral tests. One correction is allowed and all configured
   checks run again; a still-blocked change is never pushed. Its issue labels
   the local change as an unpublished draft and titles the unresolved failure.
+- **Infrastructure findings go to their owner.** When a withheld fix contains
+  an unmapped operator-owned deployment edit and `deployment.infra_repo` is
+  configured, Maajun files the review issue there. Passive events pass the same
+  public/private visibility gate; Maajun never deploys or reloads services.
 - **Runtime evidence is sanitised.** Credentials, cookies, provider tokens,
   request bodies, URL passwords, IP/email addresses, UUIDs and query values
   are redacted at ingestion and checked again before reports, issues and pull

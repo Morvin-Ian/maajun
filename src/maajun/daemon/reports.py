@@ -362,6 +362,23 @@ def withheld_fix_report(report: str, reasons: str) -> str:
     )
 
 
+def infrastructure_route_report(
+    report: str,
+    *,
+    application_repo: str,
+    infrastructure_repo: str,
+) -> str:
+    """Explain why an application incident is filed with infrastructure."""
+    return (
+        report.rstrip()
+        + "\n\n## Infrastructure routing\n"
+        + f"The runtime incident belongs to `{application_repo}`. Maajun selected "
+        + f"`{infrastructure_repo}` because that repository is configured as the "
+        + "owner of the active deployment artifact. This issue requests owner "
+        + "review; Maajun did not merge, deploy, reload, or restart anything.\n"
+    )
+
+
 def pr_body(
     repo_config: RepoConfig,
     event: ErrorEvent,
