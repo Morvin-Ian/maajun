@@ -16,6 +16,7 @@ from maajun.daemon.prompts import (
     ANALYZE_PROMPT,
     INVESTIGATION_RULES,
     MANUAL_REPORT_PROMPT,
+    PROMOTION_PROMPT,
     RECENT_COMMITS_SECTION,
     report_format,
 )
@@ -26,9 +27,9 @@ from maajun.daemon.store import (
     ARTIFACT_REPORT,
     IncidentStore,
 )
-from maajun.monitors import ErrorEvent, Monitor
+from maajun.monitors import ErrorEvent, Monitor, fingerprint
 from maajun.utils import utc_day_start_iso
-from maajun.vcs import GitHubClient, GitWorkspace
+from maajun.vcs import GitHubClient, GitHubIssue, GitWorkspace
 
 log = logging.getLogger(__name__)
 
@@ -639,6 +640,60 @@ class Daemon:
                 # behind either — the row exists only to be marked processed.
                 forget_on_dry_run=True,
                 dry_run=dry_run,
+            ),
+        )
+
+    async def handle_promotion(
+        self,
+        issue: GitHubIssue,
+        original_fingerprint: str,
+        repo_config: RepoConfig,
+        *,
+        dry_run: bool = False,
+        progress: ProgressCallback = no_operation,
+    ) -> str:
+        """Re-investigate a recorded issue on current code and open its fix PR."""
+        workspace = self.workspace_for(repo_config)
+        promotion_fingerprint = fingerprint(
+            f"promotion:{repo_config.repo}#{issue.number}"
+        )
+        event = ErrorEvent(
+            source=f"promotion:{issue.html_url}",
+            message=issue.title[:200],
+            details=issue.body,
+            fingerprint=promotion_fingerprint,
+            repo=repo_config.repo,
+        )
+        existing = self.store.get(event.fingerprint, event.repo)
+        if existing and existing["artifact_kind"] == ARTIFACT_PR and existing["pr_url"]:
+            self.last_artifact_kind = ARTIFACT_PR
+            return existing["pr_url"]
+        self.store.record(event)
+        return await self.investigate(
+            event,
+            repo_config,
+            workspace,
+            progress,
+            Plan(
+                branch=f"maajun/promotion-{original_fingerprint}",
+                prompt=PROMOTION_PROMPT.format(
+                    workspace=workspace.path,
+                    issue_url=issue.html_url,
+                    title=issue.title,
+                    body=issue.body[:MAX_DETAILS_IN_PROMPT],
+                    rules=INVESTIGATION_RULES,
+                    format=report_format("suggest" if dry_run else "fix"),
+                ),
+                subject_fallback=issue.title,
+                commit_prefix="maajun: promote issue for",
+                dry_run_header=f"AI fix for issue #{issue.number}",
+                dry_run_extra=(f"Original issue: {issue.html_url}",),
+                forget_on_dry_run=True,
+                blame_deploy=True,
+                dry_run=dry_run,
+                sync_on_dry_run=True,
+                issue_fallback=False,
+                closes_issue_url=issue.html_url,
             ),
         )
 

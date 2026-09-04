@@ -340,6 +340,37 @@ the failure). The PR branch is `maajun/report-<fingerprint>`. Requires the
 same setup as `watch` (a configured repo, a GitHub token, and a provider
 key); run `maajun status` first if unsure.
 
+### `maajun promote INCIDENT`
+
+Turn an issue previously created by this Maajun installation into a fix PR.
+`INCIDENT` may be its fingerprint (or an unambiguous prefix), its GitHub issue
+URL, or its issue number. A bare number needs `--repo` when several configured
+repositories have recorded incidents.
+
+```bash
+maajun promote 9f3c1ab77e02d418
+maajun promote 29 --repo you/shop
+maajun promote https://github.com/you/shop/issues/29 --dry-run
+```
+
+| Flag | Meaning |
+|------|---------|
+| `-r, --repo OWNER/NAME` | Disambiguate a fingerprint or issue number |
+| `-b, --base-branch NAME` | Base the fix on this branch for this run only |
+| `--dry-run` | Re-investigate and print the report without creating a branch or PR |
+| `--verbose` | Show debug output |
+| `-c, --config PATH` | Config file location |
+
+Only recorded Maajun issues are accepted. Promotion fetches the issue for its
+full report and error details, but treats that text as evidence rather than
+instructions. It re-investigates the current checkout in fix mode without
+changing the saved monitoring mode. The PR says `Fixes <issue URL>`, so the
+issue closes only if an owner merges it. Promotion never merges or deploys.
+
+If no code change is justified, no duplicate issue or empty PR is created; the
+original issue remains open and the current report is written under Maajun's
+data directory.
+
 ## Chat
 
 ### `maajun chat`

@@ -181,6 +181,21 @@ In `fix` mode the same analysis arrives as a pull request: the applied diff, the
 report committed as `docs/incidents/<fingerprint>.md`, and your test suite's
 verdict at the top of the body.
 
+An issue created in `suggest` mode can be promoted later, after a person has
+reviewed the analysis:
+
+```bash
+maajun promote 9f3c1ab77e02d418
+maajun promote https://github.com/you/shop/issues/29
+```
+
+Promotion reads the recorded issue, checks the current base branch again, and
+opens a fix PR containing `Fixes <issue URL>`. It does not trust or blindly
+apply the old suggested patch, change the repository's saved mode, close the
+issue, merge the PR, or deploy it. If current code offers no fix, maajun leaves
+the original issue open and saves the new analysis locally instead of creating
+a duplicate issue or an empty PR.
+
 A fix-mode run that writes the report but changes no code is asked once more
 for the edit. If it still finds nothing in the repository that should differ,
 the analysis is filed as an **issue** rather than a pull request with no diff

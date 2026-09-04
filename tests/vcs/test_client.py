@@ -92,6 +92,42 @@ async def test_create_pull_request_error_surfaces_detail():
         )
 
 
+async def test_get_issue_returns_the_issue_content():
+    def handler(request):
+        assert request.url.path == "/repos/owner/name/issues/12"
+        return httpx.Response(200, json={
+            "number": 12,
+            "title": "Broken checkout",
+            "body": "Traceback and analysis",
+            "html_url": "https://github.com/owner/name/issues/12",
+            "state": "open",
+        })
+
+    issue = await make_client(handler).get_issue("owner/name", 12)
+
+    assert issue.number == 12
+    assert issue.title == "Broken checkout"
+    assert issue.body == "Traceback and analysis"
+    assert issue.state == "open"
+
+
+async def test_get_issue_rejects_a_pull_request():
+    client = make_client(lambda request: httpx.Response(200, json={
+        "number": 12,
+        "pull_request": {"url": "https://api.github.com/pulls/12"},
+    }))
+
+    with pytest.raises(GitHubError, match="pull request, not an issue"):
+        await client.get_issue("owner/name", 12)
+
+
+async def test_get_issue_explains_a_missing_issue():
+    client = make_client(lambda request: httpx.Response(404, json={}))
+
+    with pytest.raises(GitHubError, match="was not found"):
+        await client.get_issue("owner/name", 404)
+
+
 async def test_client_is_reused_across_requests():
     calls = {"n": 0}
 
