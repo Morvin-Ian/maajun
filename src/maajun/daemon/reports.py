@@ -286,6 +286,7 @@ def issue_body(
     previous_url: str = "",
     *,
     unfixed: bool = False,
+    withheld: bool = False,
 ) -> str:
     """The analysis plus the raw error.
 
@@ -293,11 +294,19 @@ def issue_body(
     nothing in the repository to change — `unfixed` says which, so a reader
     knows the fix was attempted rather than never asked for.
     """
-    note = (
-        "> **No code change.** Fix mode investigated this and found nothing "
-        "in the repository to change; the analysis is below.\n\n"
-        if unfixed else ""
-    )
+    if withheld:
+        note = (
+            "> **Fix PR withheld.** Maajun drafted repository changes, but its "
+            "publication review found they do not resolve the active failure. "
+            "Nothing was pushed; draft changes below are evidence only.\n\n"
+        )
+    elif unfixed:
+        note = (
+            "> **No code change.** Fix mode investigated this and found nothing "
+            "in the repository to change; the analysis is below.\n\n"
+        )
+    else:
+        note = ""
     return sanitize_artifact(
         regression_note(previous_url)
         + note
@@ -329,6 +338,27 @@ def withheld_runtime_report(
         + "\n\n## Runtime publication policy\n"
         + reason.strip()
         + ". No runtime branch was pushed to a public repository.\n"
+    )
+
+
+def withheld_fix_report(report: str, reasons: str) -> str:
+    """Make an unpublished draft impossible to mistake for an applied fix."""
+    draft, replacements = re.subn(
+        r"^(#{1,3})\s+Applied fix\s*$",
+        r"\1 Draft repository change (not published)",
+        report.rstrip(),
+        flags=re.MULTILINE | re.IGNORECASE,
+    )
+    if not replacements:
+        draft += (
+            "\n\n## Draft repository change (not published)\n"
+            "Maajun made a local draft while investigating, but did not push it."
+        )
+    return (
+        draft
+        + "\n\n## Fix publication withheld\n"
+        + reasons.strip()
+        + "\n"
     )
 
 

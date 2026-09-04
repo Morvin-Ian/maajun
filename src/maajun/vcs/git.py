@@ -8,6 +8,7 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
+from maajun.agent.tools.sandbox import PRIVATE_NAMES, is_secret
 from maajun.vcs.github import GitHubClient, GitHubError
 
 ASKPASS_SCRIPT = '#!/bin/sh\necho "$MAAJUN_GIT_TOKEN"\n'
@@ -17,6 +18,7 @@ COMMIT_EMAIL = "maajun@localhost"
 
 # Long enough for a cold clone, short enough not to stall the poll loop.
 GIT_TIMEOUT = 120
+MAX_REVIEW_FILE_BYTES = 100_000
 
 
 class GitError(Exception):
@@ -161,6 +163,62 @@ class GitWorkspace:
             # "R  old -> new": the new name is the one on disk.
             paths.append(path.rpartition(" -> ")[2] or path)
         return paths
+
+    async def working_diff(self) -> str:
+        """The uncommitted patch for a bounded, read-only publication review."""
+        tracked_names = await self.git(
+            "diff", "HEAD", "--name-only", "-z", "--no-ext-diff"
+        )
+        reviewable_tracked = [
+            relative
+            for relative in tracked_names.split("\0")
+            if relative and self.reviewable_path(relative)
+        ]
+        tracked = ""
+        if reviewable_tracked:
+            tracked = await self.git(
+                "diff", "HEAD", "--no-ext-diff", "--no-textconv", "--",
+                *reviewable_tracked,
+            )
+        status = await self.git("status", "--porcelain", "-z", "--untracked-files=all")
+        additions = []
+        for entry in status.split("\0"):
+            if not entry.startswith("?? "):
+                continue
+            relative = entry[3:]
+            path = self.path / relative
+            if not path.is_file() or not self.reviewable_path(relative):
+                continue
+            try:
+                content = path.read_text(errors="replace")
+            except OSError:
+                continue
+            additions.append(
+                f"diff --git a/{relative} b/{relative}\n"
+                f"new file mode 100644\n--- /dev/null\n+++ b/{relative}\n"
+                + "\n".join(f"+{item}" for item in content.splitlines())
+            )
+        return "\n".join(part for part in (tracked, *additions) if part)
+
+    def reviewable_path(self, relative: str) -> bool:
+        """Whether a proposed file is safe and bounded enough for a prompt."""
+        path = self.path / relative
+        try:
+            root = self.path.resolve()
+            resolved = path.resolve()
+            if not resolved.is_relative_to(root):
+                return False
+            if (
+                is_secret(path)
+                or is_secret(resolved)
+                or path.name in PRIVATE_NAMES
+                or resolved.name in PRIVATE_NAMES
+                or ".git" in resolved.relative_to(root).parts
+            ):
+                return False
+            return not path.exists() or resolved.stat().st_size <= MAX_REVIEW_FILE_BYTES
+        except OSError:
+            return False
 
     async def apply_patches(self, patches: list[str]) -> None:
         """Apply unified diffs to the working tree, all or none.
