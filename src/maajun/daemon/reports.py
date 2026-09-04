@@ -307,6 +307,31 @@ def issue_body(
     )
 
 
+def withheld_runtime_report(
+    report: str, reason: str, *, drafted: bool = False
+) -> str:
+    """Explain why passive runtime evidence was not put in a public PR."""
+    if "## Runtime publication policy" in report:
+        return report
+    draft, replacements = re.subn(
+        r"^(#{1,3})\s+Applied fix\s*$",
+        r"\1 Draft repository change (not published)",
+        report.rstrip(),
+        flags=re.MULTILINE | re.IGNORECASE,
+    )
+    if drafted and not replacements:
+        draft += (
+            "\n\n## Draft repository change (not published)\n"
+            "Maajun made a local draft while investigating, but did not push it."
+        )
+    return (
+        draft
+        + "\n\n## Runtime publication policy\n"
+        + reason.strip()
+        + ". No runtime branch was pushed to a public repository.\n"
+    )
+
+
 def pr_body(
     repo_config: RepoConfig,
     event: ErrorEvent,

@@ -22,7 +22,8 @@ LEGACY_GITHUB_SCALARS = (
 )
 PER_REPO_FIELDS = (
     "base_branch", "mode", "log_files", "test_command", "verification_commands",
-    "reproduction_command",
+    "reproduction_command", "runtime_artifact_repo",
+    "allow_public_runtime_artifacts",
 )
 
 
@@ -152,6 +153,10 @@ class RepoConfig(Base):
     test_command: str = ""
     verification_commands: list[str] = Field(default_factory=list)
     reproduction_command: str = ""
+    # Passive runtime evidence stays local when the target is public unless
+    # explicitly allowed or routed to a non-public repository.
+    runtime_artifact_repo: str = ""
+    allow_public_runtime_artifacts: bool = False
     deployment: DeploymentConfig = Field(default_factory=DeploymentConfig)
 
     def post_fix_commands(self) -> list[str]:
@@ -183,6 +188,13 @@ class RepoConfig(Base):
     def validate_repo(cls, value: str) -> str:
         if value and not is_valid_repo(value):
             raise ValueError('repo must be in "owner/name" form')
+        return value
+
+    @field_validator("runtime_artifact_repo")
+    @classmethod
+    def validate_runtime_artifact_repo(cls, value: str) -> str:
+        if value and not is_valid_repo(value):
+            raise ValueError('runtime_artifact_repo must be in "owner/name" form')
         return value
 
 
@@ -364,6 +376,10 @@ class Config(Base):
                     repo_table["verification_commands"] = repo_config.verification_commands
                 if repo_config.reproduction_command:
                     repo_table["reproduction_command"] = repo_config.reproduction_command
+                if repo_config.runtime_artifact_repo:
+                    repo_table["runtime_artifact_repo"] = repo_config.runtime_artifact_repo
+                if repo_config.allow_public_runtime_artifacts:
+                    repo_table["allow_public_runtime_artifacts"] = True
                 # Attached only once there is something to say, or every
                 # existing config grows an empty [github.repos.deployment].
                 if repo_config.deployment.describes_a_deployment():

@@ -42,6 +42,7 @@ from maajun.daemon.store import (
 from maajun.daemon.verification import VerificationCheck, VerificationSummary
 from maajun.monitors import ErrorEvent
 from maajun.providers.pricing import extract_usage
+from maajun.publication import choose_runtime_artifact_target
 from maajun.utils import truncate_tail
 from maajun.vcs import CommandResult, GitError, GitWorkspace
 from maajun.verification_runtime import verification_runtime_mismatch
@@ -76,6 +77,9 @@ class Plan:
     sync_on_dry_run: bool = False
     issue_fallback: bool = True
     closes_issue_url: str = ""
+    # True only for passively observed log events. Manual reports and issue
+    # promotions are already deliberate owner publication decisions.
+    runtime_event: bool = False
 
 
 @dataclass
@@ -108,6 +112,7 @@ class Investigation:
     ignored_reason: str = ""
     follow_up_source: str = ""
     reproduction_before: CommandResult | None = None
+    publication_block: str = ""
 
     def __post_init__(self) -> None:
         self.opens_pull_request = self.repo_config.mode == "fix"
@@ -279,6 +284,12 @@ class Investigation:
             if not self.plan.issue_fallback:
                 return self.save_local_report()
 
+        if self.opens_pull_request and not await self.runtime_pr_is_allowed():
+            self.opens_pull_request = False
+            self.report = reports.withheld_runtime_report(
+                self.report, self.publication_block, drafted=True
+            )
+
         if self.opens_pull_request:
             url = await self.open_pull_request()
             if url:
@@ -289,8 +300,23 @@ class Investigation:
             self.opens_pull_request = False
 
         url = await self.file_issue()
+        if not url:
+            return self.save_local_report()
         self.record(url, "", ARTIFACT_ISSUE)
         return url
+
+    async def runtime_pr_is_allowed(self) -> bool:
+        if not self.plan.runtime_event:
+            return True
+        decision = await choose_runtime_artifact_target(
+            self.daemon.github,
+            self.repo_config.repo,
+            allow_public=self.repo_config.allow_public_runtime_artifacts,
+        )
+        if decision.allowed:
+            return True
+        self.publication_block = decision.reason
+        return False
 
     async def code_changes(self) -> list[str]:
         """The files this run changed that a reviewer would call a fix.
@@ -375,14 +401,41 @@ class Investigation:
         return changed
 
     async def file_issue(self) -> str:
+        target_repo = self.repo_config.repo
+        if self.plan.runtime_event:
+            decision = await choose_runtime_artifact_target(
+                self.daemon.github,
+                target_repo,
+                allow_public=self.repo_config.allow_public_runtime_artifacts,
+                fallback_repo=self.repo_config.runtime_artifact_repo,
+            )
+            if not decision.allowed:
+                drafted = bool(self.publication_block)
+                self.publication_block = decision.reason
+                self.report = reports.withheld_runtime_report(
+                    self.report,
+                    decision.reason,
+                    drafted=drafted,
+                )
+                return ""
+            target_repo = decision.repository
+            if decision.reason:
+                self.report = reports.withheld_runtime_report(
+                    self.report,
+                    decision.reason,
+                    drafted=bool(self.publication_block),
+                )
         self.progress("Filing issue")
         return await self.daemon.github.create_issue(
-            self.repo_config.repo,
+            target_repo,
             title=self.title,
             body=reports.issue_body(
                 self.event, self.report,
                 previous_url=self.previous["url"] if self.previous else "",
-                unfixed=self.repo_config.mode == "fix",
+                unfixed=(
+                    self.repo_config.mode == "fix"
+                    and not self.publication_block
+                ),
             ),
         )
 

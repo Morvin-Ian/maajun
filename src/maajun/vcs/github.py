@@ -99,6 +99,29 @@ class GitHubClient:
             raise GitHubError(f"GitHub /repos returned {resp.status_code}: {resp.text[:200]}")
         return bool(resp.json().get("permissions", {}).get("push"))
 
+    async def repository_visibility(self, repo: str) -> str:
+        """Return public, private, or internal for one accessible repository."""
+        resp = await self.request("GET", f"/repos/{repo}")
+        if resp.status_code == 404:
+            raise GitHubError(
+                f"Repo '{repo}' not found or the token has no access to it."
+            )
+        if resp.status_code != 200:
+            raise GitHubError(
+                f"GitHub /repos returned {resp.status_code}: {resp.text[:200]}"
+            )
+        data = resp.json()
+        visibility = data.get("visibility")
+        if visibility not in {"public", "private", "internal"}:
+            private = data.get("private")
+            if isinstance(private, bool):
+                visibility = "private" if private else "public"
+            else:
+                raise GitHubError(
+                    f"GitHub did not report visibility for repo '{repo}'."
+                )
+        return visibility
+
     async def create_pull_request(
         self, repo: str, *, head: str, base: str, title: str, body: str,
     ) -> str:

@@ -36,6 +36,9 @@ provider = "deepseek"
 repo = "owner/name"           # repository maajun reports to
 base_branch = "main"          # branch PRs target
 mode = "suggest"              # "suggest" or "fix" — see Modes below
+# Passive runtime evidence is not published to a public repo by default.
+# runtime_artifact_repo = "owner/private-incidents"  # optional private/internal target
+# allow_public_runtime_artifacts = true               # explicit public opt-in
 # log_files = ["/var/log/api/error.log"]   # watched for this repo only
 # test_command = "pytest -q"  # verifies a fix-mode edit; result goes in the PR
 
@@ -515,6 +518,26 @@ differ, the analysis is filed as an **issue** — no branch, no push, no pull
 request with an empty diff. The issue says the fix was attempted, so it is
 not mistaken for suggest mode. A fix-mode PR therefore always has something
 to merge.
+
+### Public and private runtime artifacts
+
+An error caught by `watch` can contain operational context that is safe for
+the application team but not for the whole internet. Before opening an issue
+or pushing a fix branch, Maajun asks GitHub for the target repository's actual
+visibility. Private and internal repositories proceed normally. A public
+repository requires `allow_public_runtime_artifacts = true`; without that
+explicit opt-in, Maajun either routes the issue to the configured non-public
+`runtime_artifact_repo` or keeps the report locally. Unknown or inaccessible
+visibility also stays local. A fallback repository must itself be private or
+internal.
+
+This gate applies to passively collected runtime events. `maajun report` and
+`maajun promote` are deliberate owner actions, so they keep their chosen
+repository. Redaction still applies to every artifact. This follows OWASP's
+[logging guidance](https://cheatsheetseries.owasp.org/cheatsheets/Logging_Cheat_Sheet.html):
+logs may contain personal, internal-network, credential, and commercially
+sensitive data, and evidence sent to a third party should be minimized and
+sanitized.
 
 **The two modes are asked for different reports.** Suggest mode writes
 "## Suggested fix" — a proposal, with the diff in it. Fix mode writes

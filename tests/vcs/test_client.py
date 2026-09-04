@@ -50,6 +50,36 @@ async def test_can_push_missing_repo_raises():
         await client.can_push("owner/name")
 
 
+async def test_repository_visibility_is_refreshed_before_each_publication():
+    calls = 0
+
+    def handler(request):
+        nonlocal calls
+        calls += 1
+        assert request.url.path == "/repos/owner/name"
+        visibility = "private" if calls == 1 else "public"
+        return httpx.Response(200, json={"visibility": visibility})
+
+    client = make_client(handler)
+
+    assert await client.repository_visibility("owner/name") == "private"
+    assert await client.repository_visibility("owner/name") == "public"
+    assert calls == 2
+
+
+async def test_repository_visibility_falls_back_to_private_boolean():
+    client = make_client(lambda request: httpx.Response(200, json={"private": False}))
+
+    assert await client.repository_visibility("owner/name") == "public"
+
+
+async def test_repository_visibility_fails_closed_when_github_omits_it():
+    client = make_client(lambda request: httpx.Response(200, json={}))
+
+    with pytest.raises(GitHubError, match="did not report visibility"):
+        await client.repository_visibility("owner/name")
+
+
 async def test_create_pull_request():
     def handler(request):
         assert request.method == "POST"

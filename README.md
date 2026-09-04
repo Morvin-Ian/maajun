@@ -628,6 +628,11 @@ that reports no cache hits: every input token is charged at the miss rate.
   request bodies, URL passwords, IP/email addresses, UUIDs and query values
   are redacted at ingestion and checked again before reports, issues and pull
   requests leave the investigation boundary.
+- **Public runtime publication is opt-in.** Maajun verifies repository
+  visibility with GitHub before publishing a passively caught incident.
+  Public or unknown targets stay local unless public publication is explicitly
+  enabled, or the issue can be routed to a configured private/internal runtime
+  artifact repository. Manual reports and promotions remain owner-directed.
 - **Chat proposes, you approve.** `maajun chat` runs read-only commands freely,
   but anything that writes config or opens a pull request shows the exact
   command line and waits for a yes — or for a reason not to, which is passed
