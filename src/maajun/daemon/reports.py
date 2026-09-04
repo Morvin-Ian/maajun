@@ -400,6 +400,9 @@ def reproduction_section(verification: VerificationSummary) -> str:
 def check_section(check: VerificationCheck, *, is_legacy_test: bool) -> str:
     noun = "Tests" if is_legacy_test else "Check"
     result = check.result
+    warning = ""
+    if check.runtime_warning:
+        warning = f"> ⚠️ **Runtime mismatch** — {check.runtime_warning}.\n\n"
     if result.exit_code == 0:
         verdict = f"✅ **{noun} pass**"
     elif result.exit_code is None and result.output.startswith("Timed out"):
@@ -413,7 +416,10 @@ def check_section(check: VerificationCheck, *, is_legacy_test: bool) -> str:
                 "\n\n> The failure names none of the files this change touches, "
                 "so it was most likely already failing. No repair was attempted."
             )
-    return f"### `{check.command}`\n\n{verdict}\n\n{command_output(result)}"
+    return (
+        f"### `{check.command}`\n\n{warning}{verdict}\n\n"
+        f"{command_output(result)}"
+    )
 
 
 def report_markdown(event: ErrorEvent, report: str) -> str:

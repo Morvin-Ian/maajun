@@ -163,7 +163,9 @@ unless it says `deployment.runtime = "none"` on purpose. Exits non-zero if
 any required check fails, so it works in scripts and CI. Fix-mode repositories
 also show their configured reproduction and post-fix checks. Missing
 verification is a warning rather than a failure because Maajun still opens the
-PR and labels it unverified.
+PR and labels it unverified. It also warns when an absolute Python environment
+in a verification command differs from the active systemd service runtime;
+that failure will not be sent to the repair agent.
 
 | Flag | Meaning |
 |------|---------|

@@ -44,6 +44,7 @@ from maajun.monitors import ErrorEvent
 from maajun.providers.pricing import extract_usage
 from maajun.utils import truncate_tail
 from maajun.vcs import CommandResult, GitError, GitWorkspace
+from maajun.verification_runtime import verification_runtime_mismatch
 
 if TYPE_CHECKING:  # imported for typing only; core imports this module
     from maajun.daemon.core import Daemon, ProgressCallback
@@ -491,7 +492,10 @@ class Investigation:
                 check.result.exit_code not in (0, None)
                 and not blames_our_edits(check.result.output, changed)
             )
-            classified = VerificationCheck(check.command, check.result, unrelated)
+            unrelated = unrelated or bool(check.runtime_warning)
+            classified = VerificationCheck(
+                check.command, check.result, unrelated, check.runtime_warning
+            )
             checks.append(classified)
             if check.result.exit_code not in (0, None) and not unrelated:
                 repairable.append(classified)
@@ -575,7 +579,13 @@ class Investigation:
                 "verification command %r exited %s in repo=%s",
                 command, result.exit_code, self.repo_config.repo,
             )
-            checks.append(VerificationCheck(command, result))
+            checks.append(VerificationCheck(
+                command,
+                result,
+                runtime_warning=verification_runtime_mismatch(
+                    command, self.repo_config.deployment
+                ),
+            ))
         return VerificationSummary(
             reproduction_command=reproduce,
             reproduction_before=self.reproduction_before,

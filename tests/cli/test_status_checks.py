@@ -85,6 +85,35 @@ def test_fix_repo_lists_configured_verification_in_status(tmp_path):
     assert "2 post-fix command(s)" in check.detail
 
 
+def test_status_warns_when_verification_uses_a_stale_runtime(tmp_path):
+    logf = tmp_path / "app.log"
+    logf.write_text("")
+    repo = RepoConfig(
+        repo="owner/name",
+        mode="fix",
+        test_command="/srv/app/venv/bin/python -m pytest -q",
+        deployment=DeploymentConfig(
+            service_command=(
+                "{ path=/srv/app/venv-release/bin/uvicorn ; argv[]=uvicorn app:api }"
+            )
+        ),
+    )
+    config = Config(
+        github=GitHubConfig(repos=[repo]),
+        monitor=MonitorConfig(log_files=[str(logf)]),
+    )
+
+    sections, ok = build_status(
+        config, provider="deepseek", has_key=True, has_token=True,
+        repos=[repo], network=None,
+    )
+
+    assert ok is True
+    check = find(sections, "Verification runtime for owner/name")
+    assert check.warn and not check.counts
+    assert "venv-release" in check.detail
+
+
 def test_missing_credentials_fail(tmp_path):
     config = Config(github=GitHubConfig(repos=[RepoConfig(repo="owner/name")]),
                     monitor=MonitorConfig(log_files=[str(tmp_path / "a.log")]))

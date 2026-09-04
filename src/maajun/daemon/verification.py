@@ -10,6 +10,7 @@ class VerificationCheck:
     command: str
     result: CommandResult
     unrelated: bool = False
+    runtime_warning: str = ""
 
 
 @dataclass(frozen=True)

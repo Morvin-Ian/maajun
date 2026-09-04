@@ -7,6 +7,7 @@ from pathlib import Path
 
 from maajun.config import Config, RepoConfig
 from maajun.vcs import GitHubClient, GitHubError
+from maajun.verification_runtime import verification_runtime_mismatch
 
 # Answers "is this source readable here?" as (ok, detail, warn). Injected so
 # build_status stays pure: probing shells out to systemctl and docker.
@@ -180,6 +181,19 @@ def build_verification_checks(repos: list[RepoConfig]) -> list[Check]:
             warn=not configured,
             counts=False,
         ))
+        mismatches = [
+            verification_runtime_mismatch(command, repo_config.deployment)
+            for command in commands
+        ]
+        mismatches = [message for message in mismatches if message]
+        if mismatches:
+            checks.append(Check(
+                f"Verification runtime for {repo_config.repo}",
+                False,
+                mismatches[0],
+                warn=True,
+                counts=False,
+            ))
     return checks
 
 

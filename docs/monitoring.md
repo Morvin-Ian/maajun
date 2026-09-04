@@ -580,6 +580,10 @@ and a repo in that state would otherwise buy a repair round on every
 incident, forever, for a failure nothing in the diff can fix. The PR body
 says so instead, which is also what a reviewer needs to know.
 
+Discovery also compares absolute Python environments in the verification
+commands with the active systemd command. A mismatch is shown by `maajun
+status`, repeated in the artifact, and never earns an unrelated repair round.
+
 For a targeted regression, set a command that exits nonzero while the defect
 exists and zero after it is fixed:
 
