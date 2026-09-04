@@ -212,6 +212,7 @@ maajun/
   cli/          one command per module, all registering on a shared Typer app
   auth.py       credentials: the OS keyring, then a gh login
   inspection.py reads a codebase to find how its errors surface
+  privacy.py    canonicalises and redacts runtime evidence at ingestion
   config.py     the config models and TOML round-trip
   discovery.py  probes the host for how a repo is deployed
 ```
@@ -221,10 +222,12 @@ maajun/
 1. **Detect** — monitors poll their error sources every
    `monitor.poll_interval` seconds. A failing monitor is logged and
    skipped; the others still run.
-2. **Dedup** — every event gets a fingerprint. For log errors it's a
-   hash of the error text with digits and hex addresses stripped, so the
-   same crash at a different line number or timestamp is still the same
-   incident. CI failures use the commit SHA. Fingerprints live in a
+2. **Sanitise and dedup** — every event is redacted before storage or model
+   access. Credentials, cookies, IP/email addresses, UUIDs and query values
+   are removed while diagnostic structure remains. Its fingerprint is a
+   hash of canonical text with digits, hex addresses and URL query suffixes
+   stripped, so the same crash at a different line number or timestamp is
+   still the same incident. CI failures use the commit SHA. Fingerprints live in a
    SQLite store; known ones just bump a counter. An incident whose last
    attempt *failed* is retried on a later poll, up to three attempts —
    otherwise one transient GitHub 502 would blacklist that error forever.

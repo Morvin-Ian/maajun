@@ -624,6 +624,10 @@ that reports no cache hits: every input token is charged at the miss rate.
   `reproduction_command` come from your config, not from the model, so a fix
   cannot redirect its own verification. Every post-fix command runs even when
   an earlier one fails, and reproduction is reported before and after the edit.
+- **Runtime evidence is sanitised.** Credentials, cookies, provider tokens,
+  request bodies, URL passwords, IP/email addresses, UUIDs and query values
+  are redacted at ingestion and checked again before reports, issues and pull
+  requests leave the investigation boundary.
 - **Chat proposes, you approve.** `maajun chat` runs read-only commands freely,
   but anything that writes config or opens a pull request shows the exact
   command line and waits for a yes — or for a reason not to, which is passed
