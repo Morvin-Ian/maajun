@@ -577,6 +577,13 @@ def test_a_deployment_survives_save_and_reload(tmp_path):
         path="/srv/api", port=8000, runs="docker compose", stack="Django 5",
         log_files=["/srv/api/error.log"], journald_units=["api.service"],
         docker_containers=["api-web-1"], runtime="none",
+        service_unit="api.service",
+        service_command="/srv/api/.venv/bin/uvicorn app:api --port 8000",
+        proxy_kind="nginx",
+        proxy_config_path="/etc/nginx/sites-available/api.example.com",
+        proxy_body_limit="1m (nginx default; no active directive found)",
+        config_owner="operator",
+        infra_repo="acme/infrastructure",
     ).save(path)
 
     deployment = Config.load(path).github.repos[0].deployment
@@ -589,6 +596,13 @@ def test_a_deployment_survives_save_and_reload(tmp_path):
     assert deployment.journald_units == ["api.service"]
     assert deployment.docker_containers == ["api-web-1"]
     assert deployment.runtime == "none"
+    assert deployment.service_unit == "api.service"
+    assert deployment.service_command.startswith("/srv/api/.venv/bin/uvicorn")
+    assert deployment.proxy_kind == "nginx"
+    assert deployment.proxy_config_path.endswith("api.example.com")
+    assert deployment.proxy_body_limit.startswith("1m")
+    assert deployment.config_owner == "operator"
+    assert deployment.infra_repo == "acme/infrastructure"
 
 
 def test_a_repo_with_no_deployment_grows_no_empty_table(tmp_path):
