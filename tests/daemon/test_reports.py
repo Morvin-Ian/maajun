@@ -12,6 +12,7 @@ from maajun.daemon.reports import (
     extract_patches,
     headline,
     headline_problem,
+    infrastructure_route_report,
     verification_section,
     withheld_fix_report,
 )
@@ -41,6 +42,18 @@ def test_withheld_fix_report_labels_draft_code_as_unpublished():
     assert "## Applied fix" not in rendered
     assert "## Draft repository change (not published)" in rendered
     assert "## Fix publication withheld" in rendered
+
+
+def test_infrastructure_route_report_preserves_the_approval_boundary():
+    rendered = infrastructure_route_report(
+        "# Upload failure",
+        application_repo="owner/app",
+        infrastructure_repo="owner/infrastructure",
+    )
+
+    assert "runtime incident belongs to `owner/app`" in rendered
+    assert "`owner/infrastructure`" in rendered
+    assert "did not merge, deploy, reload, or restart" in rendered
 
 
 # ---------------------------------------------------------------------------

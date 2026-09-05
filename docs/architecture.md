@@ -346,10 +346,13 @@ maajun/
    and full working diff against the active artifact, failure layer, product
    contract, boundary behavior, tests, verification runtime, scope and privacy.
    It may request one focused correction after owner-controlled verification,
-   then reruns every configured check. A second block becomes an issue in the
-   target repository; no fix branch is pushed. The issue identifies the
+   then reruns every configured check. A second block caused by an unmapped
+   deployment edit becomes an issue in the configured `deployment.infra_repo`
+   when present; other blocks stay with the application repository. No fix
+   branch is pushed. The issue identifies the
    unresolved active failure and marks the rejected local diff as an
-   unpublished draft rather than an applied fix.
+   unpublished draft rather than an applied fix. Passive routing to the
+   infrastructure repository still passes the visibility gate below.
 11. **Gate passive publication** — for an event caught by `watch`, GitHub's
    repository visibility is checked before a branch or issue leaves the host.
    Private/internal targets proceed. Public targets require per-repository

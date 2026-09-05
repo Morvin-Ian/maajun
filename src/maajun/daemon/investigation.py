@@ -122,6 +122,7 @@ class Investigation:
     reproduction_before: CommandResult | None = None
     quality_block: str = ""
     quality_issue_title: str = ""
+    route_quality_to_infrastructure: bool = False
     publication_block: str = ""
 
     def __post_init__(self) -> None:
@@ -417,7 +418,17 @@ class Investigation:
         return changed
 
     async def file_issue(self) -> str:
-        target_repo = self.repo_config.repo
+        infrastructure_repo = (
+            self.repo_config.deployment.infra_repo
+            if self.route_quality_to_infrastructure else ""
+        )
+        target_repo = infrastructure_repo or self.repo_config.repo
+        if infrastructure_repo:
+            self.report = reports.infrastructure_route_report(
+                self.report,
+                application_repo=self.repo_config.repo,
+                infrastructure_repo=infrastructure_repo,
+            )
         if self.plan.runtime_event:
             decision = await choose_runtime_artifact_target(
                 self.daemon.github,
@@ -479,11 +490,11 @@ class Investigation:
             )
         except Exception as error:
             log.exception("fix quality correction failed")
-            self.quality_block = (
+            reason = (
                 f"{first.explanation}\n"
                 f"the one allowed correction could not run: {error}"
             ).strip()
-            self.quality_issue_title = first.issue_title
+            await self.mark_quality_block(reason, first.issue_title)
             return verification
         self.keep_if_usable(response.content.strip())
         corrected = await self.verify()
@@ -492,9 +503,17 @@ class Investigation:
         final = await self.review_fix_quality(corrected)
         if final.passed:
             return corrected
-        self.quality_block = final.explanation
-        self.quality_issue_title = final.issue_title
+        await self.mark_quality_block(final.explanation, final.issue_title)
         return corrected
+
+    async def mark_quality_block(self, explanation: str, issue_title: str) -> None:
+        """Record a block and whether an unmapped infrastructure edit caused it."""
+        self.quality_block = explanation
+        self.quality_issue_title = issue_title
+        changed = await self.code_changes()
+        self.route_quality_to_infrastructure = bool(
+            deployment_edit_problems(self.repo_config.deployment, changed)
+        )
 
     async def review_fix_quality(
         self, verification: VerificationSummary | None

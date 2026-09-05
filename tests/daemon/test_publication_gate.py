@@ -1,6 +1,7 @@
 import subprocess
 
-from daemon.fakes import REPORT, TRACEBACK, fix_mode
+from daemon.fakes import REPORT, TRACEBACK, FakeAgent, fix_mode
+from maajun.config import DeploymentConfig
 from maajun.daemon.store import ARTIFACT_ISSUE, ARTIFACT_REPORT
 
 
@@ -78,6 +79,43 @@ async def test_public_fix_is_not_pushed_and_becomes_a_private_issue(setup):
     assert github.issues[0]["repo"] == "owner/private-incidents"
     assert "Draft repository change (not published)" in github.issues[0]["body"]
     assert "No code change" not in github.issues[0]["body"]
+
+
+async def test_public_infrastructure_target_keeps_withheld_fix_local(setup):
+    daemon, logfile, author, github, store, remote = setup
+    fix_mode(daemon, author)
+    repo = daemon.repo_for(daemon.monitors[0])
+    repo.deployment = DeploymentConfig(
+        service_command="/srv/app/.venv/bin/uvicorn app:api",
+        proxy_config_path="/etc/nginx/sites-available/api.example.com",
+        config_owner="operator",
+        infra_repo="owner/infrastructure",
+    )
+    author.edit_path = daemon.workspaces[repo.repo].path / "nginx.conf"
+    first_critic = FakeAgent("PASS")
+    final_critic = FakeAgent(
+        "BLOCK\nIssue title: Raise the active nginx request-body limit\n"
+        "The operator-owned proxy still rejects the request."
+    )
+    agents = iter((author, first_critic, final_critic))
+    daemon.agent_factory_for_repo = lambda rc, ws: lambda: next(agents)
+    github.visibilities.update({
+        repo.repo: "private",
+        "owner/infrastructure": "public",
+    })
+
+    with open(logfile, "a") as stream:
+        stream.write(TRACEBACK)
+    fingerprint = (await daemon.poll_once())[0]
+
+    assert github.calls == []
+    assert github.issues == []
+    assert github.visibility_calls == [repo.repo, "owner/infrastructure"]
+    row = store.get(fingerprint, repo.repo)
+    assert row["artifact_kind"] == ARTIFACT_REPORT
+    report = (daemon.report_dir / f"{fingerprint}.md").read_text()
+    assert "owner/infrastructure is public" in report
+    assert "Infrastructure routing" in report
 
 
 async def test_owner_initiated_manual_report_is_not_visibility_gated(setup):
