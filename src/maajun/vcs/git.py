@@ -14,7 +14,7 @@ from maajun.vcs.github import GitHubClient, GitHubError
 ASKPASS_SCRIPT = '#!/bin/sh\necho "$MAAJUN_GIT_TOKEN"\n'
 
 COMMIT_AUTHOR = "maajun"
-COMMIT_EMAIL = "maajun@localhost"
+COMMIT_EMAIL = "maajun@morvin"
 
 # Long enough for a cold clone, short enough not to stall the poll loop.
 GIT_TIMEOUT = 120
