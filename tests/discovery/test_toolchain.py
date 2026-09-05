@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 
-from maajun.project.toolchain import detect_checks, detect_formatters
+from maajun.discovery.toolchain import detect_checks, detect_formatters
 
 
 def commands(root):

@@ -1,5 +1,5 @@
 from maajun.config import DeploymentConfig
-from maajun.project.runtime_env import verification_runtime_mismatch
+from maajun.discovery.runtime_env import verification_runtime_mismatch
 
 
 def test_stale_python_environment_is_explained():

@@ -7,7 +7,7 @@ from pathlib import Path
 
 from maajun.config import Config, RepoConfig
 from maajun.daemon.modes import decide_run_mode
-from maajun.project.runtime_env import verification_runtime_mismatch
+from maajun.discovery.runtime_env import verification_runtime_mismatch
 from maajun.vcs import GitHubClient, GitHubError
 
 # Answers "is this source readable here?" as (ok, detail, warn). Injected so

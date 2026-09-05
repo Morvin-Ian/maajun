@@ -3,7 +3,7 @@ import asyncio
 import pytest
 
 from maajun.config import AIProviderConfig
-from maajun.project.inspection import (
+from maajun.discovery.inspection import (
     INSPECT_ROUNDS,
     MAX_SURVEY_CHARS,
     Inspection,

@@ -22,8 +22,8 @@ from maajun.config import (
 from maajun.daemon.core import Daemon, LocalWorkspace
 from maajun.daemon.investigation import blames_our_edits
 from maajun.daemon.store import ARTIFACT_ISSUE, ARTIFACT_PR, IncidentStore
+from maajun.discovery.toolchain import Formatter
 from maajun.monitors import ErrorEvent, LogFileMonitor
-from maajun.project.toolchain import Formatter
 from maajun.providers.base import CompletionResponse
 from maajun.vcs import CommandResult, GitWorkspace
 

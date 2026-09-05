@@ -42,9 +42,9 @@ from maajun.daemon.store import (
     ARTIFACT_REPORT,
 )
 from maajun.daemon.verification import VerificationCheck, VerificationSummary
+from maajun.discovery.runtime_env import verification_runtime_mismatch
+from maajun.discovery.toolchain import Formatter, detect_formatters
 from maajun.monitors import ErrorEvent
-from maajun.project.runtime_env import verification_runtime_mismatch
-from maajun.project.toolchain import Formatter, detect_formatters
 from maajun.providers.pricing import extract_usage
 from maajun.utils import truncate_tail
 from maajun.vcs import CommandResult, GitError, GitWorkspace

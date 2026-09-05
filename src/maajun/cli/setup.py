@@ -30,8 +30,8 @@ from maajun.cli.shared import (
 from maajun.cli.status_checks import build_status
 from maajun.config import Config, RepoConfig, default_config_path
 from maajun.daemon import service
-from maajun.project.discovery import probe_source
-from maajun.project.toolchain import Check, detect_checks
+from maajun.discovery.deployment import probe_source
+from maajun.discovery.toolchain import Check, detect_checks
 from maajun.providers.base import ModelInfo, ProviderType
 from maajun.providers.catalog import CatalogEntry, by_vendor, fetch_catalog
 from maajun.providers.factory import ProviderFactory
