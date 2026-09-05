@@ -67,8 +67,8 @@ def no_github_cli(monkeypatch):
         "maajun.auth",
         "maajun.cli.setup",
         "maajun.cli.github_auth",
-        "maajun.cli.monitor",
-        "maajun.vcs.gh",
+        "maajun.cli.watch",
+        "maajun.vcs.gh_cli",
     ):
         module = importlib.import_module(module_name)
         for name, value in stubs.items():

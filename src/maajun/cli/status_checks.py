@@ -7,8 +7,8 @@ from pathlib import Path
 
 from maajun.config import Config, RepoConfig
 from maajun.modes import decide_run_mode
+from maajun.runtime_env import verification_runtime_mismatch
 from maajun.vcs import GitHubClient, GitHubError
-from maajun.verification_runtime import verification_runtime_mismatch
 
 # Answers "is this source readable here?" as (ok, detail, warn). Injected so
 # build_status stays pure: probing shells out to systemctl and docker.

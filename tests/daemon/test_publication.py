@@ -1,6 +1,6 @@
 import pytest
 
-from maajun.publication import choose_runtime_artifact_target
+from maajun.daemon.publication import choose_runtime_artifact_target
 from maajun.vcs import GitHubError
 
 

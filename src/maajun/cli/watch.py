@@ -31,7 +31,7 @@ from maajun.modes import decide_run_mode
 from maajun.progress import working
 from maajun.utils import is_valid_repo, qualify, truncate
 from maajun.vcs import GitHubClient
-from maajun.vcs.gh import account_login
+from maajun.vcs.gh_cli import account_login
 
 NOTICE_STYLES = {"info": "cyan", "success": "green", "warn": "yellow", "error": "red"}
 

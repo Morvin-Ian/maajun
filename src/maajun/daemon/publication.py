@@ -31,7 +31,7 @@ async def choose_runtime_artifact_target(
     a response without visibility is treated as unknown rather than guessed
     private. A configured fallback must itself be non-public.
     """
-    visibility, failure = await _visibility(github, primary_repo)
+    visibility, failure = await repo_visibility(github, primary_repo)
     if visibility in NON_PUBLIC_VISIBILITIES:
         return PublicationDecision(primary_repo, visibility)
     if visibility == "public" and allow_public:
@@ -49,7 +49,7 @@ async def choose_runtime_artifact_target(
         )
 
     if fallback_repo and fallback_repo != primary_repo:
-        fallback_visibility, fallback_failure = await _visibility(
+        fallback_visibility, fallback_failure = await repo_visibility(
             github, fallback_repo
         )
         if fallback_visibility in NON_PUBLIC_VISIBILITIES:
@@ -70,7 +70,7 @@ async def choose_runtime_artifact_target(
     return PublicationDecision(reason=reason)
 
 
-async def _visibility(github, repo: str) -> tuple[str, str]:
+async def repo_visibility(github, repo: str) -> tuple[str, str]:
     try:
         visibility = await github.repository_visibility(repo)
     except GitHubError as error:

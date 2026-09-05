@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from maajun.config import RepoConfig
-from maajun.verification_runtime import verification_runtime_mismatch
+from maajun.runtime_env import verification_runtime_mismatch
 
 
 @dataclass(frozen=True)

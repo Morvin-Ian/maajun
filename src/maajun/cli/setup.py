@@ -35,7 +35,7 @@ from maajun.providers.catalog import CatalogEntry, by_vendor, fetch_catalog
 from maajun.providers.factory import ProviderFactory
 from maajun.providers.pricing import base_pricing
 from maajun.utils import is_valid_repo, qualify
-from maajun.vcs.gh import account_login, gh_account, ssh_works
+from maajun.vcs.gh_cli import account_login, gh_account, ssh_works
 
 PROVIDER_SIGNUP_URLS = {
     "deepseek": "https://platform.deepseek.com",

@@ -50,7 +50,7 @@ EMAIL_RE = re.compile(r"(?i)\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b")
 URL_QUERY_RE = re.compile(r"(?P<path>/[^\s\"'?]+)\?(?P<query>[^\s\"']+)")
 
 
-def _redact_query(match: re.Match[str]) -> str:
+def redact_query(match: re.Match[str]) -> str:
     keys = []
     for part in match.group("query").split("&"):
         key = part.partition("=")[0]
@@ -60,7 +60,7 @@ def _redact_query(match: re.Match[str]) -> str:
     return f"{match.group('path')}?{suffix}" if suffix else match.group("path")
 
 
-def _redact_ipv6(match: re.Match[str]) -> str:
+def redact_ipv6(match: re.Match[str]) -> str:
     try:
         ipaddress.IPv6Address(match.group(0))
     except ipaddress.AddressValueError:
@@ -78,11 +78,11 @@ def sanitize_evidence(text: str) -> str:
     safe = SECRET_FIELD_RE.sub(r"\1<redacted>", safe)
     safe = REQUEST_BODY_RE.sub(r"\1<redacted>", safe)
     safe = URL_CREDENTIAL_RE.sub(r"\1<redacted>\3", safe)
-    safe = URL_QUERY_RE.sub(_redact_query, safe)
+    safe = URL_QUERY_RE.sub(redact_query, safe)
     safe = UUID_RE.sub("<id-redacted>", safe)
     safe = EMAIL_RE.sub("<email-redacted>", safe)
     safe = IPV4_RE.sub("<ip-redacted>", safe)
-    return IPV6_RE.sub(_redact_ipv6, safe)
+    return IPV6_RE.sub(redact_ipv6, safe)
 
 
 def sanitize_artifact(text: str) -> str:

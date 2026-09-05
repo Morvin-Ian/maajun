@@ -1,11 +1,11 @@
 from maajun.config import DeploymentConfig
-from maajun.daemon.prompts import QUALITY_CORRECTION_SUFFIX, QUALITY_REVIEW_PROMPT
-from maajun.daemon.verification import VerificationCheck, VerificationSummary
-from maajun.fix_quality import (
+from maajun.daemon.fix_quality import (
     deployment_edit_problems,
     parse_quality_review,
     verification_problems,
 )
+from maajun.daemon.prompts import QUALITY_CORRECTION_SUFFIX, QUALITY_REVIEW_PROMPT
+from maajun.daemon.verification import VerificationCheck, VerificationSummary
 from maajun.vcs import CommandResult
 
 

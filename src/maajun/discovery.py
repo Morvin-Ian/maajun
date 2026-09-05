@@ -283,7 +283,7 @@ def find_log_files(folder: str, proxied: bool) -> list[str]:
     return found
 
 
-def _nginx_context_body_limit(text: str, port: int) -> str:
+def nginx_context_body_limit(text: str, port: int) -> str:
     """The closest request-body limit around the proxy_pass for ``port``."""
     # Comments cannot affect block structure and may contain example directives.
     clean = "\n".join(line.partition("#")[0] for line in text.splitlines())
@@ -342,7 +342,7 @@ def nginx_proxy_for_port(port: int) -> tuple[str, str]:
     except OSError:
         path = matched_config
     config_text = "\n".join(sections[matched_config])
-    limit = _nginx_context_body_limit(config_text, port)
+    limit = nginx_context_body_limit(config_text, port)
     if not limit:
         main_limits = set(re.findall(
             r"\bclient_max_body_size\s+([^\s;]+)",

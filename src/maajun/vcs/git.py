@@ -231,9 +231,9 @@ class GitWorkspace:
         """
         if not patches:
             return
-        await asyncio.to_thread(self._apply, "".join(patches))
+        await asyncio.to_thread(self.apply_patch, "".join(patches))
 
-    def _apply(self, patch: str) -> None:
+    def apply_patch(self, patch: str) -> None:
         args = ["apply", "--whitespace=nowarn", "-"]  # "-" reads it from stdin
         try:
             proc = subprocess.run(

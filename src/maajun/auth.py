@@ -9,7 +9,7 @@ import keyring.errors
 
 from maajun.config import default_config_path
 from maajun.providers.base import ProviderType
-from maajun.vcs.gh import gh_token
+from maajun.vcs.gh_cli import gh_token
 
 SERVICE_NAME = "maajun"
 GITHUB_KEY_NAME = "github_token"

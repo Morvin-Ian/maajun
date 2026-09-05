@@ -8,6 +8,12 @@ from typing import TYPE_CHECKING
 from maajun.agent.core import accumulate_usage
 from maajun.config import RepoConfig
 from maajun.daemon import reports
+from maajun.daemon.fix_quality import (
+    QualityReview,
+    deployment_edit_problems,
+    parse_quality_review,
+    verification_problems,
+)
 from maajun.daemon.followups import (
     MAX_FOLLOW_UP_ISSUES,
     FollowUpTask,
@@ -26,6 +32,7 @@ from maajun.daemon.prompts import (
     RETRY_SUFFIX,
     UNAPPLIED_FIX_SUFFIX,
 )
+from maajun.daemon.publication import choose_runtime_artifact_target
 from maajun.daemon.reports import headline_problem, report_problem
 from maajun.daemon.store import (
     ARTIFACT_IGNORED,
@@ -34,19 +41,12 @@ from maajun.daemon.store import (
     ARTIFACT_REPORT,
 )
 from maajun.daemon.verification import VerificationCheck, VerificationSummary
-from maajun.fix_quality import (
-    QualityReview,
-    deployment_edit_problems,
-    parse_quality_review,
-    verification_problems,
-)
 from maajun.modes import decide_run_mode
 from maajun.monitors import ErrorEvent
 from maajun.providers.pricing import extract_usage
-from maajun.publication import choose_runtime_artifact_target
+from maajun.runtime_env import verification_runtime_mismatch
 from maajun.utils import truncate_tail
 from maajun.vcs import CommandResult, GitError, GitWorkspace
-from maajun.verification_runtime import verification_runtime_mismatch
 
 if TYPE_CHECKING:  # imported for typing only; core imports this module
     from maajun.daemon.core import Daemon, ProgressCallback

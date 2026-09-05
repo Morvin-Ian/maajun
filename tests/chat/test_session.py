@@ -733,21 +733,21 @@ def test_the_watch_notice_escapes_the_message():
     """A daemon notice carries an error message or a log line verbatim."""
     import io
 
-    from maajun.cli import monitor as monitor_cli
+    from maajun.cli import watch as watch_cli
 
     console = Console(file=io.StringIO(), width=200)
-    original = monitor_cli.console
-    monitor_cli.console = console
+    original = watch_cli.console
+    watch_cli.console = console
 
     class FakeDaemon:
         on_notice = None
 
     daemon = FakeDaemon()
     try:
-        monitor_cli.print_notices(daemon)
+        watch_cli.print_notices(daemon)
         daemon.on_notice("failed on [/red] input", "error")
     finally:
-        monitor_cli.console = original
+        watch_cli.console = original
 
     assert "[/red]" in console.file.getvalue()
 
