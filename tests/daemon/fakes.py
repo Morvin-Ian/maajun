@@ -9,6 +9,7 @@ import subprocess
 from pathlib import Path
 
 from maajun.providers.base import CompletionResponse
+from maajun.vcs import GitHubError
 
 TRACEBACK = """\
 Traceback (most recent call last):
@@ -78,6 +79,15 @@ class FakeGitHub:
         self.calls = []
         self.issues = []
         self.closed = False
+        self.visibilities = {}
+        self.visibility_failures = {}
+        self.visibility_calls = []
+
+    async def repository_visibility(self, repo):
+        self.visibility_calls.append(repo)
+        if repo in self.visibility_failures:
+            raise GitHubError(self.visibility_failures[repo])
+        return self.visibilities.get(repo, "private")
 
     async def create_pull_request(self, repo, *, head, base, title, body):
         self.calls.append(

@@ -34,6 +34,14 @@ def test_repo_shape_validated():
         RepoConfig(repo="not-a-repo")
 
 
+def test_runtime_artifact_repo_shape_is_validated():
+    assert RepoConfig(runtime_artifact_repo="owner/incidents").runtime_artifact_repo == (
+        "owner/incidents"
+    )
+    with pytest.raises(ValidationError):
+        RepoConfig(runtime_artifact_repo="not-a-repo")
+
+
 @pytest.mark.parametrize("bad", ["/name", "owner/", "a/b/c"])
 def test_repo_rejects_malformed_slugs(bad):
     # Validation shares utils.is_valid_repo, which rejects leading/trailing
@@ -113,6 +121,32 @@ def test_save_then_load_is_stable(tmp_path):
     reloaded = Config.load(path)
     assert [rc.repo for rc in reloaded.github.repos] == ["owner/name"]
     assert reloaded.monitor.log_files == ["/a.log", "/b.log"]
+
+
+def test_runtime_publication_policy_round_trips(tmp_path):
+    path = tmp_path / "config.toml"
+    config = Config(github=GitHubConfig(repos=[RepoConfig(
+        repo="owner/app",
+        runtime_artifact_repo="owner/private-incidents",
+        allow_public_runtime_artifacts=True,
+    )]))
+
+    config.save(path)
+    loaded = Config.load(path).github.repos[0]
+
+    assert loaded.runtime_artifact_repo == "owner/private-incidents"
+    assert loaded.allow_public_runtime_artifacts is True
+
+
+def test_runtime_publication_policy_is_settable_per_repo():
+    config = Config(github=GitHubConfig(repos=[RepoConfig(repo="owner/app")]))
+
+    config.set("github.runtime_artifact_repo", "owner/incidents", "owner/app")
+    config.set("github.allow_public_runtime_artifacts", "true", "owner/app")
+
+    repo = config.github.repos[0]
+    assert repo.runtime_artifact_repo == "owner/incidents"
+    assert repo.allow_public_runtime_artifacts is True
 
 
 def test_save_writes_an_array_of_tables(tmp_path):

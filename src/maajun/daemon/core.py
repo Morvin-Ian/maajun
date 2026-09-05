@@ -601,6 +601,7 @@ class Daemon:
                 forget_on_dry_run=True,
                 blame_deploy=True,
                 dry_run=dry_run,
+                runtime_event=True,
             ),
         )
 
