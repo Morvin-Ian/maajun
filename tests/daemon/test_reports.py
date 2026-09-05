@@ -171,6 +171,21 @@ def test_verification_rendering_calls_out_an_unconfigured_reproduction():
     assert "Reproduction unconfigured" in rendered
 
 
+def test_verification_rendering_explains_a_runtime_mismatch():
+    summary = VerificationSummary(checks=(VerificationCheck(
+        "pytest -q",
+        CommandResult(1, "three failures"),
+        unrelated=True,
+        runtime_warning="configured venv differs from the active service",
+    ),))
+
+    rendered = verification_section(RepoConfig(repo="owner/name"), summary)
+
+    assert "Runtime mismatch" in rendered
+    assert "differs from the active service" in rendered
+    assert "No repair was attempted" in rendered
+
+
 # ---------------------------------------------------------------------------
 # Reading the patch back out of the report
 # ---------------------------------------------------------------------------
