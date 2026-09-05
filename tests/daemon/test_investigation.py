@@ -23,6 +23,7 @@ from maajun.daemon.core import Daemon, LocalWorkspace
 from maajun.daemon.investigation import blames_our_edits
 from maajun.daemon.store import ARTIFACT_ISSUE, ARTIFACT_PR, IncidentStore
 from maajun.monitors import ErrorEvent, LogFileMonitor
+from maajun.project.toolchain import Formatter
 from maajun.providers.base import CompletionResponse
 from maajun.vcs import CommandResult, GitWorkspace
 
@@ -2326,3 +2327,91 @@ async def test_the_committed_report_leaves_the_follow_up_out(setup):
 
 def pr_url_of(github) -> str:
     return f"https://github.com/{github.calls[0]['repo']}/pull/1"
+
+
+# -- project formatting ------------------------------------------------------
+
+# A stand-in formatter: a shell rewrite visible in the diff, so tests assert
+# on what reached the branch, not on a binary that may not be installed.
+FORMATTER = Formatter(
+    check='grep -q "^items" main.py',
+    write="sed -i 's/$/  # formatted/' main.py",
+    source="pyproject.toml [tool.ruff]",
+)
+
+
+def only_formatter(monkeypatch, formatter=FORMATTER):
+    detected = [formatter] if formatter else []
+    monkeypatch.setattr(
+        "maajun.daemon.investigation.detect_formatters", lambda root: detected
+    )
+
+
+def pushed(remote, branch, path):
+    return subprocess.run(
+        ["git", "show", f"{branch}:{path}"],
+        cwd=str(remote), capture_output=True, text=True,
+    ).stdout
+
+
+async def test_a_clean_checkout_has_the_fix_formatted_before_it_is_pushed(
+    setup, monkeypatch
+):
+    daemon, logfile, agent, github, store, remote = setup
+    fix_mode(daemon, agent)
+    only_formatter(monkeypatch)
+
+    with open(logfile, "a") as stream:
+        stream.write(TRACEBACK)
+    fp = (await daemon.poll_once())[0]
+
+    assert len(github.calls) == 1
+    assert pushed(remote, f"maajun/incident-{fp}", "main.py") == "items = [0]  # formatted\n"
+
+
+async def test_a_checkout_that_is_not_already_formatted_is_left_alone(
+    setup, monkeypatch
+):
+    """Formatting a repo that does not conform would bury the fix in noise."""
+    daemon, logfile, agent, github, store, remote = setup
+    fix_mode(daemon, agent)
+    only_formatter(
+        monkeypatch,
+        Formatter(check="false", write="sed -i 's/$/  # formatted/' main.py", source="x"),
+    )
+
+    with open(logfile, "a") as stream:
+        stream.write(TRACEBACK)
+    fp = (await daemon.poll_once())[0]
+
+    assert len(github.calls) == 1
+    assert pushed(remote, f"maajun/incident-{fp}", "main.py") == "items = [0]\n"
+
+
+async def test_formatting_happens_before_owner_verification_runs(setup, monkeypatch):
+    """The commands in the PR body judge the code that is actually pushed."""
+    daemon, logfile, agent, github, store, remote = setup
+    fix_mode(daemon, agent, test_command='grep -q "# formatted" main.py')
+    only_formatter(monkeypatch)
+
+    with open(logfile, "a") as stream:
+        stream.write(TRACEBACK)
+    await daemon.poll_once()
+
+    assert len(github.calls) == 1
+    assert "Tests pass" in github.calls[0]["body"]
+
+
+async def test_suggest_mode_never_runs_a_formatter(setup, monkeypatch):
+    daemon, logfile, agent, github, store, remote = setup
+    detections = []
+    monkeypatch.setattr(
+        "maajun.daemon.investigation.detect_formatters",
+        lambda root: detections.append(root) or [FORMATTER],
+    )
+
+    with open(logfile, "a") as stream:
+        stream.write(TRACEBACK)
+    await daemon.poll_once()
+
+    assert detections == []

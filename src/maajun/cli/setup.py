@@ -25,11 +25,13 @@ from maajun.cli.shared import (
     implemented_providers,
     load_config,
     prompt_mode,
+    split_list,
 )
 from maajun.cli.status_checks import build_status
 from maajun.config import Config, RepoConfig, default_config_path
 from maajun.daemon import service
 from maajun.project.discovery import probe_source
+from maajun.project.toolchain import Check, detect_checks
 from maajun.providers.base import ModelInfo, ProviderType
 from maajun.providers.catalog import CatalogEntry, by_vendor, fetch_catalog
 from maajun.providers.factory import ProviderFactory
@@ -376,6 +378,44 @@ def store_api_key(auth: AuthManager, provider: str, key: str) -> None:
         raise typer.Exit(1) from e
 
 
+def checkout_candidates(repo: str, entry: RepoConfig | None) -> list[Path]:
+    """Local directories that might hold a checkout of `repo`."""
+    candidates = []
+    cwd = Path.cwd()
+    if detect_repo_from_git(cwd) == repo:
+        candidates.append(cwd)
+    deployed = entry.deployment.path if entry else ""
+    if deployed and Path(deployed) not in candidates:
+        candidates.append(Path(deployed))
+    return candidates
+
+
+def detected_checks(repo: str, entry: RepoConfig | None) -> list[Check]:
+    """Lint and format checks read from a local checkout, or none found."""
+    for root in checkout_candidates(repo, entry):
+        checks = detect_checks(root)
+        if checks:
+            return checks
+    return []
+
+
+def ask_verification_commands(
+    ask: Asker, repo: str, entry: RepoConfig | None, current: list[str]
+) -> list[str]:
+    """Prompt for post-fix checks, prefilled with what the checkout implies.
+
+    A suggestion only: detecting nothing just leaves an empty prompt.
+    """
+    detected = detected_checks(repo, entry) if not current else []
+    for check in detected:
+        console.print(f"  [dim]Detected from {check.source}: {check.command}[/dim]")
+    default = ", ".join(current or [check.command for check in detected])
+    answer = ask.text(
+        "Verification commands, comma-separated (Enter to skip)", default
+    )
+    return split_list(answer) or []
+
+
 def setup_github(
     auth: AuthManager,
     config: Config,
@@ -451,6 +491,10 @@ def setup_github(
             )
             resolved_test_command = ask.text(
                 "Test command (Enter to skip)", current_test_command
+            )
+        if verification_commands is None and ask.interactive:
+            resolved_verification_commands = ask_verification_commands(
+                ask, repo, entry, current_verification_commands
             )
         if (
             resolved_mode == "automatic"

@@ -612,6 +612,16 @@ maajun config github.test_command "pytest -q"
 maajun config github.verification_commands "ruff check .,mypy src"
 ```
 
+`maajun setup` proposes these for you. When it runs inside a checkout of the
+repo — or the repo's deployment path is already recorded — it reads the
+project's manifests and prefills the prompt with the check commands they
+imply: `ruff`, `black`, `isort` or `flake8` from `pyproject.toml` (prefixed
+with `uv run` or `poetry run` when a lockfile says so), a `lint` or
+`format:check` script from `package.json`, `gofmt` from `go.mod`,
+`cargo fmt --check` from `Cargo.toml`. Only check-only invocations are ever
+suggested, nothing is adopted until you press Enter, and a project it cannot
+read leaves an empty prompt for you to fill in by hand.
+
 ```
 ✅ Tests pass — `pytest -q`      ❌ Tests fail (exit 1) — `pytest -q`
 ```
@@ -623,6 +633,31 @@ analysis with it. A failure **this change caused** earns one repair round:
 the failing output is pasted back to the agent — exactly what a reviewer
 would send — and the command runs a second and final time, so its verdict in
 the body reflects whatever happened last.
+
+### Formatting the fix
+
+A PR that arrives unformatted is a PR whose first review comment is about
+whitespace. Maajun formats its own edit with **your** project's formatter,
+and works out which one from your manifests rather than assuming: `ruff
+format`, `black` or `isort` declared in `pyproject.toml` (run through `uv run`
+or `poetry run` when a lockfile says so), `prettier` from a `.prettierrc` or a
+`package.json` entry, `gofmt` from `go.mod`, `cargo fmt` from `Cargo.toml`.
+
+Detection alone is not enough to justify rewriting your code, so each
+formatter has to earn it. Before the agent edits anything, Maajun runs the
+formatter's **check** form against the untouched clone:
+
+- **The checkout already conforms** — formatting afterwards can only reach
+  lines this fix introduced, so it runs, before the verification commands and
+  before the diff goes to the publication review.
+- **It does not conform** — the project evidently does not enforce that
+  formatter, so it is skipped and logged. Reformatting the repo would bury a
+  one-line fix under hundreds of unrelated lines.
+
+Nothing here is a gate: a formatter that is missing, times out or exits
+non-zero is logged and never withholds a fix. Only the tools above are ever
+invoked, never a script out of `package.json`, so nothing the repository
+defines gets executed on this path.
 
 A failure that names none of the changed files does not. The agent has no
 shell, so it cannot tell its own breakage from a suite that was already red,

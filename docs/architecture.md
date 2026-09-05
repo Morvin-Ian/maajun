@@ -213,8 +213,9 @@ maajun/
                 prompts, wiring, modes, and the publication and fix-quality
                 gates
   project/      what maajun works out about the watched app: discovery
-                (how the host runs it), inspection (what the code is), and
-                runtime_env (which interpreter a command uses)
+                (how the host runs it), inspection (what the code is),
+                toolchain (its checks and formatters), runtime_env (which
+                interpreter a command uses)
   chat/         the REPL, its memory, and the tools that drive the CLI
   vcs/          git workspace, GitHub client, API conventions
   cli/          one command per module, all registering on a shared Typer app

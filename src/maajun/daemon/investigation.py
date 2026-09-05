@@ -44,6 +44,7 @@ from maajun.daemon.store import (
 from maajun.daemon.verification import VerificationCheck, VerificationSummary
 from maajun.monitors import ErrorEvent
 from maajun.project.runtime_env import verification_runtime_mismatch
+from maajun.project.toolchain import Formatter, detect_formatters
 from maajun.providers.pricing import extract_usage
 from maajun.utils import truncate_tail
 from maajun.vcs import CommandResult, GitError, GitWorkspace
@@ -56,6 +57,10 @@ log = logging.getLogger(__name__)
 # How much of a failing test run is pasted back for the repair round, taken
 # from the end — a runner prints what failed last.
 MAX_TEST_OUTPUT_IN_PROMPT = 8000
+
+# A formatter runs over the whole checkout; long enough for a large repo,
+# short enough not to stall the incident behind a missing binary.
+FORMAT_TIMEOUT = 120
 
 
 @dataclass(frozen=True)
@@ -113,6 +118,9 @@ class Investigation:
     ignored_reason: str = ""
     follow_up_source: str = ""
     reproduction_before: CommandResult | None = None
+    # Formatters the untouched clone already satisfied, so rewriting with them
+    # can only reach lines this fix introduced.
+    format_baseline: tuple[Formatter, ...] = ()
     quality_block: str = ""
     quality_issue_title: str = ""
     route_quality_to_infrastructure: bool = False
@@ -138,6 +146,7 @@ class Investigation:
         """Returns the issue or PR URL, or "" when nothing was published."""
         await self.prepare()
         await self.reproduce_before_edit()
+        await self.record_format_baseline()
         prompt = await self.build_prompt()
         self.progress("Analyzing with AI")
         agent_repo_config = self.repo_config
@@ -366,6 +375,7 @@ class Investigation:
         nothing was pushed and the caller files the analysis as an issue.
         """
         follow_ups = await self.prepare_follow_ups()
+        await self.apply_project_formatting()
         verification = await self.verified_fix()
         if self.should_review_fix():
             verification = await self.enforce_fix_quality(verification)
@@ -507,6 +517,7 @@ class Investigation:
             await self.mark_quality_block(reason, first.issue_title)
             return verification
         self.keep_if_usable(response.content.strip())
+        await self.apply_project_formatting()
         corrected = await self.verify()
         if corrected is not None:
             corrected, _ = await self.classify_failures(corrected)
@@ -751,6 +762,48 @@ class Investigation:
         """Take a follow-up answer as the report, unless it is not one."""
         if not report_problem(second):
             self.report = second
+
+    async def record_format_baseline(self) -> None:
+        """Which of the project's formatters the untouched clone satisfies.
+
+        A repo that is already clean can be reformatted afterwards without
+        touching a line the fix did not; one that is not stays untouched.
+        """
+        if not self.applies_a_fix:
+            return
+        clean = []
+        for formatter in detect_formatters(self.workspace.path):
+            result = await self.workspace.run_command(
+                formatter.check, timeout=FORMAT_TIMEOUT
+            )
+            if result.exit_code == 0:
+                clean.append(formatter)
+                continue
+            log.info(
+                "%s in repo=%s does not satisfy %r (exit %s); leaving its "
+                "formatting alone",
+                formatter.source, self.repo_config.repo,
+                formatter.check, result.exit_code,
+            )
+        self.format_baseline = tuple(clean)
+
+    async def apply_project_formatting(self) -> None:
+        """Format the edit the way the project formats everything else.
+
+        Not a verification step: a failure is logged, never a reason to
+        withhold a fix.
+        """
+        if not self.format_baseline:
+            return
+        self.progress("Formatting the change")
+        for formatter in self.format_baseline:
+            result = await self.workspace.run_command(
+                formatter.write, timeout=FORMAT_TIMEOUT
+            )
+            log.info(
+                "formatter %r exited %s in repo=%s",
+                formatter.write, result.exit_code, self.repo_config.repo,
+            )
 
     async def reproduce_before_edit(self) -> None:
         """Run the owner-supplied reproduction before the agent changes code."""
