@@ -81,6 +81,14 @@ class DeploymentConfig(Base):
     port: int = 0  # what it listens on; 0 means unknown
     runs: str = ""  # free text: "docker compose", "systemd: kfl.service"
     stack: str = ""  # "Django 5 + gunicorn", from reading the code
+    service_unit: str = ""  # exact systemd unit selected by discovery
+    service_command: str = ""  # exact ExecStart command from the active unit
+    proxy_kind: str = ""  # nginx, caddy, traefik, ...
+    proxy_config_path: str = ""  # active configuration path on this host
+    proxy_repo_path: str = ""  # repository path deployed as that configuration
+    proxy_body_limit: str = ""  # effective/discovered request body boundary
+    config_owner: str = ""  # repository or operator
+    infra_repo: str = ""  # optional owner/name for deployment configuration
     log_files: list[str] = Field(default_factory=list)
     journald_units: list[str] = Field(default_factory=list)
     docker_containers: list[str] = Field(default_factory=list)
@@ -102,6 +110,20 @@ class DeploymentConfig(Base):
             raise ValueError('runtime must be "none" or left unset')
         return value
 
+    @field_validator("config_owner")
+    @classmethod
+    def validate_config_owner(cls, value: str) -> str:
+        if value not in ("", "repository", "operator"):
+            raise ValueError('config_owner must be "repository", "operator", or unset')
+        return value
+
+    @field_validator("infra_repo")
+    @classmethod
+    def validate_infra_repo(cls, value: str) -> str:
+        if value and not is_valid_repo(value):
+            raise ValueError('infra_repo must be in "owner/name" form')
+        return value
+
     def sources(self) -> list[tuple[str, str]]:
         """Every error source as (kind, target), in the order they are read."""
         return [
@@ -114,6 +136,10 @@ class DeploymentConfig(Base):
         """True once anything has been recorded — what `save` writes on."""
         return bool(
             self.path or self.port or self.runs or self.stack
+            or self.service_unit or self.service_command
+            or self.proxy_kind or self.proxy_config_path or self.proxy_repo_path
+            or self.proxy_body_limit
+            or self.config_owner or self.infra_repo
             or self.runtime or self.sources()
         )
 
@@ -662,7 +688,11 @@ def deployment_table(deployment: "DeploymentConfig"):
     array of tables, so anything not written here is lost.
     """
     node = tomlkit.table()
-    for name in ("path", "port", "runs", "stack", "runtime"):
+    for name in (
+        "path", "port", "runs", "stack", "runtime", "service_unit",
+        "service_command", "proxy_kind", "proxy_config_path", "proxy_repo_path",
+        "proxy_body_limit", "config_owner", "infra_repo",
+    ):
         set_or_del(node, name, getattr(deployment, name))
     for name in ("log_files", "journald_units", "docker_containers"):
         set_or_del(node, name, getattr(deployment, name))
@@ -716,7 +746,11 @@ def render_deployment(deployment: "DeploymentConfig") -> list[str]:
     if not deployment.describes_a_deployment():
         return []
     lines = ["\n    [dim]\\[github.repos.deployment][/dim]"]
-    for name in ("path", "runs", "stack", "runtime"):
+    for name in (
+        "path", "runs", "stack", "runtime", "service_unit", "service_command",
+        "proxy_kind", "proxy_config_path", "proxy_repo_path", "proxy_body_limit",
+        "config_owner", "infra_repo",
+    ):
         value = getattr(deployment, name)
         if value:
             lines.append(f'      {name} = [green]"{value}"[/green]')

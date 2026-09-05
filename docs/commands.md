@@ -205,7 +205,9 @@ one command still covers wanting the same setting everywhere. Use
 
 Deployment keys are addressed as `github.deployment.<name>`
 (`path`, `port`, `runs`, `log_files`, `journald_units`,
-`docker_containers`, `runtime`) and **require** `--repo`: a folder or a
+`docker_containers`, `runtime`, `service_unit`, `service_command`,
+`proxy_kind`, `proxy_config_path`, `proxy_repo_path`, `proxy_body_limit`,
+`config_owner`, `infra_repo`) and **require** `--repo`: a folder or a
 port describes one deployment, so applying it to every repo is never what
 was meant.
 
@@ -213,6 +215,7 @@ was meant.
 maajun config github.deployment.port 8000 -r team/api
 maajun config github.deployment.docker_containers api-web-1,api-nginx-1 -r team/api
 maajun config github.deployment.runtime none -r team/lib   # CI-only, on purpose
+maajun config github.deployment.infra_repo team/infrastructure -r team/api
 ``` To add or remove a
 repository, use [`add-repo`](#maajun-add-repo-repo): there is no
 `github.repo` key, since a repository is an entry in the list rather than
@@ -238,7 +241,9 @@ maajun discover -r you/app --path /srv/app --save   # when the probe can't tell
 | `-c, --config PATH` | Config file location |
 
 It probes the app's folder, its port, whether it runs under docker or
-systemd, and which files, units, or containers its errors reach maajun
+systemd, the exact active systemd command, host nginx configuration that
+proxies to the detected port, its request-body boundary, and which files,
+units, or containers its errors reach maajun
 through — printing how it found each one. Findings are additive: a value
 you set by hand is never overwritten, and a source already configured is
 not duplicated. Run it **on the server**, since it reads the local docker

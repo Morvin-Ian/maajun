@@ -832,6 +832,32 @@ def deployment_section(repo_config: RepoConfig, watching: list[str]) -> str:
         facts.append(f"- Listens on port: {deployment.port}")
     if deployment.runs:
         facts.append(f"- Started by: {deployment.runs}")
+    if deployment.service_unit:
+        facts.append(f"- Active service unit: {deployment.service_unit}")
+    if deployment.service_command:
+        facts.append(f"- Active service command: {deployment.service_command}")
+    if deployment.proxy_kind:
+        facts.append(f"- Reverse proxy: {deployment.proxy_kind}")
+    if deployment.proxy_config_path:
+        facts.append(
+            f"- Active proxy configuration: {deployment.proxy_config_path}"
+        )
+    if deployment.proxy_repo_path:
+        facts.append(
+            f"- Repository path deployed as proxy config: {deployment.proxy_repo_path}"
+        )
+    elif deployment.proxy_config_path:
+        facts.append(
+            "- Active proxy configuration is not mapped to this repository"
+        )
+    if deployment.proxy_body_limit:
+        facts.append(
+            f"- Active proxy request-body limit: {deployment.proxy_body_limit}"
+        )
+    if deployment.config_owner:
+        facts.append(f"- Deployment configuration owner: {deployment.config_owner}")
+    if deployment.infra_repo:
+        facts.append(f"- Infrastructure repository: {deployment.infra_repo}")
     if deployment.stack:
         facts.append(f"- Built with: {deployment.stack}")
     if watching:

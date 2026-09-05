@@ -12,6 +12,8 @@ from maajun.discovery import (
     matching_containers,
     matching_units,
     name_variants,
+    nginx_config_for_port,
+    nginx_proxy_for_port,
     port_from_command,
     port_from_ports,
     probe_container,
@@ -224,6 +226,77 @@ def test_discover_finds_a_systemd_app(route, tmp_path):
     assert found.journald_units == ["kfl.service"]
     assert found.port == 8000
     assert found.runs == "systemd: kfl.service"
+    assert found.service_unit == "kfl.service"
+    assert "gunicorn" in found.service_command
+
+
+def test_discover_records_the_unit_that_serves_the_discovered_port(route, tmp_path):
+    units = f"""\
+ExecStart={{ path=/srv/kfl/.venv/bin/celery ; argv[]=celery -A app worker }}
+WorkingDirectory={tmp_path}
+Id=kfl-worker.service
+
+ExecStart={{ path=/srv/kfl/.venv/bin/gunicorn ; argv[]=gunicorn app.wsgi -b 0.0.0.0:8000 }}
+WorkingDirectory={tmp_path}
+Id=kfl-web.service
+"""
+
+    def handler(cmd):
+        if cmd[0] == "systemctl":
+            return CommandOutput(stdout=units)
+        return CommandOutput(error="nothing here")
+
+    route(handler)
+
+    found = discover("me/kfl", DeploymentConfig(path=str(tmp_path)))
+
+    assert found.port == 8000
+    assert found.service_unit == "kfl-web.service"
+    assert "gunicorn" in found.service_command
+
+
+def test_active_nginx_config_is_traced_to_the_proxied_port(route):
+    output = """\
+# configuration file /etc/nginx/nginx.conf:
+http { include /etc/nginx/sites-enabled/*; }
+# configuration file /etc/nginx/sites-enabled/api.example.com:
+server { proxy_pass http://127.0.0.1:8002; }
+"""
+    route(lambda cmd: CommandOutput(stdout=output) if cmd[:2] == ["nginx", "-T"] else None)
+
+    assert nginx_config_for_port(8002).endswith("/etc/nginx/sites-enabled/api.example.com")
+
+
+def test_active_nginx_body_limit_is_read_from_the_matching_location(route):
+    output = """\
+# configuration file /etc/nginx/nginx.conf:
+http { include /etc/nginx/sites-enabled/*; }
+# configuration file /etc/nginx/sites-enabled/api.example.com:
+server {
+  client_max_body_size 20m;
+  location / { client_max_body_size 11m; proxy_pass http://127.0.0.1:8002; }
+}
+"""
+    route(lambda cmd: CommandOutput(stdout=output))
+
+    path, limit = nginx_proxy_for_port(8002)
+
+    assert path.endswith("/etc/nginx/sites-enabled/api.example.com")
+    assert limit == "11m"
+
+
+def test_nginx_default_body_limit_is_explicit_when_no_directive_exists(route):
+    output = """\
+# configuration file /etc/nginx/nginx.conf:
+http { include /etc/nginx/sites-enabled/*; }
+# configuration file /etc/nginx/sites-enabled/api.example.com:
+server { location / { proxy_pass http://127.0.0.1:8002; } }
+"""
+    route(lambda cmd: CommandOutput(stdout=output))
+
+    _, limit = nginx_proxy_for_port(8002)
+
+    assert limit == "1m (nginx default; no active directive found)"
 
 
 def test_discover_reports_finding_nothing(route):
@@ -263,6 +336,7 @@ def test_merging_adds_without_overwriting_what_was_configured():
     )
     found = Discovered(
         path="/srv/guess", port=8000, runs="docker",
+        proxy_body_limit="11m",
         docker_containers=["already", "new"],
     )
 
@@ -270,6 +344,7 @@ def test_merging_adds_without_overwriting_what_was_configured():
 
     assert (merged.path, merged.port) == ("/opt/mine", 9999)
     assert merged.runs == "docker"  # was unset, so the finding fills it in
+    assert merged.proxy_body_limit == "11m"
     assert merged.docker_containers == ["already", "new"]
 
 

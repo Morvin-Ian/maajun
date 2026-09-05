@@ -182,6 +182,13 @@ Mixing is the normal case. An app in compose behind nginx on the host:
 path = "/srv/kfl"
 port = 8000
 runs = "docker compose"
+service_unit = "myapp.service"
+service_command = "/srv/myapp/.venv/bin/uvicorn app:api --port 8000"
+proxy_kind = "nginx"
+proxy_config_path = "/etc/nginx/sites-available/api.example.com"
+proxy_body_limit = "1m (nginx default; no active directive found)"
+config_owner = "operator"
+# infra_repo = "owner/infrastructure"
 docker_containers = ["kfl-web-1"]           # the app's own exceptions
 log_files = ["/var/log/nginx/error.log"]    # 502s the app never sees
 ```
@@ -205,9 +212,14 @@ maajun discover -r you/app --save   # write it into the config
 folder (by the origin remote of the checkout, or the working directory a
 compose container was built from), its port (from the published container
 port or the unit's `ExecStart`), whether it runs under docker or systemd,
-and which files, units, or containers its errors reach maajun through. It
-explains how it found each one, and writes nothing unless you pass
-`--save`. `maajun setup` runs the same probe and offers what it finds.
+and which files, units, or containers its errors reach maajun through. For a
+systemd service it retains the exact `ExecStart`; for host nginx it traces the
+`proxy_pass` to the active included configuration file and records the closest
+`client_max_body_size` boundary. With no active directive it records Nginx's
+1 MiB default. It also records whether that file maps to the application
+repository or remains operator-owned. It explains how it found each one, and
+writes nothing unless you pass `--save`. `maajun setup` runs the same probe
+and offers what it finds.
 
 ### Asking the code, not your memory
 

@@ -22,6 +22,15 @@ def describe_found(found: Discovered) -> str:
         parts.append(f"Port:   [cyan]{found.port}[/cyan]")
     if found.runs:
         parts.append(f"Runs:   [cyan]{found.runs}[/cyan]")
+    if found.service_command:
+        parts.append(f"Command: [cyan]{found.service_command}[/cyan]")
+    if found.proxy_config_path:
+        parts.append(
+            f"Proxy:  [cyan]{found.proxy_config_path}[/cyan] "
+            f"([yellow]{found.config_owner}[/yellow])"
+        )
+    if found.proxy_body_limit:
+        parts.append(f"Proxy request limit: [cyan]{found.proxy_body_limit}[/cyan]")
     if found.has_source():
         sources = []
         for kind, targets in (

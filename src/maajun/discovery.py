@@ -25,6 +25,7 @@ PORT_IN_COMMAND = re.compile(
     r"(?:--port[= ]|-p[= ]|(?:-b|--bind|--host)[= ][\d.a-z\[\]:]*?:)(\d{2,5})\b"
 )
 PORT_IN_PUBLISH = re.compile(r":(\d{2,5})->")
+NGINX_CONFIG_MARKER = re.compile(r"^# configuration file (.+):$")
 
 
 @dataclass
@@ -50,6 +51,13 @@ class Discovered:
     path: str = ""
     port: int = 0
     runs: str = ""
+    service_unit: str = ""
+    service_command: str = ""
+    proxy_kind: str = ""
+    proxy_config_path: str = ""
+    proxy_repo_path: str = ""
+    proxy_body_limit: str = ""
+    config_owner: str = ""
     log_files: list[str] = field(default_factory=list)
     journald_units: list[str] = field(default_factory=list)
     docker_containers: list[str] = field(default_factory=list)
@@ -68,6 +76,11 @@ class Discovered:
         merged.path = existing.path or self.path
         merged.port = existing.port or self.port
         merged.runs = existing.runs or self.runs
+        for name in (
+            "service_unit", "service_command", "proxy_kind", "proxy_config_path",
+            "proxy_repo_path", "proxy_body_limit", "config_owner",
+        ):
+            setattr(merged, name, getattr(existing, name) or getattr(self, name))
         for name in ("log_files", "journald_units", "docker_containers"):
             current = list(getattr(merged, name))
             current.extend(
@@ -271,6 +284,95 @@ def find_log_files(folder: str, proxied: bool) -> list[str]:
     return found
 
 
+def _nginx_context_body_limit(text: str, port: int) -> str:
+    """The closest request-body limit around the proxy_pass for ``port``."""
+    # Comments cannot affect block structure and may contain example directives.
+    clean = "\n".join(line.partition("#")[0] for line in text.splitlines())
+    tokens = re.split(r"([{};])", clean)
+    stack: list[dict[str, str]] = [{"header": "root", "limit": ""}]
+    statement = ""
+    matched: list[dict[str, str]] | None = None
+    target = re.compile(rf"\bproxy_pass\s+https?://[^;\s]*:{port}\b")
+    for token in tokens:
+        if token == "{":
+            stack.append({"header": statement.strip(), "limit": ""})
+            statement = ""
+        elif token == ";":
+            directive = " ".join(statement.split())
+            statement = ""
+            limit = re.match(r"client_max_body_size\s+([^\s;]+)", directive)
+            if limit:
+                stack[-1]["limit"] = limit.group(1)
+            if target.search(directive):
+                matched = list(stack)
+        elif token == "}":
+            statement = ""
+            if len(stack) > 1:
+                stack.pop()
+        else:
+            statement += token
+    if not matched:
+        return ""
+    return next((node["limit"] for node in reversed(matched) if node["limit"]), "")
+
+
+def nginx_proxy_for_port(port: int) -> tuple[str, str]:
+    """The active nginx file and best-known request-body limit for the app."""
+    if not port:
+        return "", ""
+    result = run_text(["nginx", "-T"], timeout=10)
+    text = f"{result.stdout}\n{result.stderr}"
+    current = ""
+    sections: dict[str, list[str]] = {}
+    matched_config = ""
+    target = re.compile(rf"proxy_pass\s+https?://[^;\s]*:{port}\b")
+    for line in text.splitlines():
+        marker = NGINX_CONFIG_MARKER.match(line.strip())
+        if marker:
+            current = marker.group(1)
+            sections.setdefault(current, [])
+            continue
+        if current:
+            sections[current].append(line)
+        if current and not matched_config and target.search(line):
+            matched_config = current
+    if not matched_config:
+        return "", ""
+    try:
+        path = str(Path(matched_config).resolve())
+    except OSError:
+        path = matched_config
+    config_text = "\n".join(sections[matched_config])
+    limit = _nginx_context_body_limit(config_text, port)
+    if not limit:
+        main_limits = set(re.findall(
+            r"\bclient_max_body_size\s+([^\s;]+)",
+            "\n".join(sections.get("/etc/nginx/nginx.conf", [])),
+        ))
+        if len(main_limits) == 1:
+            limit = f"{main_limits.pop()} (inherited from nginx.conf)"
+        elif not main_limits:
+            limit = "1m (nginx default; no active directive found)"
+        else:
+            limit = "unresolved (multiple inherited nginx directives)"
+    return path, limit
+
+
+def nginx_config_for_port(port: int) -> str:
+    """The active nginx file whose block proxies to the app's detected port."""
+    return nginx_proxy_for_port(port)[0]
+
+
+def repo_path_for_host_config(config_path: str, folder: str) -> str:
+    """Repository-relative path when an active host config lives in the checkout."""
+    if not config_path or not folder:
+        return ""
+    try:
+        return str(Path(config_path).resolve().relative_to(Path(folder).resolve()))
+    except (OSError, ValueError):
+        return ""
+
+
 def discover(repo: str, existing: DeploymentConfig | None = None) -> Discovered:
     """Probe this machine for how `repo` is deployed."""
     existing = existing or DeploymentConfig()
@@ -317,6 +419,19 @@ def discover(repo: str, existing: DeploymentConfig | None = None) -> Discovered:
         result.journald_units.append(unit.name)
         result.notes.append(f"systemd unit {unit.name}")
         result.port = result.port or port_from_command(unit.exec_start)
+    if units:
+        # Several units can share one checkout (for example, a web process and
+        # a worker). Record the unit that actually supplied the discovered
+        # listening port instead of whichever systemd happened to list first.
+        selected_unit = next(
+            (
+                unit for unit in units
+                if result.port and port_from_command(unit.exec_start) == result.port
+            ),
+            units[0],
+        )
+        result.service_unit = selected_unit.name
+        result.service_command = selected_unit.exec_start
 
     if not result.path:
         # Said last, because a container may have supplied the folder above.
@@ -324,7 +439,27 @@ def discover(repo: str, existing: DeploymentConfig | None = None) -> Discovered:
             "no checkout found — pass --path to say where it is deployed"
         )
 
-    proxied = any(
+    result.proxy_config_path, result.proxy_body_limit = nginx_proxy_for_port(
+        result.port
+    )
+    if result.proxy_config_path:
+        result.proxy_kind = "nginx"
+        result.proxy_repo_path = repo_path_for_host_config(
+            result.proxy_config_path, folder
+        )
+        result.config_owner = (
+            "repository" if result.proxy_repo_path else "operator"
+        )
+        result.notes.append(
+            f"active nginx config {result.proxy_config_path} "
+            f"({result.config_owner}-owned)"
+        )
+        if result.proxy_body_limit:
+            result.notes.append(
+                f"active nginx request-body limit {result.proxy_body_limit}"
+            )
+
+    proxied = bool(result.proxy_config_path) or any(
         looks_like_proxy(c.name) or looks_like_proxy(c.project) for c in containers
     ) or any(looks_like_proxy(unit.name) for unit in units)
     result.log_files = find_log_files(folder, proxied)
