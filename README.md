@@ -624,6 +624,16 @@ that reports no cache hits: every input token is charged at the miss rate.
   `reproduction_command` come from your config, not from the model, so a fix
   cannot redirect its own verification. Every post-fix command runs even when
   an earlier one fails, and reproduction is reported before and after the edit.
+- **Deployment-applicable fixes.** Discovery records the active systemd
+  command, reverse-proxy configuration, and the effective Nginx request-body
+  boundary when it can. Fix mode will not publish a PR that changes an
+  unmapped repository proxy file; it leaves an issue in the target repository
+  instead.
+- **Independent publication review.** Live fix-mode diffs get one read-only
+  review after owner-controlled verification, against the deployment, product
+  boundary and behavioral tests. One correction is allowed and all configured
+  checks run again; a still-blocked change is never pushed. Its issue labels
+  the local change as an unpublished draft and titles the unresolved failure.
 - **Runtime evidence is sanitised.** Credentials, cookies, provider tokens,
   request bodies, URL passwords, IP/email addresses, UUIDs and query values
   are redacted at ingestion and checked again before reports, issues and pull

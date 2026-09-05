@@ -13,6 +13,7 @@ from maajun.daemon.reports import (
     headline,
     headline_problem,
     verification_section,
+    withheld_fix_report,
 )
 from maajun.daemon.verification import VerificationCheck, VerificationSummary
 from maajun.vcs import CommandResult
@@ -30,6 +31,16 @@ Use `cart.get("discount", Decimal("0"))`.
 """
 
 RAW_ERROR = "KeyError: 'discount'"
+
+
+def test_withheld_fix_report_labels_draft_code_as_unpublished():
+    report = "# Upload failure\n\n## Applied fix\nChanged the route."
+
+    rendered = withheld_fix_report(report, "- Active nginx is unchanged.")
+
+    assert "## Applied fix" not in rendered
+    assert "## Draft repository change (not published)" in rendered
+    assert "## Fix publication withheld" in rendered
 
 
 # ---------------------------------------------------------------------------

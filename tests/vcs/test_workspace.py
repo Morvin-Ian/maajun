@@ -98,6 +98,78 @@ async def test_apply_patches_lands_a_clean_diff(tmp_path):
     assert await workspace.has_changes()
 
 
+async def test_working_diff_includes_untracked_regression_tests(tmp_path):
+    workspace = seeded_workspace(tmp_path)
+    (workspace.path / "test_regression.py").write_text("def test_bug():\n    assert True\n")
+
+    diff = await workspace.working_diff()
+
+    assert "new file mode" in diff
+    assert "+++ b/test_regression.py" in diff
+    assert "+def test_bug():" in diff
+
+
+async def test_working_diff_never_reads_untracked_secret_files(tmp_path):
+    workspace = seeded_workspace(tmp_path)
+    (workspace.path / ".env").write_text("API_KEY=do-not-send\n")
+
+    diff = await workspace.working_diff()
+
+    assert "do-not-send" not in diff
+    assert ".env" not in diff
+
+
+async def test_working_diff_never_follows_untracked_symlinks(tmp_path):
+    workspace = seeded_workspace(tmp_path)
+    outside = tmp_path / "outside.txt"
+    outside.write_text("host-private-evidence\n")
+    (workspace.path / "review.txt").symlink_to(outside)
+
+    diff = await workspace.working_diff()
+
+    assert "host-private-evidence" not in diff
+    assert "review.txt" not in diff
+
+
+async def test_working_diff_never_reads_a_secret_through_an_alias(tmp_path):
+    workspace = seeded_workspace(tmp_path)
+    secret = workspace.path / ".env"
+    secret_value = "private-" + ("x" * 24)
+    secret.write_text(f"API_KEY={secret_value}\n")
+    (workspace.path / "review.txt").symlink_to(secret)
+
+    diff = await workspace.working_diff()
+
+    assert secret_value not in diff
+    assert "review.txt" not in diff
+
+
+async def test_working_diff_never_reads_tracked_secret_files(tmp_path):
+    workspace = seeded_workspace(tmp_path)
+    secret = workspace.path / ".env"
+    secret.write_text("API_KEY=old-secret\n")
+    await workspace.git("add", ".env")
+    await workspace.git(
+        "-c", "user.email=t@t", "-c", "user.name=t",
+        "commit", "-m", "tracked fixture",
+    )
+    secret.write_text("API_KEY=new-secret\n")
+
+    diff = await workspace.working_diff()
+
+    assert "new-secret" not in diff
+    assert ".env" not in diff
+
+
+async def test_working_diff_skips_oversized_untracked_files(tmp_path):
+    workspace = seeded_workspace(tmp_path)
+    (workspace.path / "huge.txt").write_text("x" * 100_001)
+
+    diff = await workspace.working_diff()
+
+    assert "huge.txt" not in diff
+
+
 async def test_one_stale_patch_leaves_the_whole_tree_untouched(tmp_path):
     """Half a described fix is worse than none of it."""
     workspace = seeded_workspace(tmp_path)

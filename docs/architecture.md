@@ -214,6 +214,7 @@ maajun/
   inspection.py reads a codebase to find how its errors surface
   privacy.py    canonicalises and redacts runtime evidence at ingestion
   publication.py fail-closed routing for passive runtime artifacts
+  fix_quality.py deterministic deployment and fix-publication gates
   config.py     the config models and TOML round-trip
   discovery.py  probes the host for how a repo is deployed
 ```
@@ -339,14 +340,24 @@ maajun/
    a section name because the model skipped the summary, is treated as
    absent. The commit subject is built from the same headline, so `git log`
    and the pull request cannot disagree.
-10. **Gate passive publication** — for an event caught by `watch`, GitHub's
+10. **Review applicability** — when discovery recorded a live service command
+   or proxy configuration, deterministic checks reject edits to unmapped
+   deployment files. An independent read-only agent then reviews the report
+   and full working diff against the active artifact, failure layer, product
+   contract, boundary behavior, tests, verification runtime, scope and privacy.
+   It may request one focused correction after owner-controlled verification,
+   then reruns every configured check. A second block becomes an issue in the
+   target repository; no fix branch is pushed. The issue identifies the
+   unresolved active failure and marks the rejected local diff as an
+   unpublished draft rather than an applied fix.
+11. **Gate passive publication** — for an event caught by `watch`, GitHub's
    repository visibility is checked before a branch or issue leaves the host.
    Private/internal targets proceed. Public targets require per-repository
    opt-in; otherwise the issue is routed to a configured non-public runtime
    repository or the report stays local. Unknown visibility fails closed.
    Manual reports and issue promotions are deliberate owner actions and keep
    their selected target.
-11. **Publish** — depends on the repo's [mode](monitoring.md#modes). In
+12. **Publish** — depends on the repo's [mode](monitoring.md#modes). In
    `suggest` mode the report is filed as a GitHub **issue**: no branch, no
    commit, no push, because there is no diff to review. In `fix` mode an
    optional `reproduction_command` runs before and after the edit, then the

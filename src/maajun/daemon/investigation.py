@@ -28,6 +28,8 @@ from maajun.daemon.prompts import (
     FAILED_VERIFICATION_SUFFIX,
     FIX_PROMPT_SUFFIX,
     FOLLOW_UP_RETRY_SUFFIX,
+    QUALITY_CORRECTION_SUFFIX,
+    QUALITY_REVIEW_PROMPT,
     REGRESSION_SECTION,
     RETRY_SUFFIX,
     UNAPPLIED_FIX_SUFFIX,
@@ -40,6 +42,12 @@ from maajun.daemon.store import (
     ARTIFACT_REPORT,
 )
 from maajun.daemon.verification import VerificationCheck, VerificationSummary
+from maajun.fix_quality import (
+    QualityReview,
+    deployment_edit_problems,
+    parse_quality_review,
+    verification_problems,
+)
 from maajun.monitors import ErrorEvent
 from maajun.providers.pricing import extract_usage
 from maajun.publication import choose_runtime_artifact_target
@@ -112,6 +120,8 @@ class Investigation:
     ignored_reason: str = ""
     follow_up_source: str = ""
     reproduction_before: CommandResult | None = None
+    quality_block: str = ""
+    quality_issue_title: str = ""
     publication_block: str = ""
 
     def __post_init__(self) -> None:
@@ -346,6 +356,12 @@ class Investigation:
         """
         follow_ups = await self.prepare_follow_ups()
         verification = await self.verified_fix()
+        if self.should_review_fix():
+            verification = await self.enforce_fix_quality(verification)
+        if self.quality_block:
+            self.restore_follow_up_source()
+            self.withhold_fix()
+            return ""
         follow_ups = self.finalize_follow_ups(follow_ups)
         self.progress("Opening PR")
         # Filed apart: a reviewer should not have to work out which lines of
@@ -434,9 +450,119 @@ class Investigation:
                 previous_url=self.previous["url"] if self.previous else "",
                 unfixed=(
                     self.repo_config.mode == "fix"
+                    and not self.quality_block
                     and not self.publication_block
                 ),
+                withheld=bool(self.quality_block),
             ),
+        )
+
+    def should_review_fix(self) -> bool:
+        """Review fixes whose applicability depends on a recorded deployment."""
+        return (
+            self.applies_a_fix
+            and self.repo_config.deployment.describes_a_deployment()
+        )
+
+    async def enforce_fix_quality(
+        self, verification: VerificationSummary | None
+    ) -> VerificationSummary | None:
+        """Review once, correct once, then reverify and fail closed."""
+        if not await self.code_changes():
+            return verification
+        first = await self.review_fix_quality(verification)
+        if first.passed:
+            return verification
+        try:
+            response = await self.ask(
+                QUALITY_CORRECTION_SUFFIX.format(problems=first.explanation)
+            )
+        except Exception as error:
+            log.exception("fix quality correction failed")
+            self.quality_block = (
+                f"{first.explanation}\n"
+                f"the one allowed correction could not run: {error}"
+            ).strip()
+            self.quality_issue_title = first.issue_title
+            return verification
+        self.keep_if_usable(response.content.strip())
+        corrected = await self.verify()
+        if corrected is not None:
+            corrected, _ = await self.classify_failures(corrected)
+        final = await self.review_fix_quality(corrected)
+        if final.passed:
+            return corrected
+        self.quality_block = final.explanation
+        self.quality_issue_title = final.issue_title
+        return corrected
+
+    async def review_fix_quality(
+        self, verification: VerificationSummary | None
+    ) -> QualityReview:
+        changed = await self.code_changes()
+        deterministic = [
+            *deployment_edit_problems(self.repo_config.deployment, changed),
+            *verification_problems(verification),
+        ]
+        diff_reader = getattr(self.workspace, "working_diff", None)
+        diff = await diff_reader() if diff_reader else "(diff unavailable)"
+        prompt = QUALITY_REVIEW_PROMPT.format(
+            workspace=self.workspace.path,
+            deployment=deployment_section(
+                self.repo_config, self.daemon.monitors_for(self.repo_config)
+            ) or "No deployment evidence recorded.",
+            problems="\n".join(f"- {item}" for item in deterministic) or "None.",
+            verification=truncate_tail(
+                reports.verification_section(self.repo_config, verification),
+                12_000,
+                "… (earlier verification output truncated)\n",
+            ),
+            report=self.report,
+            diff=truncate_tail(diff, 30_000, "… (earlier diff truncated)\n"),
+        )
+        read_only = self.repo_config.model_copy(deep=True)
+        read_only.mode = "suggest"
+        critic = self.daemon.agent_factory_for_repo(read_only, self.workspace)()
+        critic.max_rounds = 1
+        try:
+            response = await critic.chat(prompt)
+            accumulate_usage(self.spent, response.usage)
+        except Exception as error:
+            log.exception("independent fix review failed")
+            explanation = f"independent review could not run: {error}"
+            if deterministic:
+                explanation = "\n".join([*deterministic, explanation])
+            return parse_quality_review(f"BLOCK\n{explanation}")
+        finally:
+            await critic.aclose()
+        review = parse_quality_review(response.content)
+        if deterministic:
+            reasons = "\n".join([*deterministic, review.explanation])
+            return QualityReview(False, reasons.strip(), review.issue_title)
+        return review
+
+    def restore_follow_up_source(self) -> None:
+        """Put deferred work back when no fix PR will be published."""
+        if not self.follow_up_source:
+            return
+        self.report = (
+            self.report.rstrip()
+            + "\n\n## Follow-up\n"
+            + self.follow_up_source.strip()
+            + "\n"
+        )
+
+    def withhold_fix(self) -> None:
+        """Turn a rejected local draft into an accurately titled issue."""
+        self.opens_pull_request = False
+        self.report = reports.withheld_fix_report(
+            self.report, self.quality_block
+        )
+        issue_title = self.quality_issue_title or blocked_fix_title(
+            self.event, self.repo_config
+        )
+        self.title = reports.artifact_title(
+            f"# {issue_title}", self.plan.subject_fallback
         )
 
     def record(self, url: str, branch: str, kind: str) -> None:
@@ -928,3 +1054,11 @@ def deployment_section(repo_config: RepoConfig, watching: list[str]) -> str:
     if not facts:
         return ""
     return DEPLOYMENT_SECTION.format(facts="\n".join(facts))
+
+
+def blocked_fix_title(event: ErrorEvent, repo_config: RepoConfig) -> str:
+    """A deterministic fallback title for a withheld deployment fix."""
+    proxy = repo_config.deployment.proxy_kind or "reverse proxy"
+    if "too large body" in event.details.casefold():
+        return f"Raise the active {proxy} request-body limit"
+    return f"Resolve the active {proxy} failure before publishing a code fix"

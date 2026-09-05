@@ -539,6 +539,16 @@ logs may contain personal, internal-network, credential, and commercially
 sensitive data, and evidence sent to a third party should be minimized and
 sanitized.
 
+For a recorded live deployment, "something to merge" is not enough. Maajun
+checks that proxy and service edits map to the active artifact, then gives the
+report, owner-controlled verification results, and complete working diff to an
+independent read-only reviewer. The review checks the failing layer, product
+contract, numeric/protocol boundaries, bounded request handling, behavioral
+tests, isolated test storage, runtime relevance, unrelated work and sensitive
+evidence. One focused correction is allowed, followed by a complete
+verification rerun. A change still blocked after that becomes an issue in the
+target repository; no branch is pushed.
+
 **The two modes are asked for different reports.** Suggest mode writes
 "## Suggested fix" — a proposal, with the diff in it. Fix mode writes
 "## Applied fix", which records what it already changed, in the past tense,

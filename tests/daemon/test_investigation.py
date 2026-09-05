@@ -110,6 +110,143 @@ async def test_fix_mode_opens_a_pull_request_with_the_report_committed(setup):
     assert row["branch"] == f"maajun/incident-{fp}"
 
 
+async def test_inactive_deployment_config_is_withheld_as_an_issue(setup):
+    daemon, logfile, author, github, store, remote = setup
+    fix_mode(daemon, author)
+    repo = daemon.repo_for(daemon.monitors[0])
+    repo.deployment = DeploymentConfig(
+        service_command="{ path=/srv/app/.venv/bin/uvicorn ; argv[]=uvicorn app:api }",
+        proxy_config_path="/etc/nginx/sites-available/api.example.com",
+        proxy_body_limit="1m (nginx default; no active directive found)",
+        config_owner="operator",
+    )
+    author.edit_path = daemon.workspaces[repo.repo].path / "nginx.conf"
+    first_critic = FakeAgent("PASS")
+    final_critic = FakeAgent(
+        "BLOCK\n"
+        "Issue title: Raise the active nginx request-body limit\n"
+        "The operator-owned proxy still rejects the request."
+    )
+    agents = iter((author, first_critic, final_critic))
+    daemon.agent_factory_for_repo = lambda rc, ws: lambda: next(agents)
+
+    with open(logfile, "a") as stream:
+        stream.write(TRACEBACK)
+    await daemon.poll_once()
+
+    assert github.calls == []
+    assert len(github.issues) == 1
+    assert github.issues[0]["repo"] == "owner/name"
+    assert github.issues[0]["title"] == (
+        "[maajun] Raise the active nginx request-body limit"
+    )
+    assert "Fix publication withheld" in github.issues[0]["body"]
+    assert "Fix PR withheld" in github.issues[0]["body"]
+    assert "No code change" not in github.issues[0]["body"]
+    assert "Draft repository change (not published)" in github.issues[0]["body"]
+    assert "/etc/nginx/sites-available/api.example.com" in github.issues[0]["body"]
+    assert "nginx.conf" in github.issues[0]["body"]
+    assert str(daemon.workspaces[repo.repo].path) in final_critic.prompts[0]
+    assert "deployment folder is runtime evidence" in final_critic.prompts[0]
+    assert "Active proxy request-body limit: 1m" in final_critic.prompts[0]
+
+
+async def test_quality_correction_reruns_owner_verification(setup):
+    daemon, logfile, author, github, store, remote = setup
+    fix_mode(daemon, author, test_command="true")
+    repo = daemon.repo_for(daemon.monitors[0])
+    repo.deployment.service_command = "/usr/bin/python -m app"
+    repo.verification_commands = ["printf verification"]
+    workspace = daemon.workspaces[repo.repo]
+    original_run = workspace.run_command
+    commands: list[str] = []
+
+    async def record_run(command, **kwargs):
+        commands.append(command)
+        return await original_run(command, **kwargs)
+
+    workspace.run_command = record_run
+    first_critic = FakeAgent(
+        "BLOCK\nIssue title: Add upload boundary coverage\n"
+        "The behavior boundary needs a regression test."
+    )
+    final_critic = FakeAgent("PASS")
+    agents = iter((author, first_critic, final_critic))
+    daemon.agent_factory_for_repo = lambda rc, ws: lambda: next(agents)
+
+    with open(logfile, "a") as stream:
+        stream.write(TRACEBACK)
+    await daemon.poll_once()
+
+    assert commands == [
+        "true",
+        "printf verification",
+        "true",
+        "printf verification",
+    ]
+    assert len(github.calls) == 1
+    assert github.issues == []
+    assert "Owner-controlled verification results" in final_critic.prompts[0]
+    assert "Tests pass" in final_critic.prompts[0]
+
+
+async def test_related_verification_failure_withholds_the_fix(setup):
+    daemon, logfile, author, github, store, remote = setup
+    command = "echo 'main.py import failed'; exit 1"
+    fix_mode(daemon, author, test_command=command)
+    repo = daemon.repo_for(daemon.monitors[0])
+    repo.deployment.service_command = "/usr/bin/python -m app"
+    first_critic = FakeAgent("PASS")
+    final_critic = FakeAgent("PASS")
+    agents = iter((author, first_critic, final_critic))
+    daemon.agent_factory_for_repo = lambda rc, ws: lambda: next(agents)
+
+    with open(logfile, "a") as stream:
+        stream.write(TRACEBACK)
+    await daemon.poll_once()
+
+    assert github.calls == []
+    assert len(github.issues) == 1
+    assert github.issues[0]["repo"] == "owner/name"
+    assert "Fix publication withheld" in github.issues[0]["body"]
+    assert "still fails after the repair round" in github.issues[0]["body"]
+    assert command in first_critic.prompts[0]
+    assert command in final_critic.prompts[0]
+    assert len(author.prompts) == 3
+
+
+async def test_failed_quality_correction_withholds_the_fix(setup):
+    daemon, logfile, author, github, store, remote = setup
+
+    class DyingCorrection(FakeAgent):
+        async def chat(self, message):
+            if self.prompts:
+                self.prompts.append(message)
+                raise RuntimeError("provider unavailable")
+            return await super().chat(message)
+
+    dying = DyingCorrection()
+    fix_mode(daemon, dying)
+    repo = daemon.repo_for(daemon.monitors[0])
+    repo.deployment.service_command = "/usr/bin/python -m app"
+    critic = FakeAgent(
+        "BLOCK\nIssue title: Add an upload boundary test\n"
+        "The regression test does not exercise the request boundary."
+    )
+    agents = iter((dying, critic))
+    daemon.agent_factory_for_repo = lambda rc, ws: lambda: next(agents)
+
+    with open(logfile, "a") as stream:
+        stream.write(TRACEBACK)
+    await daemon.poll_once()
+
+    assert github.calls == []
+    assert len(github.issues) == 1
+    assert "Fix publication withheld" in github.issues[0]["body"]
+    assert "one allowed correction could not run" in github.issues[0]["body"]
+    assert len(dying.prompts) == 2
+
+
 class SpendingAgent:
     """Fails partway, having already paid for the rounds it did make.
 
