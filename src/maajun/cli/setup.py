@@ -334,9 +334,8 @@ def setup_model(
     if cls.models:
         chosen = pick_from_catalog(ask, cls, config.ai.model)
     else:
-        # A gateway ships no catalogue, so its own /v1/models is the only
-        # place the real ids and prices exist. Unreachable, and it falls
-        # back to asking for one.
+        # A gateway ships no catalogue, so its own /v1/models is the only place
+        # the real ids and prices exist. Unreachable, and it asks for one instead.
         entries = gateway_catalog(cls, api_key)
         chosen = (
             pick_from_gateway(ask, cls, entries, config.ai.model)

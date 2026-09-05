@@ -58,7 +58,6 @@ class ToolCallingProvider(StreamsFromChatMixin):
         self.call_count += 1
         self.last_messages = messages
         if self.call_count == 1:
-            # First call: return a tool_call
             return CompletionResponse(
                 content="",
                 tool_calls=[
@@ -72,7 +71,6 @@ class ToolCallingProvider(StreamsFromChatMixin):
                     }
                 ],
             )
-        # Second call: return final answer
         return CompletionResponse(content=self.reply)
 
     async def validate_credentials(self):
@@ -203,7 +201,6 @@ async def test_agent_executes_tool_and_returns_final_answer(config):
 
     assert response.content == "final answer"
     assert provider.call_count == 2
-    # History should have user + assistant
     assert agent.history[-1]["content"] == "final answer"
 
 
@@ -214,7 +211,6 @@ async def test_agent_passes_tool_results_in_messages(config):
     await agent.chat("do something")
 
     messages = provider.last_messages
-    # Should have: system, user, assistant(tool_calls), tool, assistant(final)
     roles = [m["role"] for m in messages]
     assert "tool" in roles
     tool_msg = [m for m in messages if m["role"] == "tool"][0]
@@ -241,7 +237,6 @@ async def test_agent_rolls_back_on_error(config):
     provider = ToolCallingProvider()
     agent = make_agent(config, provider)
 
-    # Replace with a provider that always fails
     agent.provider = type(provider)()
     agent.provider.call_count = 0
 
@@ -264,7 +259,6 @@ async def test_agent_tool_error_does_not_crash(config):
     response = await agent.chat("try reading missing file")
 
     assert response.content == "recovered"
-    # The tool result should be an error message, but agent continues
     messages = provider.last_messages
     tool_msgs = [m for m in messages if m["role"] == "tool"]
     assert len(tool_msgs) == 1
@@ -468,7 +462,6 @@ async def test_chat_stream_executes_tools(config):
 
     assert provider.call_count == 2
 
-    # Tool progress is surfaced as tool chunks
     progress = [c for c in chunks if c[0] == "tool" and "🔧" in c[1]]
     assert len(progress) == 1
     assert "write_file" in progress[0][1]
@@ -551,7 +544,6 @@ async def test_chat_stream_multiple_tool_rounds(config):
     assert len(progress) == 3
     assert agent.history[-1]["content"] == "done"
 
-    # Tool results were fed back to the provider
     tool_msgs = [m for m in provider.last_messages if m["role"] == "tool"]
     assert len(tool_msgs) == 3
 

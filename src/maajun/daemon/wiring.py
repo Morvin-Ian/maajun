@@ -211,7 +211,6 @@ def build_daemon(
                 "deployment source to a repo with 'maajun discover --save'."
             )
     except Exception:
-        # deps owns an open database by now.
         deps.store.close()
         raise
 

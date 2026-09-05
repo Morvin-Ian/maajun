@@ -188,9 +188,8 @@ class LogStreamMonitor(Monitor):
         while i < len(lines):
             line = lines[i]
             if not line.strip():
-                # A blank line is part of a chained trace, but one followed
-                # by an unindented line ends it — swallowing that line made it
-                # the block's exception, and so the incident's title.
+                # A blank line belongs to a chained trace, but one followed
+                # by an unindented line ends it — swallowing that retitled it.
                 if self.blank_ends_block(lines, i):
                     return block, i + 1
                 block.append(line)

@@ -55,14 +55,12 @@ class JournaldMonitor(CommandStreamMonitor):
         if self.cursor_file:
             if self.cursor_file.exists():
                 return [*cmd, f"--cursor-file={self.cursor_file}"]
-            # --cursor-file and --since are mutually exclusive. Ask
-            # journalctl to print the cursor after the initial time window,
-            # then persist it in read_output for later polls.
+            # --cursor-file and --since are mutually exclusive: ask journalctl
+            # to print the cursor, then persist it in read_output.
             cmd.append("--show-cursor")
         if self.backfill and not self.read_once:
-            # The newest BACKFILL_LINES the journal still holds for this
-            # unit. Guarded by read_once as well as the cursor, since without
-            # a writable cursor directory every poll would replay the lot.
+            # The newest BACKFILL_LINES the journal still holds. Guarded by
+            # read_once too: without a cursor file every poll replays the lot.
             return [*cmd, "-n", str(BACKFILL_LINES)]
         cmd += ["--since", f"@{int(self.since)}"]
         return cmd

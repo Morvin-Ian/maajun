@@ -525,9 +525,8 @@ def add_repo(
     if reproduction_command is not None:
         entry.reproduction_command = reproduction_command
 
-    # Prompting is off unless a person is actually at the terminal. add-repo
-    # is used from scripts and from the chat tool, and a prompt there would
-    # hang waiting on a stdin nobody is typing into.
+    # Prompting is off unless a person is at the terminal: add-repo also runs
+    # from scripts and from chat, where a prompt would hang on stdin.
     ask = Asker(interactive=not non_interactive and at_a_terminal())
     configure_repo(
         entry,

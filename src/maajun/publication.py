@@ -1,5 +1,3 @@
-"""Fail-closed repository selection for passive runtime artifacts."""
-
 from __future__ import annotations
 
 from dataclasses import dataclass

@@ -11,7 +11,6 @@ from maajun.utils.commands import run_text
 # only; a filesystem-wide search costs more than asking.
 CANDIDATE_ROOTS = ("/srv", "/opt", "/var/www", "/home", "~")
 
-# Log files worth watching, relative to the app folder.
 LOG_GLOBS = ("logs/*.log", "log/*.log", "*.log")
 
 # A reverse proxy fronting the app: its errors (502s, upstream timeouts)
@@ -420,9 +419,8 @@ def discover(repo: str, existing: DeploymentConfig | None = None) -> Discovered:
         result.notes.append(f"systemd unit {unit.name}")
         result.port = result.port or port_from_command(unit.exec_start)
     if units:
-        # Several units can share one checkout (for example, a web process and
-        # a worker). Record the unit that actually supplied the discovered
-        # listening port instead of whichever systemd happened to list first.
+        # Several units can share one checkout. Record the one that supplied the
+        # discovered listening port, not whichever systemd listed first.
         selected_unit = next(
             (
                 unit for unit in units

@@ -1,12 +1,3 @@
-"""One incident, from the prompt to the artifact it is published as.
-
-Split out of `daemon.core` because the two jobs are different: the daemon
-watches, deduplicates and budgets, and this runs a single incident once the
-daemon has decided it is worth running. The state that used to be threaded
-through a dozen parameters — the event, the repo, the clone, the agent, what
-it has spent, the report as it changes — lives on the object instead.
-"""
-
 from __future__ import annotations
 
 import logging
@@ -292,9 +283,8 @@ class Investigation:
 
         problem = report_problem(self.report)
         if problem and not self.plan.dry_run:
-            # Nothing is published: an issue or PR with no findings costs the
-            # reader more than it gives, and hides that the run failed. What
-            # it cost is still banked against the incident.
+            # Nothing is published: an issue or PR with no findings hides
+            # that the run failed. What it cost is still banked, though.
             self.bank_spend()
             raise RuntimeError(f"the analysis produced no usable report ({problem})")
 
@@ -304,9 +294,8 @@ class Investigation:
             return self.save_local_report()
 
         if self.opens_pull_request and not await self.has_a_diff():
-            # Asked twice and still nothing to merge, so the finding is a
-            # finding: an issue says that, a pull request with no diff in it
-            # only looks like a fix until you open the Files tab.
+            # Asked twice and still nothing to merge, so the finding is only
+            # a finding: a PR with no diff looks like a fix until you open it.
             log.info(
                 "fix mode changed no code for fp=%s in repo=%s; filing the "
                 "analysis as an issue instead of an empty pull request",

@@ -11,17 +11,12 @@ SECRET_NAMES = frozenset({
 
 SECRET_SUFFIXES = (".pem", ".key", ".p12", ".pfx", ".keystore")
 
-# `.env.example` and its spellings are the committed template, not the file
-# with the secrets in it — and they are exactly what fix mode is told to
-# change when a finding is an undocumented environment variable. Refusing
-# them turned that whole class of fix into an analysis with no diff.
+# The committed template, not the file with the secrets in it — and exactly
+# what fix mode edits when a finding is an undocumented environment variable.
 ENV_TEMPLATE_SUFFIXES = ("example", "sample", "template", "dist", "defaults")
 
-# Secret names that are also plausible directory names. A Django app, a Go
-# package, a `credentials/` folder of templates: refusing the directory hid
-# every file under it from grep and list_dir, including the ones a fix needed.
-# The files inside are still screened one by one, so a key in there is still
-# refused by name.
+# Secret names that are also plausible directory names. Refusing the directory
+# hid every file under it; the files inside are still screened one by one.
 DIRECTORY_SAFE_NAMES = frozenset({"credentials"})
 
 # maajun's own record of every incident and conversation.
@@ -129,10 +124,8 @@ class Sandbox:
         if not self.contains(path):
             hint = self.nearest(path)
             if hint:
-                # The refusal a fix-mode run hits first, and the one that used
-                # to end it: the traceback's path is refused, the model is told
-                # not to try another, and the file it wanted was inside the
-                # checkout the whole time under a shorter name.
+                # The traceback's path is refused, but the file it names is in
+                # the checkout under a shorter one.
                 return (
                     f"{path} is outside the directories maajun may touch, but "
                     f"the same file is in the checkout at {hint}. Use that path."

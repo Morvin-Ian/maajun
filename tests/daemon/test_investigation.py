@@ -1,10 +1,3 @@
-"""One incident, from the prompt to the artifact.
-
-The report the agent is asked for, the diff fix mode has to produce, the
-verification and repair round, and where it all ends up: a pull request, an
-issue, a follow-up issue, a local file, or nothing at all.
-"""
-
 import subprocess
 from pathlib import Path
 
@@ -46,7 +39,6 @@ async def test_suggest_mode_files_an_issue(setup):
     assert len(handled) == 1
     fp = handled[0]
 
-    # Agent got the error and the workspace path
     assert "IndexError" in agent.prompts[0]
     workspace = daemon.workspaces["owner/name"]
     assert str(workspace.path) in agent.prompts[0]
@@ -96,7 +88,6 @@ async def test_fix_mode_opens_a_pull_request_with_the_report_committed(setup):
     assert "IndexError" in call["title"]
     assert "Root cause" in call["body"]
 
-    # Branch with the committed report exists on the remote
     show = subprocess.run(
         ["git", "show", f"maajun/incident-{fp}:docs/incidents/{fp}.md"],
         cwd=str(remote), capture_output=True, text=True,
@@ -418,7 +409,6 @@ async def test_recording_the_spend_never_masks_the_original_failure(setup):
 
 async def test_fix_mode_commits_agent_changes(setup):
     daemon, logfile, agent, github, store, remote = setup
-    # Update the repo config mode to "fix"
     repo_config = daemon.repo_for(daemon.monitors[0])
     repo_config.mode = "fix"
     workspace = daemon.workspaces["owner/name"]
@@ -455,10 +445,8 @@ async def test_dry_run_skips_git_and_pr(setup):
     assert len(handled) == 1
     fp = handled[0]
 
-    # Agent still analyzed the error
     assert "IndexError" in agent.prompts[0]
 
-    # No branch was created, no PR was opened
     assert github.calls == []
     show = subprocess.run(
         ["git", "branch", "--list", f"maajun/incident-{fp}"],
@@ -466,7 +454,6 @@ async def test_dry_run_skips_git_and_pr(setup):
     )
     assert show.stdout.strip() == ""
 
-    # Incident not persisted — a real run should still process it
     assert store.get(fp) is None
 
 

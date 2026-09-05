@@ -1,11 +1,3 @@
-"""Privacy-safe, stable runtime evidence.
-
-Runtime logs are useful because they carry the route, status and failure text.
-They also routinely carry credentials and user identifiers that do not belong
-in a model prompt or a public GitHub artifact.  Sanitising at ``ErrorEvent``
-construction gives every downstream consumer the safe form by default.
-"""
-
 from __future__ import annotations
 
 import ipaddress

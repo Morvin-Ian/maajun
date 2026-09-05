@@ -1,5 +1,3 @@
-"""Resolve a saved monitoring mode into one incident's editing policy."""
-
 from __future__ import annotations
 
 from dataclasses import dataclass

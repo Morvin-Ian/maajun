@@ -1,5 +1,3 @@
-"""Deterministic evidence gates around model-authored fixes."""
-
 from __future__ import annotations
 
 from dataclasses import dataclass

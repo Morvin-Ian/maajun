@@ -1,5 +1,3 @@
-"""Compare owner-configured checks with the deployed Python runtime."""
-
 from __future__ import annotations
 
 import re

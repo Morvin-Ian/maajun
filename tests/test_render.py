@@ -1,10 +1,3 @@
-"""Markdown reaches the reader rendered, not as its source.
-
-Everything the model writes is markdown, and it arrives a token at a time.
-The buffering exists so a block is only rendered once it is whole — a half
-a fenced code block is not markdown, it is a stray backtick.
-"""
-
 from rich.console import Console
 
 from maajun.render import MarkdownStream, render

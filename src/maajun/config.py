@@ -280,15 +280,13 @@ class MonitorConfig(Base):
 
 
 class DaemonConfig(Base):
-    # Resolved per instance, not at import: frozen at import it ignores a
-    # later XDG_DATA_HOME, and `reset` then deletes the real data directory
-    # while pointed at a temporary one.
+    # Resolved per instance, not at import: frozen it ignores a later
+    # XDG_DATA_HOME, and `reset` then deletes the real data directory.
     workdir: str = Field(default_factory=lambda: str(default_data_dir()))
     repo_path: str = ""
     max_usd_per_day: float = 5.0
     # The daily cap is only checked between incidents, and one investigation
-    # can spend a whole day's allowance. Past this the tools are withheld and
-    # the report is asked for, so what was paid for still lands.
+    # can spend it all. Past this the tools go and the report is asked for.
     max_usd_per_incident: float = 1.0
     max_incidents_per_cycle: int = 10
     # Screen each new error with one cheap tool-less request before paying for
@@ -313,9 +311,8 @@ class Config(Base):
     daemon: DaemonConfig = Field(default_factory=DaemonConfig)
     chat: ChatConfig = Field(default_factory=ChatConfig)
 
-    # Where this config was read from, so save() can write it back. The
-    # leading underscore is pydantic's: without it this is a model *field*,
-    # validated on load, written to the TOML, and listed by `maajun config`.
+    # Where this config was read from, so save() can write it back. Underscored,
+    # or pydantic makes it a real field: validated, saved, listed by `config`.
     _path: Path | None = None
 
     @classmethod
@@ -597,9 +594,8 @@ class Config(Base):
             )
         set_field(obj, field_name, value)
         if obj is self.ai and field_name == "provider":
-            # A model belongs to the provider it was chosen for, and sending
-            # one provider's model id to another only fails on the first real
-            # call. Chat's /provider already clears it.
+            # A model belongs to the provider it was chosen for; sending
+            # one provider's id to another only fails on the first real call.
             self.ai.model = None
 
     def get(self, key: str, repo: str | None = None) -> str:

@@ -1,14 +1,3 @@
-"""Showing what the model wrote as markdown rather than as its source.
-
-Every answer and every report is markdown, so a reader should see a heading
-and a bullet, not `##` and `-`.
-
-Streaming is the awkward part: text arrives a token at a time and markdown is
-a block format — a fenced code block, a list, a table mean nothing until they
-are finished. MarkdownStream buffers and releases a whole block at a time, so
-the reader still watches the answer land in pieces.
-"""
-
 from __future__ import annotations
 
 import re
