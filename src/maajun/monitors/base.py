@@ -8,6 +8,7 @@ from abc import ABC, abstractmethod
 from collections import deque
 from dataclasses import dataclass, field
 
+from maajun.privacy import canonical_evidence, sanitize_evidence
 from maajun.utils import utcnow_iso
 
 log = logging.getLogger(__name__)
@@ -20,7 +21,12 @@ FINGERPRINT_LENGTH = 16
 
 
 def fingerprint(text: str) -> str:
-    normalized = HEX_RE.sub("", text)
+    normalized = canonical_evidence(text)
+    # A query may be present on one client version and omitted on another;
+    # parameter values are already redacted, and the whole optional suffix is
+    # transport noise for an error whose method and path are unchanged.
+    normalized = re.sub(r"(?P<path>/[^\s\"'?]+)\?[^\s\"']+", r"\g<path>", normalized)
+    normalized = HEX_RE.sub("", normalized)
     normalized = NUM_RE.sub("", normalized)
     normalized = " ".join(normalized.split())
     return hashlib.sha256(normalized.encode()).hexdigest()[:FINGERPRINT_LENGTH]
@@ -38,6 +44,9 @@ class ErrorEvent:
     def __post_init__(self) -> None:
         if not self.fingerprint:
             self.fingerprint = fingerprint(self.details)
+        self.source = sanitize_evidence(self.source)
+        self.message = sanitize_evidence(self.message)
+        self.details = sanitize_evidence(self.details)
 
 
 class Monitor(ABC):
@@ -104,5 +113,3 @@ class Monitor(ABC):
     @abstractmethod
     def name(self) -> str:
         pass
-
-

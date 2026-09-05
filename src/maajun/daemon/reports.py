@@ -10,6 +10,7 @@ from maajun.config import RepoConfig
 from maajun.daemon.followups import FollowUpTask
 from maajun.daemon.verification import VerificationCheck, VerificationSummary
 from maajun.monitors import ErrorEvent
+from maajun.privacy import sanitize_artifact
 from maajun.render import render
 from maajun.utils import truncate, truncate_tail
 from maajun.vcs import CommandResult
@@ -73,13 +74,14 @@ def strip_markdown(text: str) -> str:
 
 def artifact_title(report: str, fallback: str) -> str:
     """The issue or pull request title: the report's finding, or `fallback`."""
-    return f"[maajun] {truncate(headline(report) or fallback, MAX_TITLE_CHARS)}"
+    title = truncate(headline(report) or fallback, MAX_TITLE_CHARS)
+    return f"[maajun] {sanitize_artifact(title)}"
 
 
 def commit_subject(report: str, fallback: str, prefix: str) -> str:
     """The commit subject, naming the same defect as the title."""
     summary = truncate(headline(report) or fallback, MAX_COMMIT_SUBJECT_CHARS)
-    return f"{prefix} {summary}"
+    return f"{prefix} {sanitize_artifact(summary)}"
 
 
 # What the report concluded the error is. "by design" means the code did what
@@ -121,7 +123,7 @@ def by_design_reason(report: str) -> str:
     if not match:
         return BY_DESIGN
     line = strip_markdown(match.group(1))
-    return truncate(line, MAX_TITLE_CHARS) or BY_DESIGN
+    return sanitize_artifact(truncate(line, MAX_TITLE_CHARS)) or BY_DESIGN
 
 
 # A fenced block's contents; the tag line (```diff) is matched but dropped.
@@ -202,12 +204,13 @@ def split_follow_up(report: str) -> tuple[str, str]:
 
 
 def follow_up_title(task: FollowUpTask) -> str:
-    return f"[maajun] Follow-up: {truncate(task.title, MAX_TITLE_CHARS)}"
+    title = sanitize_artifact(truncate(task.title, MAX_TITLE_CHARS))
+    return f"[maajun] Follow-up: {title}"
 
 
 def follow_up_body(event: ErrorEvent, task: FollowUpTask, pr_url: str) -> str:
     """One independently actionable task linked to the fix that deferred it."""
-    return (
+    return sanitize_artifact(
         f"This work was deliberately left out of {pr_url} so that fix stays "
         "reviewable.\n\n"
         f"## Evidence\n\n{task.evidence}\n\n"
@@ -295,7 +298,7 @@ def issue_body(
         "in the repository to change; the analysis is below.\n\n"
         if unfixed else ""
     )
-    return (
+    return sanitize_artifact(
         regression_note(previous_url)
         + note
         + f"{report}\n\n---\n\n"
@@ -319,7 +322,7 @@ def pr_body(
     an issue instead — a pull request with no diff looks like a fix until the
     Files tab says otherwise.
     """
-    return (
+    return sanitize_artifact(
         regression_note(previous_url)
         + (f"Fixes {closes_issue_url}\n\n" if closes_issue_url else "")
         + f"{report}\n\n---\n"
@@ -356,7 +359,7 @@ def verification_section(
             "> ⚠️ No post-fix verification commands are configured; only the "
             "targeted reproduction was checked.\n"
         )
-    return "## Verification\n\n" + "\n".join(sections)
+    return sanitize_artifact("## Verification\n\n" + "\n".join(sections))
 
 
 def command_output(result: CommandResult) -> str:
@@ -424,7 +427,7 @@ def check_section(check: VerificationCheck, *, is_legacy_test: bool) -> str:
 
 def report_markdown(event: ErrorEvent, report: str) -> str:
     """The standalone report file, committed in fix mode or written locally."""
-    return (
+    return sanitize_artifact((
         f"{report}\n\n---\n\n"
         f"## Error details\n\n```\n{event.details}\n```\n\n"
     ) + (
@@ -433,7 +436,7 @@ def report_markdown(event: ErrorEvent, report: str) -> str:
         f"- Source: `{event.source}`\n"
         f"- First seen: {event.timestamp}\n"
         f"- Fingerprint: `{event.fingerprint}`\n"
-    )
+    ))
 
 
 def write_report_file(directory: Path, event: ErrorEvent, report: str) -> Path:
@@ -467,7 +470,7 @@ def print_dry_run(
     # The report is markdown. Rendered, because this is the copy a person
     # reads to decide whether to file it — the file on disk and the issue
     # body keep the source.
-    render(Console(), report)
+    render(Console(), sanitize_artifact(report))
     print(f"\n{bar}")
     print(
         f"Cost: {prompt_tokens} prompt + {completion_tokens} "

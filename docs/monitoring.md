@@ -626,13 +626,19 @@ something else.
 
 Every error gets a stable fingerprint before any AI call:
 
-- **Log errors** — a hash of the error text with volatile parts (line
-  numbers, addresses, timestamps, ids) stripped, so the same crash
+- **Log errors** — a hash of privacy-safe canonical evidence with volatile
+  parts (line numbers, addresses, timestamps, ids and URL query suffixes)
+  stripped, so the same crash
   repeating looks identical.
 - **CI failures** — the commit SHA.
 
 Known fingerprints only increment a counter in the incident database —
 one error, one PR, ever.
+
+Before that evidence reaches the fingerprint store or an AI provider, Maajun
+redacts authorization values, cookies, tokens, IP and email addresses, UUIDs
+and query values. Routes, methods, statuses, failure text and query *keys*
+remain available for diagnosis.
 
 The fingerprint is scoped to the repo the error was attributed to, so the
 key is `(fingerprint, repo)`. Two services that share a library and hit
