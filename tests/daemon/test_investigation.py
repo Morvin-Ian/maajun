@@ -31,7 +31,7 @@ from maajun.daemon.investigation import blames_our_edits
 from maajun.daemon.store import ARTIFACT_ISSUE, ARTIFACT_PR, IncidentStore
 from maajun.monitors import ErrorEvent, LogFileMonitor
 from maajun.providers.base import CompletionResponse
-from maajun.vcs import GitWorkspace
+from maajun.vcs import CommandResult, GitWorkspace
 
 
 async def test_suggest_mode_files_an_issue(setup):
@@ -475,6 +475,144 @@ async def test_suggest_mode_does_not_run_tests(setup):
 
     assert "Running tests" not in phases
     assert "SHOULD_NOT_RUN" not in github.issues[0]["body"]
+
+
+async def test_reproduction_fails_before_the_edit_and_passes_after(setup):
+    daemon, logfile, agent, github, store, remote = setup
+    fix_mode(daemon, agent)
+    repo_config = daemon.repo_for(daemon.monitors[0])
+    repo_config.reproduction_command = "grep -q '\\[0\\]' main.py"
+
+    with open(logfile, "a") as f:
+        f.write(TRACEBACK)
+    await daemon.poll_once()
+
+    body = github.calls[0]["body"]
+    assert "Before edit: reproduced" in body
+    assert "After edit: no longer reproduces" in body
+
+
+async def test_reproduction_and_post_fix_commands_run_in_documented_order(
+    setup, tmp_path
+):
+    daemon, logfile, agent, github, store, remote = setup
+    marker = tmp_path / "verification-order"
+    fix_mode(daemon, agent, test_command=f"echo test >> {marker}")
+    repo_config = daemon.repo_for(daemon.monitors[0])
+    repo_config.reproduction_command = (
+        f"if grep -Fq 'items = [0]' main.py; then echo repro-after >> {marker}; "
+        f"else echo repro-before >> {marker}; exit 1; fi"
+    )
+    repo_config.verification_commands = [f"echo verify >> {marker}"]
+
+    with open(logfile, "a") as f:
+        f.write(TRACEBACK)
+    await daemon.poll_once()
+
+    assert marker.read_text().splitlines() == [
+        "repro-before", "repro-after", "test", "verify",
+    ]
+
+
+async def test_a_reproduction_timeout_is_reported_without_aborting(setup):
+    daemon, logfile, agent, github, store, remote = setup
+    fix_mode(daemon, agent)
+    repo_config = daemon.repo_for(daemon.monitors[0])
+    repo_config.reproduction_command = "pytest -q tests/test_bug.py"
+    workspace = daemon.workspaces[repo_config.repo]
+
+    async def timed_out(command):
+        return CommandResult(None, "Timed out after 600s.")
+
+    workspace.run_command = timed_out
+
+    with open(logfile, "a") as f:
+        f.write(TRACEBACK)
+    handled = await daemon.poll_once()
+
+    assert len(handled) == 1
+    body = github.calls[0]["body"]
+    assert "Before edit: timed out" in body
+    assert "After edit: timed out" in body
+
+
+async def test_every_post_fix_command_runs_even_after_a_failure(setup, tmp_path):
+    daemon, logfile, agent, github, store, remote = setup
+    fix_mode(daemon, agent, test_command="echo 'FAILED main.py'; exit 1")
+    marker = tmp_path / "second-ran"
+    repo_config = daemon.repo_for(daemon.monitors[0])
+    repo_config.verification_commands = [f"touch {marker}"]
+
+    with open(logfile, "a") as f:
+        f.write(TRACEBACK)
+    await daemon.poll_once()
+
+    assert marker.exists()
+    body = github.calls[0]["body"]
+    assert "Tests fail" in body
+    assert f"`touch {marker}`" in body
+
+
+async def test_legacy_and_additional_commands_are_deduplicated(setup, tmp_path):
+    daemon, logfile, agent, github, store, remote = setup
+    marker = tmp_path / "runs"
+    command = f"echo run >> {marker}"
+    fix_mode(daemon, agent, test_command=command)
+    repo_config = daemon.repo_for(daemon.monitors[0])
+    repo_config.verification_commands = [command]
+
+    with open(logfile, "a") as f:
+        f.write(TRACEBACK)
+    await daemon.poll_once()
+
+    assert marker.read_text().splitlines() == ["run"]
+
+
+async def test_a_still_failing_reproduction_earns_one_repair_without_a_filename(setup):
+    daemon, logfile, agent, github, store, remote = setup
+    repo_config = daemon.repo_for(daemon.monitors[0])
+    repo_config.mode = "fix"
+    repo_config.reproduction_command = "echo still-broken; exit 1"
+    agent.edit_path = daemon.workspaces[repo_config.repo].path / "main.py"
+
+    with open(logfile, "a") as f:
+        f.write(TRACEBACK)
+    await daemon.poll_once()
+
+    assert len(agent.prompts) == 2
+    assert "still-broken" in agent.prompts[1]
+    assert "still reproduces" in github.calls[0]["body"]
+
+
+async def test_repair_reruns_reproduction_and_every_post_fix_command(setup, tmp_path):
+    daemon, logfile, agent, github, store, remote = setup
+    repo_config = daemon.repo_for(daemon.monitors[0])
+    repaired = tmp_path / "repaired"
+    runs = tmp_path / "verification-runs"
+
+    class Repairing(FakeAgent):
+        async def chat(self, message):
+            response = await super().chat(message)
+            if len(self.prompts) == 2:
+                repaired.write_text("done")
+            return response
+
+    repairing = Repairing(
+        edit_path=daemon.workspaces[repo_config.repo].path / "main.py"
+    )
+    daemon.agent_factory_for_repo = lambda rc, ws: lambda: repairing
+    repo_config.mode = "fix"
+    repo_config.reproduction_command = f"test -f {repaired}"
+    repo_config.test_command = f"echo test >> {runs}"
+    repo_config.verification_commands = [f"echo verify >> {runs}"]
+
+    with open(logfile, "a") as f:
+        f.write(TRACEBACK)
+    await daemon.poll_once()
+
+    assert len(repairing.prompts) == 2
+    assert runs.read_text().splitlines() == ["test", "verify", "test", "verify"]
+    assert "After edit: no longer reproduces" in github.calls[0]["body"]
 
 
 # ---------------------------------------------------------------------------

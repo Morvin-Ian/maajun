@@ -386,6 +386,8 @@ def setup_github(
     base_branch: str | None,
     mode: str | None,
     test_command: str | None,
+    verification_commands: list[str] | None,
+    reproduction_command: str | None,
     reconfigure: bool,
 ) -> None:
     existing = config.github.repos
@@ -415,21 +417,35 @@ def setup_github(
         )
         return
 
+    entry = next((rc for rc in existing if rc.repo == repo), None)
+
     branch = base_branch or ask.text(
-        "Base branch", existing[0].base_branch if existing else "main"
+        "Base branch", entry.base_branch if entry else "main"
     )
     resolved_mode = mode or (
-        prompt_mode(existing[0].mode if existing else "suggest")
-        if ask.interactive else (existing[0].mode if existing else "suggest")
+        prompt_mode(entry.mode if entry else "suggest")
+        if ask.interactive else (entry.mode if entry else "suggest")
     )
 
     # Only fix mode produces a diff, so only fix mode has anything to verify.
-    current_test_command = existing[0].test_command if existing else ""
-    resolved_test_command = current_test_command
+    current_test_command = entry.test_command if entry else ""
+    current_verification_commands = entry.verification_commands if entry else []
+    current_reproduction_command = entry.reproduction_command if entry else ""
+    resolved_test_command = (
+        test_command if test_command is not None else current_test_command
+    )
+    resolved_verification_commands = (
+        verification_commands
+        if verification_commands is not None
+        else current_verification_commands
+    )
+    resolved_reproduction_command = (
+        reproduction_command
+        if reproduction_command is not None
+        else current_reproduction_command
+    )
     if resolved_mode == "fix":
-        if test_command is not None:
-            resolved_test_command = test_command
-        elif ask.interactive:
+        if test_command is None and ask.interactive:
             console.print(
                 "  [dim]Fix mode edits code. A test command lets maajun verify "
                 "the fix and put the result in the PR.[/dim]"
@@ -437,23 +453,31 @@ def setup_github(
             resolved_test_command = ask.text(
                 "Test command (Enter to skip)", current_test_command
             )
-        if not resolved_test_command:
+        if not (
+            resolved_test_command
+            or resolved_verification_commands
+            or resolved_reproduction_command
+        ):
             console.print(
-                "  [yellow]⚠ No test command — fix-mode PRs will be marked "
+                "  [yellow]⚠ No test command or other verification commands — "
+                "fix-mode PRs will be marked "
                 "unverified.[/yellow]"
             )
 
     # Updated in place: setup never asks about log_files, so rebuilding the
     # entry from these answers would drop them.
-    entry = next((rc for rc in config.github.repos if rc.repo == repo), None)
     if entry is not None:
         entry.base_branch = branch
         entry.mode = resolved_mode
         entry.test_command = resolved_test_command
+        entry.verification_commands = resolved_verification_commands
+        entry.reproduction_command = resolved_reproduction_command
     else:
         config.add_repo(RepoConfig(
             repo=repo, base_branch=branch, mode=resolved_mode,
             test_command=resolved_test_command,
+            verification_commands=resolved_verification_commands,
+            reproduction_command=resolved_reproduction_command,
         ))
 
     setup_github_token(auth, config, ask, repo, reconfigure=reconfigure)
@@ -573,6 +597,14 @@ def setup(
         None, "--test-command",
         help="Command that verifies a fix-mode edit, e.g. 'pytest -q'",
     ),
+    verification_commands: list[str] | None = typer.Option(
+        None, "--verify-command",
+        help="Post-fix command to run independently; repeat for more commands",
+    ),
+    reproduction_command: str | None = typer.Option(
+        None, "--reproduction-command",
+        help="Command expected to fail before a fix and pass after it",
+    ),
     logs: str | None = typer.Option(
         None, "--logs", "-l", help="Comma-separated log files to watch"
     ),
@@ -611,7 +643,10 @@ def setup(
     setup_github(
         auth, config, ask,
         requested_repo=repo, base_branch=base_branch, mode=mode,
-        test_command=test_command, reconfigure=reconfigure,
+        test_command=test_command,
+        verification_commands=verification_commands,
+        reproduction_command=reproduction_command,
+        reconfigure=reconfigure,
     )
 
     step(3, total, "Error sources")

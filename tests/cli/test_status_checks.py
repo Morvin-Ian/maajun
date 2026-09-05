@@ -37,6 +37,54 @@ def test_all_green(tmp_path):
     assert "Can push to owner/name" in labels
 
 
+def test_fix_repo_without_commands_is_reported_as_unverified_warning(tmp_path):
+    logf = tmp_path / "app.log"
+    logf.write_text("")
+    repo = RepoConfig(repo="owner/name", mode="fix")
+    config = Config(
+        github=GitHubConfig(repos=[repo]),
+        monitor=MonitorConfig(log_files=[str(logf)]),
+    )
+
+    sections, ok = build_status(
+        config, provider="deepseek", has_key=True, has_token=True,
+        repos=[repo], network=("morvin", {"owner/name": True}),
+    )
+
+    check = find(sections, "Verification for owner/name")
+    assert ok is True
+    assert check.warn is True
+    assert check.counts is False
+    assert "unverified" in check.detail
+
+
+def test_fix_repo_lists_configured_verification_in_status(tmp_path):
+    logf = tmp_path / "app.log"
+    logf.write_text("")
+    repo = RepoConfig(
+        repo="owner/name",
+        mode="fix",
+        test_command="pytest -q",
+        verification_commands=["ruff check ."],
+        reproduction_command="pytest -q tests/test_bug.py",
+    )
+    config = Config(
+        github=GitHubConfig(repos=[repo]),
+        monitor=MonitorConfig(log_files=[str(logf)]),
+    )
+
+    sections, ok = build_status(
+        config, provider="deepseek", has_key=True, has_token=True,
+        repos=[repo], network=("morvin", {"owner/name": True}),
+    )
+
+    check = find(sections, "Verification for owner/name")
+    assert ok is True
+    assert check.ok is True
+    assert "reproduction before/after" in check.detail
+    assert "2 post-fix command(s)" in check.detail
+
+
 def test_missing_credentials_fail(tmp_path):
     config = Config(github=GitHubConfig(repos=[RepoConfig(repo="owner/name")]),
                     monitor=MonitorConfig(log_files=[str(tmp_path / "a.log")]))

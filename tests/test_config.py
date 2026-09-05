@@ -377,6 +377,31 @@ def test_test_command_cascades_too():
     assert [rc.test_command for rc in config.github.repos] == ["pytest -q", "pytest -q"]
 
 
+def test_verification_fields_are_per_repo_and_round_trip(tmp_path):
+    config = two_repos()
+    config.set("github.verification_commands", "ruff check .,mypy src", "acme/api")
+    config.set(
+        "github.reproduction_command", "pytest -q tests/test_checkout.py", "acme/api"
+    )
+    path = tmp_path / "config.toml"
+
+    config.save(path)
+    loaded = Config.load(path).github.repos[0]
+
+    assert loaded.verification_commands == ["ruff check .", "mypy src"]
+    assert loaded.reproduction_command == "pytest -q tests/test_checkout.py"
+
+
+def test_legacy_test_runs_first_and_exact_duplicates_are_removed():
+    repo = RepoConfig(
+        repo="acme/api",
+        test_command="pytest -q",
+        verification_commands=["ruff check .", "pytest -q", "mypy src"],
+    )
+
+    assert repo.post_fix_commands() == ["pytest -q", "ruff check .", "mypy src"]
+
+
 def test_repo_scoped_set_touches_only_that_repo():
     config = two_repos()
     config.set("github.test_command", "pytest -q", "acme/web")
