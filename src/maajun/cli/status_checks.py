@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from maajun.config import Config, RepoConfig
+from maajun.modes import decide_run_mode
 from maajun.vcs import GitHubClient, GitHubError
 from maajun.verification_runtime import verification_runtime_mismatch
 
@@ -154,7 +155,7 @@ def build_monitor_checks(
 
 
 def build_verification_checks(repos: list[RepoConfig]) -> list[Check]:
-    """Show whether each fix-mode repository has owner-controlled checks.
+    """Show whether each fix-capable repository has owner-controlled checks.
 
     An unverified fix is still allowed to produce a PR, so this is a warning
     rather than a failed preflight. Surfacing it in ``maajun status`` lets an
@@ -162,7 +163,7 @@ def build_verification_checks(repos: list[RepoConfig]) -> list[Check]:
     """
     checks = []
     for repo_config in repos:
-        if repo_config.mode != "fix":
+        if repo_config.mode not in ("fix", "automatic"):
             continue
         commands = repo_config.post_fix_commands()
         reproduction = repo_config.reproduction_command
@@ -176,11 +177,26 @@ def build_verification_checks(repos: list[RepoConfig]) -> list[Check]:
             f"Verification for {repo_config.repo}",
             configured,
             ", ".join(detail_parts) if configured else (
-                "none configured — fix PRs will be marked unverified"
+                "none configured — automatic stays read-only"
+                if repo_config.mode == "automatic"
+                else "none configured — fix PRs will be marked unverified"
             ),
             warn=not configured,
             counts=False,
         ))
+        if repo_config.mode == "automatic":
+            decision = decide_run_mode(repo_config)
+            checks.append(Check(
+                f"Automatic mode for {repo_config.repo}",
+                decision.applies_fix,
+                (
+                    "fix path ready for qualifying incidents"
+                    if decision.applies_fix
+                    else "suggestion path: " + "; ".join(decision.reasons)
+                ),
+                warn=not decision.applies_fix,
+                counts=False,
+            ))
         mismatches = [
             verification_runtime_mismatch(command, repo_config.deployment)
             for command in commands

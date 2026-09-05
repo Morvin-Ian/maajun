@@ -110,6 +110,73 @@ async def test_fix_mode_opens_a_pull_request_with_the_report_committed(setup):
     assert row["branch"] == f"maajun/incident-{fp}"
 
 
+async def test_automatic_mode_uses_a_suggestion_when_evidence_is_incomplete(setup):
+    daemon, logfile, agent, github, store, remote = setup
+    repo = daemon.repo_for(daemon.monitors[0])
+    repo.mode = "automatic"
+    agent_modes = []
+    original_factory = daemon.agent_factory_for_repo
+
+    def record_mode(repo_config, workspace):
+        agent_modes.append(repo_config.mode)
+        return original_factory(repo_config, workspace)
+
+    daemon.agent_factory_for_repo = record_mode
+
+    with open(logfile, "a") as stream:
+        stream.write(TRACEBACK)
+    await daemon.poll_once()
+
+    assert repo.mode == "automatic"
+    assert agent_modes == ["suggest"]
+    assert github.calls == []
+    assert github.issues[0]["repo"] == repo.repo
+    assert "Automatic mode decision" in github.issues[0]["body"]
+    assert "kept this run read-only" in github.issues[0]["body"]
+    assert "no before/after reproduction command" in github.issues[0]["body"]
+    assert "## Suggested fix" in agent.prompts[0]
+    assert "Now fix it" not in agent.prompts[0]
+
+
+async def test_automatic_mode_opens_a_verified_fix_when_evidence_is_complete(setup):
+    daemon, logfile, author, github, store, remote = setup
+    repo = daemon.repo_for(daemon.monitors[0])
+    repo.mode = "automatic"
+    repo.reproduction_command = "grep -q '\\[0\\]' main.py"
+    repo.test_command = "true"
+    repo.deployment = DeploymentConfig(
+        path="/srv/app",
+        service_command="/srv/app/.venv/bin/python -m app",
+    )
+    author.report = FIXED_WITH_FOLLOW_UP
+    author.edit_path = daemon.workspaces[repo.repo].path / "main.py"
+    critic = FakeAgent("PASS")
+    agents = iter((author, critic))
+    agent_modes = []
+
+    def record_mode(repo_config, workspace):
+        agent_modes.append(repo_config.mode)
+        return lambda: next(agents)
+
+    daemon.agent_factory_for_repo = record_mode
+
+    with open(logfile, "a") as stream:
+        stream.write(TRACEBACK)
+    await daemon.poll_once()
+
+    assert repo.mode == "automatic"
+    assert agent_modes == ["fix", "suggest"]
+    assert len(github.calls) == 1
+    assert len(github.issues) == 1
+    assert "Automatic mode decision" in github.calls[0]["body"]
+    assert "Automatic mode decision" not in github.issues[0]["body"]
+    assert "selected the fix path with owner-controlled verification" in (
+        github.calls[0]["body"]
+    )
+    assert "## Applied fix" in author.prompts[0]
+    assert "Now fix it" in author.prompts[0]
+
+
 async def test_inactive_deployment_config_is_withheld_as_an_issue(setup):
     daemon, logfile, author, github, store, remote = setup
     fix_mode(daemon, author)

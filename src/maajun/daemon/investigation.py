@@ -24,6 +24,7 @@ from maajun.daemon.followups import (
     parse_follow_ups,
 )
 from maajun.daemon.prompts import (
+    AUTOMATIC_MODE_SECTION,
     DEPLOYMENT_SECTION,
     FAILED_VERIFICATION_SUFFIX,
     FIX_PROMPT_SUFFIX,
@@ -48,6 +49,7 @@ from maajun.fix_quality import (
     parse_quality_review,
     verification_problems,
 )
+from maajun.modes import decide_run_mode
 from maajun.monitors import ErrorEvent
 from maajun.providers.pricing import extract_usage
 from maajun.publication import choose_runtime_artifact_target
@@ -124,9 +126,14 @@ class Investigation:
     quality_issue_title: str = ""
     route_quality_to_infrastructure: bool = False
     publication_block: str = ""
+    run_mode: str = field(init=False, default="suggest")
+    mode_reasons: tuple[str, ...] = field(init=False, default=())
 
     def __post_init__(self) -> None:
-        self.opens_pull_request = self.repo_config.mode == "fix"
+        decision = decide_run_mode(self.repo_config)
+        self.run_mode = decision.effective
+        self.mode_reasons = decision.reasons
+        self.opens_pull_request = self.run_mode == "fix"
         # A dry run and local mode never branch, so there is no diff to want.
         self.applies_a_fix = (
             self.opens_pull_request
@@ -143,10 +150,13 @@ class Investigation:
         prompt = await self.build_prompt()
         self.progress("Analyzing with AI")
         agent_repo_config = self.repo_config
+        if self.repo_config.mode != self.run_mode:
+            agent_repo_config = self.repo_config.model_copy(deep=True)
+            agent_repo_config.mode = self.run_mode
         if (
             self.plan.dry_run
             and self.plan.sync_on_dry_run
-            and self.repo_config.mode == "fix"
+            and self.run_mode == "fix"
         ):
             # Dry runs may refresh the local clone for current evidence, but
             # they never grant the agent permission to edit it.
@@ -170,8 +180,8 @@ class Investigation:
         if self.plan.dry_run and not self.plan.sync_on_dry_run:
             return
         self.progress("Preparing workspace")
-        # The agent reads code from the clone either way; only fix mode
-        # needs a branch.
+        # The agent reads code from the clone either way; only the effective
+        # fix path needs a branch.
         await self.workspace.sync(self.repo_config.base_branch)
         if self.opens_pull_request and not self.plan.dry_run:
             await self.workspace.create_branch(
@@ -195,6 +205,11 @@ class Investigation:
         prompt += deployment_section(
             self.repo_config, self.daemon.monitors_for(self.repo_config)
         )
+        if self.repo_config.mode == "automatic":
+            prompt += AUTOMATIC_MODE_SECTION.format(
+                effective=self.run_mode,
+                reasons="\n".join(f"- {reason}" for reason in self.mode_reasons),
+            )
         if self.opens_pull_request and not (
             self.plan.dry_run and self.plan.sync_on_dry_run
         ):
@@ -257,6 +272,12 @@ class Investigation:
     async def publish(self) -> str:
         """File the report as whatever this run earned. Returns its URL."""
         self.usage = extract_usage(self.spent, self.model)
+        if self.repo_config.mode == "automatic":
+            self.report = reports.automatic_mode_report(
+                self.report,
+                effective_mode=self.run_mode,
+                reasons=self.mode_reasons,
+            )
         # Titled from the report, so what the issue is called and what it says
         # to fix are the same thing.
         self.title = reports.artifact_title(self.report, self.plan.subject_fallback)
@@ -460,7 +481,7 @@ class Investigation:
                 self.event, self.report,
                 previous_url=self.previous["url"] if self.previous else "",
                 unfixed=(
-                    self.repo_config.mode == "fix"
+                    self.run_mode == "fix"
                     and not self.quality_block
                     and not self.publication_block
                 ),

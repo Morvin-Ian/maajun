@@ -148,6 +148,23 @@ def test_setup_records_repo_logs_and_mode(fake_keyring, api_key, tmp_path):
     assert config.monitor.log_files == [str(log_file)]
 
 
+def test_setup_accepts_automatic_mode(fake_keyring, api_key, tmp_path):
+    config_path = tmp_path / "config.toml"
+    log_file = tmp_path / "app.log"
+    log_file.write_text("")
+
+    result = runner.invoke(app, [
+        "setup", "--non-interactive", "--config", str(config_path),
+        "--repo", "acme/webapp", "--mode", "automatic",
+        "--test-command", "pytest -q",
+        "--reproduction-command", "pytest -q tests/test_bug.py",
+        "--logs", str(log_file),
+    ])
+
+    assert result.exit_code == 0, result.output
+    assert Config.load(config_path).github.repos[0].mode == "automatic"
+
+
 def test_setup_rejects_a_malformed_repo_without_aborting(fake_keyring, api_key, tmp_path):
     config_path = tmp_path / "config.toml"
     result = runner.invoke(app, [

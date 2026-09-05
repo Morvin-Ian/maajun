@@ -23,10 +23,11 @@ from maajun.cli.shared import (
     split_list,
 )
 from maajun.cli.status_checks import build_status, gather_github
-from maajun.config import Config, RepoConfig
+from maajun.config import VALID_MODES, Config, RepoConfig
 from maajun.daemon import build_daemon, build_daemon_for_report, service
 from maajun.daemon.store import ARTIFACT_IGNORED
 from maajun.discovery import probe_source
+from maajun.modes import decide_run_mode
 from maajun.progress import working
 from maajun.utils import is_valid_repo, qualify, truncate
 from maajun.vcs import GitHubClient
@@ -132,9 +133,12 @@ def deployment_line(deployment) -> str:
 
 def repo_block(repo_config, daemon) -> str:
     """One repo's line in the watch banner: what it is, and what watches it."""
+    mode = repo_config.mode
+    if mode == "automatic":
+        mode += f" → {decide_run_mode(repo_config).effective}"
     lines = [
         f"[cyan]{repo_config.repo}[/cyan] "
-        f"(base: {repo_config.base_branch}, mode: {repo_config.mode})"
+        f"(base: {repo_config.base_branch}, mode: {mode})"
     ]
     deployed = deployment_line(repo_config.deployment)
     if deployed:
@@ -153,7 +157,7 @@ def watch(
     ),
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Debug logging"),
     mode: str | None = typer.Option(
-        None, "--mode", "-m", help="Override mode: 'suggest' or 'fix'"
+        None, "--mode", "-m", help="Override: 'suggest', 'fix', or 'automatic'"
     ),
     foreground: bool = typer.Option(
         False, "--foreground", "-f",
@@ -201,8 +205,11 @@ def watch(
     )
 
     if mode:
-        if mode not in ("suggest", "fix"):
-            console.print(f"[red]✗ Invalid mode: {mode}. Use 'suggest' or 'fix'.[/red]")
+        if mode not in VALID_MODES:
+            console.print(
+                f"[red]✗ Invalid mode: {mode}. Use 'suggest', 'fix', or "
+                "'automatic'.[/red]"
+            )
             raise typer.Exit(1)
         # Local mode has no repos to write to, so -m fix does nothing.
         if not config.github.repos:
@@ -282,7 +289,7 @@ def report(
         help="Branch to base the report on. Defaults to repo's configured branch.",
     ),
     mode: str | None = typer.Option(
-        None, "--mode", "-m", help="Override mode: 'suggest' or 'fix'"
+        None, "--mode", "-m", help="Override: 'suggest', 'fix', or 'automatic'"
     ),
     dry_run: bool = typer.Option(
         False, "--dry-run", help="Analyze but skip git/PR operations"
@@ -300,8 +307,11 @@ def report(
     config = load_config(config_path)
 
     if mode:
-        if mode not in ("suggest", "fix"):
-            console.print(f"[red]✗ Invalid mode: {mode}. Use 'suggest' or 'fix'.[/red]")
+        if mode not in VALID_MODES:
+            console.print(
+                f"[red]✗ Invalid mode: {mode}. Use 'suggest', 'fix', or "
+                "'automatic'.[/red]"
+            )
             raise typer.Exit(1)
         # Local mode has no repos to write to, so -m fix does nothing.
         if not config.github.repos:
@@ -411,7 +421,8 @@ def add_repo(
         help="Branch to open PRs against (new repos default to main)",
     ),
     mode: str | None = typer.Option(
-        None, "--mode", "-m", help="'suggest' or 'fix' (new repos default to suggest)"
+        None, "--mode", "-m",
+        help="'suggest', 'fix', or 'automatic' (new repos default to suggest)",
     ),
     log_files: str | None = typer.Option(
         None, "--log-files", "-l", help="Comma-separated log paths for this repo"
@@ -472,8 +483,11 @@ def add_repo(
     if not is_valid_repo(repo):
         console.print(f'[red]✗ "{repo}" is not in owner/name form.[/red]')
         raise typer.Exit(1)
-    if mode is not None and mode not in ("suggest", "fix"):
-        console.print(f"[red]✗ Invalid mode: {mode}. Use 'suggest' or 'fix'.[/red]")
+    if mode is not None and mode not in VALID_MODES:
+        console.print(
+            f"[red]✗ Invalid mode: {mode}. Use 'suggest', 'fix', or "
+            "'automatic'.[/red]"
+        )
         raise typer.Exit(1)
 
     config = load_config(config_path)
@@ -523,6 +537,7 @@ def add_repo(
         asked_branch=base_branch,
         asked_mode=mode,
         asked_test_command=test_command,
+        asked_reproduction_command=reproduction_command,
     )
 
     config.save(config_path)
@@ -542,6 +557,7 @@ def configure_repo(
     asked_branch: str | None,
     asked_mode: str | None,
     asked_test_command: str | None,
+    asked_reproduction_command: str | None,
 ) -> None:
     """Fill in a repo the way `maajun setup` fills in its first one.
 
@@ -557,14 +573,22 @@ def configure_repo(
     if ask.interactive and asked_mode is None:
         entry.mode = prompt_mode(entry.mode)
 
-    # Only fix mode produces a diff, so only fix mode has anything to verify.
-    if entry.mode == "fix" and asked_test_command is None and ask.interactive:
+    if entry.mode in ("fix", "automatic") and asked_test_command is None and ask.interactive:
         console.print(
-            "  [dim]Fix mode edits code. A test command lets maajun verify "
-            "the fix and put the result in the PR.[/dim]"
+            "  [dim]Fix-capable modes use owner-controlled commands to verify "
+            "a proposed change.[/dim]"
         )
         entry.test_command = ask.text(
             "Test command (Enter to skip)", entry.test_command
+        )
+    if (
+        entry.mode == "automatic"
+        and asked_reproduction_command is None
+        and ask.interactive
+    ):
+        entry.reproduction_command = ask.text(
+            "Reproduction command (must fail before and pass after)",
+            entry.reproduction_command,
         )
     if entry.mode == "fix" and not (
         entry.post_fix_commands() or entry.reproduction_command
@@ -573,6 +597,14 @@ def configure_repo(
             "  [yellow]⚠ No test command or other verification commands — "
             "fix-mode PRs will be marked "
             "unverified.[/yellow]"
+        )
+    elif entry.mode == "automatic" and not (
+        entry.reproduction_command and entry.post_fix_commands()
+    ):
+        console.print(
+            "  [yellow]⚠ Automatic mode will remain read-only until both a "
+            "reproduction command and a post-fix verification command are "
+            "configured.[/yellow]"
         )
 
     # The step that was missing: find the deployment on this host and record

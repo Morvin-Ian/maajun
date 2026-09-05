@@ -24,6 +24,7 @@ def test_unknown_provider_rejected():
 
 def test_repo_mode_validated():
     assert RepoConfig(mode="fix").mode == "fix"
+    assert RepoConfig(mode="automatic").mode == "automatic"
     with pytest.raises(ValidationError):
         RepoConfig(mode="yolo")
 
@@ -453,7 +454,10 @@ def test_repo_scoped_get_reads_that_repos_value():
 
 def test_repo_scoped_set_validates_the_value():
     config = two_repos()
-    with pytest.raises(ValueError, match='mode must be "suggest" or "fix"'):
+    with pytest.raises(
+        ValueError,
+        match='mode must be "suggest", "fix", or "automatic"',
+    ):
         config.set("github.mode", "yolo", "acme/api")
 
 

@@ -683,6 +683,37 @@ def test_add_repo_records_separate_verification_commands(fake_keyring, tmp_path)
     assert entry.reproduction_command == "pytest -q tests/test_bug.py"
 
 
+def test_add_repo_accepts_automatic_mode_with_its_evidence(fake_keyring, tmp_path):
+    config_path = tmp_path / "config.toml"
+
+    result = runner.invoke(app, [
+        "add-repo", "acme/api", "--config", str(config_path),
+        "--mode", "automatic",
+        "--path", "/srv/api",
+        "--verify-command", "pytest -q",
+        "--reproduction-command", "pytest -q tests/test_bug.py",
+    ])
+
+    assert result.exit_code == 0, result.output
+    entry = repo_config(config_path)
+    assert entry.mode == "automatic"
+    assert entry.deployment.path == "/srv/api"
+    assert entry.verification_commands == ["pytest -q"]
+    assert entry.reproduction_command == "pytest -q tests/test_bug.py"
+
+
+def test_automatic_mode_without_evidence_is_called_out(fake_keyring, tmp_path):
+    config_path = tmp_path / "config.toml"
+
+    result = runner.invoke(app, [
+        "add-repo", "acme/api", "--config", str(config_path),
+        "--mode", "automatic",
+    ])
+
+    assert result.exit_code == 0
+    assert "Automatic mode will remain read-only" in flat(result.output)
+
+
 def test_readding_a_repo_leaves_verification_untouched_when_flags_are_omitted(
     fake_keyring, tmp_path
 ):

@@ -38,7 +38,7 @@ instruction.
 | `--provider NAME` | AI provider to use |
 | `--repo OWNER/NAME` | Repository to open PRs on |
 | `-b, --base-branch NAME` | Branch to open PRs against |
-| `-m, --mode MODE` | `suggest` or `fix` |
+| `-m, --mode MODE` | `suggest`, `fix`, or `automatic` |
 | `--test-command CMD` | Command that verifies a fix-mode edit, e.g. `pytest -q` |
 | `--verify-command CMD` | Additional independent post-fix command; repeat the flag for more |
 | `--reproduction-command CMD` | Command expected to fail before the fix and pass after it |
@@ -95,7 +95,7 @@ repo is the one global `monitor.log_files` attach to, so order matters.
 | Flag | Meaning |
 |------|---------|
 | `-b, --base-branch NAME` | Branch PRs target (new repos default to `main`) |
-| `-m, --mode MODE` | `suggest` or `fix` (new repos default to `suggest`) |
+| `-m, --mode MODE` | `suggest`, `fix`, or `automatic` (default `suggest`) |
 | `-l, --log-files PATHS` | Comma-separated log paths for this repo (replaces the list) |
 | `--path DIR` | The app's folder on the server |
 | `--port N` | Port the app listens on |
@@ -284,7 +284,7 @@ tail -f ~/.local/share/maajun/watch.log
 | `-f, --foreground` | Stay attached to this terminal (systemd, containers, debugging) |
 | `--once` | One poll cycle, then exit (testing, cron) — implies foreground |
 | `--dry-run` | Analyze errors but skip git/PR operations; nothing is persisted |
-| `-m, --mode MODE` | Override the configured mode for this run (`suggest`/`fix`) |
+| `-m, --mode MODE` | Override with `suggest`, `fix`, or `automatic` |
 | `--backfill` | Also work through the errors already in the logs, once |
 | `-v, --verbose` | Debug logging (implies foreground) |
 
@@ -336,7 +336,9 @@ Investigate an issue **you describe** — rather than one a monitor detected
 demand. Give it a bug report, a vague "checkout is broken", or a stack
 trace pasted as the description; the agent reads the target repo and writes
 a *what happened / root cause / suggested fix* report, and in `fix` mode
-applies the fix too.
+applies the fix too. In `automatic` mode it applies a fix only when deployment
+identity, reproduction, and post-fix verification are configured; otherwise it
+files the read-only suggestion.
 
 ```bash
 maajun report "Checkout button does nothing on mobile"
@@ -348,7 +350,7 @@ maajun report "Slow /search endpoint" --dry-run   # analyze only, no PR
 |------|---------|
 | `-r, --repo OWNER/NAME` | Target repo. With multiple repos configured you're prompted to pick one when it's omitted; pass it explicitly for scripts |
 | `-b, --base-branch NAME` | Branch to base the report on (default: the repo's configured branch) |
-| `-m, --mode MODE` | Override the mode for this run (`suggest`/`fix`) |
+| `-m, --mode MODE` | Override with `suggest`, `fix`, or `automatic` |
 | `--dry-run` | Analyze and print the report and cost, but skip git/PR |
 | `--verbose` | Debug logging (replaces the progress spinner with logs) |
 | `-c, --config PATH` | Config file location |

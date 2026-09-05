@@ -427,7 +427,7 @@ def setup_github(
         if ask.interactive else (entry.mode if entry else "suggest")
     )
 
-    # Only fix mode produces a diff, so only fix mode has anything to verify.
+    # Fix and evidence-ready automatic mode can produce a diff to verify.
     current_test_command = entry.test_command if entry else ""
     current_verification_commands = entry.verification_commands if entry else []
     current_reproduction_command = entry.reproduction_command if entry else ""
@@ -444,15 +444,25 @@ def setup_github(
         if reproduction_command is not None
         else current_reproduction_command
     )
-    if resolved_mode == "fix":
+    if resolved_mode in ("fix", "automatic"):
         if test_command is None and ask.interactive:
             console.print(
-                "  [dim]Fix mode edits code. A test command lets maajun verify "
-                "the fix and put the result in the PR.[/dim]"
+                "  [dim]Fix-capable modes use owner-controlled commands to "
+                "verify a proposed change.[/dim]"
             )
             resolved_test_command = ask.text(
                 "Test command (Enter to skip)", current_test_command
             )
+        if (
+            resolved_mode == "automatic"
+            and reproduction_command is None
+            and ask.interactive
+        ):
+            resolved_reproduction_command = ask.text(
+                "Reproduction command (must fail before and pass after)",
+                current_reproduction_command,
+            )
+    if resolved_mode == "fix":
         if not (
             resolved_test_command
             or resolved_verification_commands
@@ -463,6 +473,15 @@ def setup_github(
                 "fix-mode PRs will be marked "
                 "unverified.[/yellow]"
             )
+    elif resolved_mode == "automatic" and not (
+        resolved_reproduction_command
+        and (resolved_test_command or resolved_verification_commands)
+    ):
+        console.print(
+            "  [yellow]⚠ Automatic mode will remain read-only until both a "
+            "reproduction command and a post-fix verification command are "
+            "configured.[/yellow]"
+        )
 
     # Updated in place: setup never asks about log_files, so rebuilding the
     # entry from these answers would drop them.
@@ -592,7 +611,9 @@ def setup(
     base_branch: str | None = typer.Option(
         None, "--base-branch", "-b", help="Branch to open PRs against"
     ),
-    mode: str | None = typer.Option(None, "--mode", "-m", help="'suggest' or 'fix'"),
+    mode: str | None = typer.Option(
+        None, "--mode", "-m", help="'suggest', 'fix', or 'automatic'"
+    ),
     test_command: str | None = typer.Option(
         None, "--test-command",
         help="Command that verifies a fix-mode edit, e.g. 'pytest -q'",

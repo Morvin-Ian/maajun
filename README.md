@@ -11,9 +11,11 @@ Maajun watches your error sources, investigates each new error against your
 source code, and documents it on GitHub. In `suggest` mode it opens an issue
 containing the root-cause analysis and a proposed patch. In `fix` mode it
 applies the patch on a branch, runs your test suite against it, and opens a
-pull request with the result.
+pull request with the result. In `automatic` mode it takes the fix path only
+when deployment identity, targeted reproduction, and post-fix verification are
+configured; otherwise it opens a read-only suggestion issue.
 
-Nothing merges without your review, in either mode.
+Nothing merges without your review, in any mode.
 
 **Contents** — [Requirements](#requirements) · [Installation](#installation) ·
 [Quick start](#quick-start) · [How it works](#how-it-works) ·
@@ -62,7 +64,8 @@ maajun report "Checkout 500s when the cart is empty"
 
 This clones the target repo, analyzes it, and files an issue with a root-cause
 report. Add `-m fix` to open a pull request with the fix applied, or
-`--dry-run` to print the analysis and its cost without touching GitHub.
+`-m automatic` to let configured evidence choose between an issue and a fix
+PR. `--dry-run` prints the analysis and its cost without touching GitHub.
 
 ### Monitor continuously
 
@@ -134,7 +137,9 @@ detected and analyzed, but each report is written to
    report, including the commit that likely introduced the bug and how the app
    runs where it broke (folder, port, docker or systemd).
 5. **Report** — an issue in `suggest` mode, or a branch, a test run, and a pull
-   request in `fix` mode. Always one or the other, and never empty: a report
+   request in `fix` mode. `automatic` chooses between those paths from
+   owner-controlled deployment and verification evidence. Always one or the
+   other, and never empty: a report
    that comes back blank is re-asked once, then abandoned as a failed
    incident rather than filed as an empty issue.
 
@@ -312,9 +317,19 @@ for the slash commands and the full permission model.
 |------|-------|--------|
 | `suggest` (default) | Read-only | Issue with analysis and a suggested patch |
 | `fix` | Edits its own clone under `daemon.workdir` | Branch + test run + pull request |
+| `automatic` | Read-only unless the evidence gate is ready | Suggestion issue or verified fix PR |
 
 Switch with `maajun config github.mode fix`, or per run with
 `-m/--mode` on `watch` and `report`.
+
+Automatic mode selects the fix path only when all three are present: an active
+deployment identity (`deployment.path`, `runs`, or `service_command`), a
+`reproduction_command`, and at least one `test_command` or
+`verification_commands` entry. A known Python runtime mismatch keeps the run
+read-only. The decision applies to one incident and never rewrites the saved
+mode. A selected fix still has to pass the deployment-applicability,
+verification, quality-review, and publication gates; failure produces an issue
+or local report, never a merge or deployment.
 
 Fix mode may still conclude that no code change is warranted. When it does,
 you get an issue rather than a pull request whose only diff is the incident
@@ -468,7 +483,7 @@ provider = "deepseek"         # or "openai", "anthropic"
 [[github.repos]]
 repo = "owner/name"
 base_branch = "main"
-mode = "suggest"
+mode = "suggest"  # or "fix" / "automatic"
 # test_command = "pytest -q"  # verifies a fix-mode edit; result goes in the PR
 # verification_commands = ["ruff check .", "mypy src"]  # each runs independently
 # reproduction_command = "pytest -q tests/test_checkout_bug.py"  # fail before, pass after
@@ -614,6 +629,8 @@ that reports no cache hits: every input token is charged at the miss rate.
   chat` sees the directory you launched it in, `daemon.workdir`, and the log
   files named in your config. `suggest` mode is read-only on top of that;
   `fix` mode may edit inside the clone, never your running application.
+  `automatic` receives one of those same two policies after its evidence gate;
+  it is not a third, broader permission set.
 
 - **Secrets are refused, not merely unrequested.** `.env` files, SSH and TLS
   keys, `.netrc`, `.git-credentials`, anything under `.git/`, and maajun's own
@@ -626,10 +643,10 @@ that reports no cache hits: every input token is charged at the miss rate.
   an earlier one fails, and reproduction is reported before and after the edit.
 - **Deployment-applicable fixes.** Discovery records the active systemd
   command, reverse-proxy configuration, and the effective Nginx request-body
-  boundary when it can. Fix mode will not publish a PR that changes an
+  boundary when it can. A fix-path run will not publish a PR that changes an
   unmapped repository proxy file; it leaves an issue in the target repository
   instead.
-- **Independent publication review.** Live fix-mode diffs get one read-only
+- **Independent publication review.** Live fix-path diffs get one read-only
   review after owner-controlled verification, against the deployment, product
   boundary and behavioral tests. One correction is allowed and all configured
   checks run again; a still-blocked change is never pushed. Its issue labels

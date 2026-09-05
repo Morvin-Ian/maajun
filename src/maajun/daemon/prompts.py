@@ -136,6 +136,15 @@ def report_format(mode: str) -> str:
     )
 
 
+AUTOMATIC_MODE_SECTION = """
+Automatic mode selected the {effective} path for this run because:
+{reasons}
+
+This is a per-incident decision. It does not change the saved monitoring mode.
+Do not claim a code change when the selected path is read-only.
+"""
+
+
 ANALYZE_PROMPT = """\
 You are maajun, investigating a live error from a running deployment. Your
 report is filed on GitHub for the engineers who own this code, so it has to
