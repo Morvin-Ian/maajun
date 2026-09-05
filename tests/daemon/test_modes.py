@@ -1,5 +1,5 @@
 from maajun.config import DeploymentConfig, RepoConfig
-from maajun.modes import decide_run_mode
+from maajun.daemon.modes import decide_run_mode
 
 
 def test_automatic_mode_stays_read_only_without_owner_evidence():

@@ -1,6 +1,6 @@
 from rich.console import Console
 
-from maajun.render import MarkdownStream, render
+from maajun.terminal import MarkdownStream, WorkingStatus, render, working
 
 
 def stream_in_chunks(text: str, size: int = 5) -> list[str]:
@@ -130,3 +130,45 @@ def test_a_whole_reply_renders_in_order():
     assert positions == sorted(positions)
     for source in ("##", "```", "- check"):
         assert source not in out
+
+
+# ---------------------------------------------------------------------------
+# The working spinner
+# ---------------------------------------------------------------------------
+
+
+def captured(renderable) -> str:
+    console = Console(width=80, force_terminal=False)
+    with console.capture() as cap:
+        console.print(renderable)
+    return cap.get()
+
+
+def test_working_status_renders_phase():
+    status = WorkingStatus("Preparing workspace")
+    assert "Preparing workspace" in captured(status)
+
+
+def test_working_status_set_changes_phase_and_resets_timer():
+    status = WorkingStatus("Preparing workspace")
+    status.started -= 5  # pretend 5s elapsed on the first phase
+    status.set("Analyzing with AI")
+    out = captured(status)
+    assert "Analyzing with AI" in out
+    assert "Preparing workspace" not in out
+    # Timer resets on phase change, so the new phase shows ~0s, not 5s.
+    assert "(0s)" in out
+
+
+def test_working_status_set_same_phase_keeps_timer():
+    status = WorkingStatus("Analyzing with AI")
+    before = status.started
+    status.set("Analyzing with AI")
+    assert status.started == before
+
+
+def test_working_context_manager_yields_status():
+    console = Console(width=80, force_terminal=False)
+    with working(console, "Working") as status:
+        assert isinstance(status, WorkingStatus)
+        status.set("Opening PR")

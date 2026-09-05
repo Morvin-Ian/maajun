@@ -9,8 +9,8 @@ from rich.panel import Panel
 from maajun.auth import AuthManager
 from maajun.cli.shared import app, console, load_config
 from maajun.config import Config, RepoConfig
-from maajun.discovery import Discovered, discover
-from maajun.inspection import Inspection, inspect_repo
+from maajun.project.discovery import Discovered, discover
+from maajun.project.inspection import Inspection, inspect_repo
 
 
 def describe_found(found: Discovered) -> str:

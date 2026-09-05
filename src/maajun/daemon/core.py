@@ -12,6 +12,7 @@ from maajun.agent.tools.sandbox import nearest_under
 from maajun.config import Config, RepoConfig
 from maajun.daemon import triage
 from maajun.daemon.investigation import Investigation, Plan, bank_spend
+from maajun.daemon.modes import decide_run_mode
 from maajun.daemon.prompts import (
     ANALYZE_PROMPT,
     INVESTIGATION_RULES,
@@ -27,7 +28,6 @@ from maajun.daemon.store import (
     ARTIFACT_REPORT,
     IncidentStore,
 )
-from maajun.modes import decide_run_mode
 from maajun.monitors import ErrorEvent, Monitor, fingerprint
 from maajun.utils import utc_day_start_iso
 from maajun.vcs import GitHubClient, GitHubIssue, GitWorkspace

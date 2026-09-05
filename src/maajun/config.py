@@ -6,7 +6,6 @@ from typing import get_args, get_origin
 import tomlkit
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
-from maajun.limits import DEFAULT_REOPEN_AFTER_DAYS
 from maajun.monitors.defaults import (
     DEFAULT_ERROR_PATTERN,
     DEFAULT_JSON_LEVEL_VALUES,
@@ -14,6 +13,10 @@ from maajun.monitors.defaults import (
 )
 from maajun.providers.base import ProviderType
 from maajun.utils import PLACEHOLDER_REPO, is_valid_repo
+
+# A published incident that goes quiet for this long and then happens again
+# is treated as a regression, not as more of the same.
+DEFAULT_REOPEN_AFTER_DAYS = 7.0
 
 LIST_SEP = ","
 VALID_MODES = ("suggest", "fix", "automatic")

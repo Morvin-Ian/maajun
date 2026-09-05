@@ -16,8 +16,8 @@ from maajun.cli.setup import (
 )
 from maajun.cli.shared import Asker, implemented_providers
 from maajun.config import Config, DeploymentConfig, GitHubConfig, RepoConfig
-from maajun.discovery import Discovered
-from maajun.inspection import Inspection
+from maajun.project.discovery import Discovered
+from maajun.project.inspection import Inspection
 from maajun.providers.catalog import CatalogEntry
 
 runner = CliRunner()

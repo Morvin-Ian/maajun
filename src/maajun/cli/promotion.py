@@ -14,7 +14,7 @@ from maajun.config import Config, RepoConfig
 from maajun.daemon import build_daemon_for_report
 from maajun.daemon.store import ARTIFACT_ISSUE, ARTIFACT_REPORT, IncidentStore
 from maajun.monitors import fingerprint
-from maajun.progress import working
+from maajun.terminal import working
 from maajun.utils import truncate
 from maajun.vcs import GitHubError, GitHubIssue
 

@@ -1,7 +1,8 @@
 import pytest
 
 from maajun.config import DeploymentConfig
-from maajun.discovery import (
+from maajun.monitors.shell import CommandOutput
+from maajun.project.discovery import (
     Container,
     Discovered,
     Unit,
@@ -19,7 +20,6 @@ from maajun.discovery import (
     probe_container,
     probe_unit,
 )
-from maajun.monitors.shell import CommandOutput
 
 PS_LINE = (
     "kfl-web-1\tkfl\t/srv/kfl\t0.0.0.0:8000->8000/tcp, [::]:8000->8000/tcp\trunning"
@@ -44,7 +44,7 @@ def route(monkeypatch):
         def fake(cmd, *, timeout=30.0):
             return handler(cmd) or CommandOutput()
 
-        monkeypatch.setattr("maajun.discovery.run_text", fake)
+        monkeypatch.setattr("maajun.project.discovery.run_text", fake)
 
     return install
 
@@ -310,7 +310,7 @@ def test_discover_reports_finding_nothing(route):
 
 def test_an_nginx_container_pulls_in_the_proxy_error_log(route, tmp_path, monkeypatch):
     """502s and upstream timeouts never reach the app's own logger."""
-    monkeypatch.setattr("maajun.discovery.NGINX_LOG", str(tmp_path / "nginx.log"))
+    monkeypatch.setattr("maajun.project.discovery.NGINX_LOG", str(tmp_path / "nginx.log"))
     (tmp_path / "nginx.log").write_text("")
 
     def handler(cmd):

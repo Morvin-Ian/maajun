@@ -25,10 +25,10 @@ from maajun.cli.shared import (
 from maajun.cli.status_checks import build_status, gather_github
 from maajun.config import VALID_MODES, Config, RepoConfig
 from maajun.daemon import build_daemon, build_daemon_for_report, service
+from maajun.daemon.modes import decide_run_mode
 from maajun.daemon.store import ARTIFACT_IGNORED
-from maajun.discovery import probe_source
-from maajun.modes import decide_run_mode
-from maajun.progress import working
+from maajun.project.discovery import probe_source
+from maajun.terminal import working
 from maajun.utils import is_valid_repo, qualify, truncate
 from maajun.vcs import GitHubClient
 from maajun.vcs.gh_cli import account_login

@@ -20,6 +20,7 @@ from maajun.daemon.followups import (
     InvalidFollowUp,
     parse_follow_ups,
 )
+from maajun.daemon.modes import decide_run_mode
 from maajun.daemon.prompts import (
     AUTOMATIC_MODE_SECTION,
     DEPLOYMENT_SECTION,
@@ -41,10 +42,9 @@ from maajun.daemon.store import (
     ARTIFACT_REPORT,
 )
 from maajun.daemon.verification import VerificationCheck, VerificationSummary
-from maajun.modes import decide_run_mode
 from maajun.monitors import ErrorEvent
+from maajun.project.runtime_env import verification_runtime_mismatch
 from maajun.providers.pricing import extract_usage
-from maajun.runtime_env import verification_runtime_mismatch
 from maajun.utils import truncate_tail
 from maajun.vcs import CommandResult, GitError, GitWorkspace
 

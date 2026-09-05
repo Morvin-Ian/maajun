@@ -11,7 +11,7 @@ from maajun.daemon.followups import FollowUpTask
 from maajun.daemon.verification import VerificationCheck, VerificationSummary
 from maajun.monitors import ErrorEvent
 from maajun.privacy import sanitize_artifact
-from maajun.render import render
+from maajun.terminal import render
 from maajun.utils import truncate, truncate_tail
 from maajun.vcs import CommandResult
 
