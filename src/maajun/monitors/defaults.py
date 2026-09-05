@@ -1,9 +1,7 @@
 from __future__ import annotations
 
-# What counts as an error line. Deliberately wide: a missed 500 is the whole
-# point of the tool, while a false positive costs one deduplicated analysis
-# that says "not a defect". Warnings are still excluded — they are the level
-# apps use for things they already handle.
+# Deliberately wide: a missed 500 is the whole point of the tool, a false
+# positive costs one analysis. Warnings are excluded — apps handle those.
 DEFAULT_ERROR_PATTERN = (
     r"\b(ERROR|CRITICAL|FATAL|SEVERE|EMERG|ALERT|Traceback|panic|panicked)\b"
     r"|\bUnhandled\w*"

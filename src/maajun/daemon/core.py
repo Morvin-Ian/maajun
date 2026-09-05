@@ -12,6 +12,7 @@ from maajun.agent.tools.sandbox import nearest_under
 from maajun.config import Config, RepoConfig
 from maajun.daemon import triage
 from maajun.daemon.investigation import Investigation, Plan, bank_spend
+from maajun.daemon.modes import decide_run_mode
 from maajun.daemon.prompts import (
     ANALYZE_PROMPT,
     INVESTIGATION_RULES,
@@ -27,7 +28,6 @@ from maajun.daemon.store import (
     ARTIFACT_REPORT,
     IncidentStore,
 )
-from maajun.modes import decide_run_mode
 from maajun.monitors import ErrorEvent, Monitor, fingerprint
 from maajun.utils import utc_day_start_iso
 from maajun.vcs import GitHubClient, GitHubIssue, GitWorkspace
@@ -52,9 +52,8 @@ MAX_DETAILS_IN_SCREEN = 2000
 
 
 
-# Tools fix mode may use. These are also the only gated ones, so the guard
-# against anything else is a guard, not a path anything takes today — it is
-# what keeps a newly gated tool from being waved through as an edit.
+# Tools fix mode may use, and the only gated ones. The guard against anything
+# else keeps a newly gated tool from being waved through as an edit.
 EDIT_TOOLS = ("edit_file", "write_file")
 
 
@@ -593,9 +592,8 @@ class Daemon:
                     rules=INVESTIGATION_RULES,
                     format=report_format(decide_run_mode(repo_config).effective),
                 ),
-                # Only a fallback: the artifact is titled with what the report
-                # concludes, and this raw log line is used when it concludes
-                # nothing nameable.
+                # Only a fallback: the artifact is titled from what the
+                # report concludes, this line from when it concludes nothing.
                 subject_fallback=event.message,
                 commit_prefix="maajun: incident report for",
                 dry_run_header=f"AI analysis for: {event.message[:80]}",

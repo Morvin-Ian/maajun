@@ -1,10 +1,3 @@
-"""One incident, from the prompt to the artifact.
-
-The report the agent is asked for, the diff fix mode has to produce, the
-verification and repair round, and where it all ends up: a pull request, an
-issue, a follow-up issue, a local file, or nothing at all.
-"""
-
 import subprocess
 from pathlib import Path
 
@@ -29,6 +22,7 @@ from maajun.config import (
 from maajun.daemon.core import Daemon, LocalWorkspace
 from maajun.daemon.investigation import blames_our_edits
 from maajun.daemon.store import ARTIFACT_ISSUE, ARTIFACT_PR, IncidentStore
+from maajun.discovery.toolchain import Formatter
 from maajun.monitors import ErrorEvent, LogFileMonitor
 from maajun.providers.base import CompletionResponse
 from maajun.vcs import CommandResult, GitWorkspace
@@ -46,7 +40,6 @@ async def test_suggest_mode_files_an_issue(setup):
     assert len(handled) == 1
     fp = handled[0]
 
-    # Agent got the error and the workspace path
     assert "IndexError" in agent.prompts[0]
     workspace = daemon.workspaces["owner/name"]
     assert str(workspace.path) in agent.prompts[0]
@@ -96,7 +89,6 @@ async def test_fix_mode_opens_a_pull_request_with_the_report_committed(setup):
     assert "IndexError" in call["title"]
     assert "Root cause" in call["body"]
 
-    # Branch with the committed report exists on the remote
     show = subprocess.run(
         ["git", "show", f"maajun/incident-{fp}:docs/incidents/{fp}.md"],
         cwd=str(remote), capture_output=True, text=True,
@@ -418,7 +410,6 @@ async def test_recording_the_spend_never_masks_the_original_failure(setup):
 
 async def test_fix_mode_commits_agent_changes(setup):
     daemon, logfile, agent, github, store, remote = setup
-    # Update the repo config mode to "fix"
     repo_config = daemon.repo_for(daemon.monitors[0])
     repo_config.mode = "fix"
     workspace = daemon.workspaces["owner/name"]
@@ -455,10 +446,8 @@ async def test_dry_run_skips_git_and_pr(setup):
     assert len(handled) == 1
     fp = handled[0]
 
-    # Agent still analyzed the error
     assert "IndexError" in agent.prompts[0]
 
-    # No branch was created, no PR was opened
     assert github.calls == []
     show = subprocess.run(
         ["git", "branch", "--list", f"maajun/incident-{fp}"],
@@ -466,7 +455,6 @@ async def test_dry_run_skips_git_and_pr(setup):
     )
     assert show.stdout.strip() == ""
 
-    # Incident not persisted — a real run should still process it
     assert store.get(fp) is None
 
 
@@ -2339,3 +2327,91 @@ async def test_the_committed_report_leaves_the_follow_up_out(setup):
 
 def pr_url_of(github) -> str:
     return f"https://github.com/{github.calls[0]['repo']}/pull/1"
+
+
+# -- project formatting ------------------------------------------------------
+
+# A stand-in formatter: a shell rewrite visible in the diff, so tests assert
+# on what reached the branch, not on a binary that may not be installed.
+FORMATTER = Formatter(
+    check='grep -q "^items" main.py',
+    write="sed -i 's/$/  # formatted/' main.py",
+    source="pyproject.toml [tool.ruff]",
+)
+
+
+def only_formatter(monkeypatch, formatter=FORMATTER):
+    detected = [formatter] if formatter else []
+    monkeypatch.setattr(
+        "maajun.daemon.investigation.detect_formatters", lambda root: detected
+    )
+
+
+def pushed(remote, branch, path):
+    return subprocess.run(
+        ["git", "show", f"{branch}:{path}"],
+        cwd=str(remote), capture_output=True, text=True,
+    ).stdout
+
+
+async def test_a_clean_checkout_has_the_fix_formatted_before_it_is_pushed(
+    setup, monkeypatch
+):
+    daemon, logfile, agent, github, store, remote = setup
+    fix_mode(daemon, agent)
+    only_formatter(monkeypatch)
+
+    with open(logfile, "a") as stream:
+        stream.write(TRACEBACK)
+    fp = (await daemon.poll_once())[0]
+
+    assert len(github.calls) == 1
+    assert pushed(remote, f"maajun/incident-{fp}", "main.py") == "items = [0]  # formatted\n"
+
+
+async def test_a_checkout_that_is_not_already_formatted_is_left_alone(
+    setup, monkeypatch
+):
+    """Formatting a repo that does not conform would bury the fix in noise."""
+    daemon, logfile, agent, github, store, remote = setup
+    fix_mode(daemon, agent)
+    only_formatter(
+        monkeypatch,
+        Formatter(check="false", write="sed -i 's/$/  # formatted/' main.py", source="x"),
+    )
+
+    with open(logfile, "a") as stream:
+        stream.write(TRACEBACK)
+    fp = (await daemon.poll_once())[0]
+
+    assert len(github.calls) == 1
+    assert pushed(remote, f"maajun/incident-{fp}", "main.py") == "items = [0]\n"
+
+
+async def test_formatting_happens_before_owner_verification_runs(setup, monkeypatch):
+    """The commands in the PR body judge the code that is actually pushed."""
+    daemon, logfile, agent, github, store, remote = setup
+    fix_mode(daemon, agent, test_command='grep -q "# formatted" main.py')
+    only_formatter(monkeypatch)
+
+    with open(logfile, "a") as stream:
+        stream.write(TRACEBACK)
+    await daemon.poll_once()
+
+    assert len(github.calls) == 1
+    assert "Tests pass" in github.calls[0]["body"]
+
+
+async def test_suggest_mode_never_runs_a_formatter(setup, monkeypatch):
+    daemon, logfile, agent, github, store, remote = setup
+    detections = []
+    monkeypatch.setattr(
+        "maajun.daemon.investigation.detect_formatters",
+        lambda root: detections.append(root) or [FORMATTER],
+    )
+
+    with open(logfile, "a") as stream:
+        stream.write(TRACEBACK)
+    await daemon.poll_once()
+
+    assert detections == []

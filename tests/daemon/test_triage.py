@@ -1,11 +1,3 @@
-"""A guard that refused bad input is not a bug worth filing.
-
-Three passes decide: the signatures here, before any model is asked; one
-cheap tool-less question for the guards no signature can recognise; and the
-agent's own verdict on the finished report. All of them have to fail open —
-an error nobody can classify is a defect until shown otherwise.
-"""
-
 import pytest
 
 from maajun.daemon.reports import BY_DESIGN, DEFECT, by_design_reason, verdict

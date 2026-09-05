@@ -4,7 +4,7 @@ from typer.testing import CliRunner
 from maajun.auth import AuthManager
 from maajun.cli import app
 from maajun.config import Config, RepoConfig
-from maajun.discovery import Discovered
+from maajun.discovery.deployment import Discovered
 
 runner = CliRunner()
 

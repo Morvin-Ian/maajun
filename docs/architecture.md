@@ -209,17 +209,20 @@ maajun/
   monitors/     error sources (files, journald, docker) + defaults
   providers/    chat_completions.py (the protocol) + one file per vendor,
                 plus pricing.py
-  daemon/       core (loop), reports (rendering), store, prompts, wiring
+  daemon/       core (loop), investigation (one incident), reports, store,
+                prompts, wiring, modes, and the publication and fix-quality
+                gates
+  discovery/    what maajun works out about the watched app rather than
+                being told: deployment (how the host runs it), inspection
+                (what the code is), toolchain (its checks and formatters),
+                runtime_env (which interpreter a command uses)
   chat/         the REPL, its memory, and the tools that drive the CLI
   vcs/          git workspace, GitHub client, API conventions
   cli/          one command per module, all registering on a shared Typer app
   auth.py       credentials: the OS keyring, then a gh login
-  inspection.py reads a codebase to find how its errors surface
-  privacy.py    canonicalises and redacts runtime evidence at ingestion
-  publication.py fail-closed routing for passive runtime artifacts
-  fix_quality.py deterministic deployment and fix-publication gates
   config.py     the config models and TOML round-trip
-  discovery.py  probes the host for how a repo is deployed
+  privacy.py    canonicalises and redacts runtime evidence at ingestion
+  terminal.py   streamed markdown and the working spinner
 ```
 
 ## The incident pipeline (`maajun watch`)
@@ -435,7 +438,7 @@ an explicit request, not a passive observation.
 ### Progress feedback
 
 Foreground commands that do slow work surface it instead of hanging
-silently. `report` and `chat` drive a Rich `Live` spinner (`progress.py`)
+silently. `report` and `chat` drive a Rich `Live` spinner (`terminal.py`)
 whose phase label the daemon advances through a `progress` callback
 (*preparing workspace → analyzing with AI → opening PR*). `watch` has no
 spinner: it runs detached and its output is read out of a log file, where

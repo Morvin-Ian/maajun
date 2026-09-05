@@ -1,14 +1,14 @@
 import pytest
 
 from maajun.utils.commands import CommandOutput
-from maajun.vcs.gh import gh_token, remote_url, ssh_works
+from maajun.vcs.gh_cli import gh_token, remote_url, ssh_works
 
 
 @pytest.fixture
 def command(monkeypatch):
     def install(output):
         monkeypatch.setattr(
-            "maajun.vcs.gh.run_text", lambda cmd, timeout=30.0: output
+            "maajun.vcs.gh_cli.run_text", lambda cmd, timeout=30.0: output
         )
 
     return install

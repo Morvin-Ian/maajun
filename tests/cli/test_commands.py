@@ -6,7 +6,7 @@ from typer.testing import CliRunner
 from maajun.auth import AuthManager
 from maajun.cli import app
 from maajun.config import Config
-from maajun.discovery import Discovered
+from maajun.discovery.deployment import Discovered
 
 runner = CliRunner()
 
@@ -245,7 +245,7 @@ def test_status_reports_missing_credentials(fake_keyring, tmp_path):
 
 
 def test_status_all_green(fake_keyring, tmp_path, monkeypatch):
-    monkeypatch.setattr("maajun.cli.monitor.GitHubClient", FakeGitHubClient)
+    monkeypatch.setattr("maajun.cli.watch.GitHubClient", FakeGitHubClient)
     auth = AuthManager()
     auth.set_api_key("deepseek", "sk-test")
     auth.set_github_token("ghp_test")
@@ -629,7 +629,7 @@ def test_add_repo_does_not_prompt_without_a_terminal(fake_keyring, tmp_path):
 def test_add_repo_asks_the_way_setup_does(fake_keyring, tmp_path, monkeypatch):
     """With a terminal, the same questions setup asks for its first repo."""
     config_path = tmp_path / "config.toml"
-    monkeypatch.setattr("maajun.cli.monitor.at_a_terminal", lambda: True)
+    monkeypatch.setattr("maajun.cli.watch.at_a_terminal", lambda: True)
     answers = iter(["develop", "2", "make test", ""])
     monkeypatch.setattr(
         "maajun.cli.shared.prompt_line", lambda text: next(answers)
@@ -880,7 +880,7 @@ def test_discover_path_needs_one_repo(fake_keyring, tmp_path, monkeypatch):
 def signed_in(monkeypatch):
     """GitHub authenticated, so the account name is known."""
     monkeypatch.setattr(
-        "maajun.cli.monitor.account_login", lambda token=None: "morvin"
+        "maajun.cli.watch.account_login", lambda token=None: "morvin"
     )
 
 
@@ -930,28 +930,28 @@ def test_a_bare_name_still_reaches_the_repo_flags(fake_keyring, signed_in, tmp_p
 # ---------------------------------------------------------------------------
 
 
-def fake_background(monitor_cli, monkeypatch, tmp_path) -> dict:
+def fake_background(watch_cli, monkeypatch, tmp_path) -> dict:
     """Stop watch actually detaching; report the arguments it would pass on."""
     launched: dict = {}
 
     def start(workdir, args):
         launched["args"] = args
-        return monitor_cli.service.Running(pid=1, log_file=tmp_path / "watch.log")
+        return watch_cli.service.Running(pid=1, log_file=tmp_path / "watch.log")
 
     async def no_daemon(config):
         return None
 
-    monkeypatch.setattr(monitor_cli.service, "running", lambda workdir: None)
-    monkeypatch.setattr(monitor_cli.service, "start", start)
-    monkeypatch.setattr(monitor_cli, "check_it_runs", no_daemon)
+    monkeypatch.setattr(watch_cli.service, "running", lambda workdir: None)
+    monkeypatch.setattr(watch_cli.service, "start", start)
+    monkeypatch.setattr(watch_cli, "check_it_runs", no_daemon)
     return launched
 
 
 def test_backfill_is_passed_to_the_background_daemon(fake_keyring, tmp_path, monkeypatch):
     """It is a per-run choice, and the run happens in another process."""
-    from maajun.cli import monitor as monitor_cli
+    from maajun.cli import watch as watch_cli
 
-    launched = fake_background(monitor_cli, monkeypatch, tmp_path)
+    launched = fake_background(watch_cli, monkeypatch, tmp_path)
     config_path = tmp_path / "config.toml"
     config_path.write_text("[ai]\nprovider = \"deepseek\"\n")
 
@@ -964,9 +964,9 @@ def test_backfill_is_passed_to_the_background_daemon(fake_keyring, tmp_path, mon
 def test_without_the_flag_the_daemon_is_not_told_to_backfill(
     fake_keyring, tmp_path, monkeypatch
 ):
-    from maajun.cli import monitor as monitor_cli
+    from maajun.cli import watch as watch_cli
 
-    launched = fake_background(monitor_cli, monkeypatch, tmp_path)
+    launched = fake_background(watch_cli, monkeypatch, tmp_path)
     config_path = tmp_path / "config.toml"
     config_path.write_text("[ai]\nprovider = \"deepseek\"\n")
 

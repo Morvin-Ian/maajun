@@ -41,10 +41,8 @@ class DockerLogMonitor(CommandStreamMonitor):
         ]
 
     def read_output(self, output: CommandOutput) -> str:
-        # docker relays the container's stderr as its own, and that is where
-        # an unhandled exception goes; reading stdout alone would miss every
-        # traceback. A failed command never reaches here (see read_now), so
-        # this cannot mistake "No such container" for log text.
+        # An unhandled exception goes to stderr, so stdout alone would miss
+        # every traceback. read_now keeps a failed command from reaching here.
         return "\n".join(part for part in (output.stdout, output.stderr) if part)
 
     def on_success(self) -> None:

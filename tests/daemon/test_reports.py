@@ -1,10 +1,3 @@
-"""The artifact title has to name what the report says to fix.
-
-Titling from the raw log line instead was the mismatch these cover: the
-exception surfaces in one place and the defect is regularly in another, so an
-issue called `KeyError: 'discount'` would send a reader to the wrong file.
-"""
-
 from maajun.config import RepoConfig
 from maajun.daemon.reports import (
     artifact_title,

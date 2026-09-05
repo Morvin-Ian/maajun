@@ -17,7 +17,7 @@ from maajun.cli.shared import (
 from maajun.cli.status_checks import describe_transport, gather_github
 from maajun.config import Config, RepoConfig
 from maajun.vcs import GitHubClient, GitHubError
-from maajun.vcs.gh import (
+from maajun.vcs.gh_cli import (
     INSTALL_GH,
     SSH_SETUP_URL,
     TOKEN_URL,

@@ -22,11 +22,10 @@ from maajun.chat.tools import chat_registry
 from maajun.cli.shared import prompt_line
 from maajun.config import Config
 from maajun.daemon.store import IncidentStore
-from maajun.progress import WorkingStatus
 from maajun.providers.base import ProviderError
 from maajun.providers.factory import ProviderFactory
 from maajun.providers.pricing import extract_usage
-from maajun.render import MarkdownStream, render
+from maajun.terminal import MarkdownStream, WorkingStatus, render
 from maajun.utils import truncate, utc_day_start_iso
 
 log = logging.getLogger(__name__)

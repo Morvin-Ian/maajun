@@ -8,9 +8,9 @@ from maajun.agent.tools.base import (
     resolve_path,
 )
 from maajun.agent.tools.files import EDIT_FILE, READ_FILE, WRITE_FILE
+from maajun.agent.tools.git_status import GIT_STATUS
 from maajun.agent.tools.sandbox import Sandbox
 from maajun.agent.tools.search import GLOB, GREP, LIST_DIR
-from maajun.agent.tools.vcs_status import GIT_STATUS
 
 BUILTIN_TOOLS: list[Tool] = [
     READ_FILE,

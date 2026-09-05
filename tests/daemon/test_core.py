@@ -1,10 +1,3 @@
-"""The watching loop: what reaches an investigation, and what never does.
-
-Deduplication, the spend caps, the per-cycle bound, several repos in one
-daemon, shutdown, and the two cheap by-design passes. What happens to an
-error once the daemon decides to spend on it is `test_investigation`.
-"""
-
 import asyncio
 from pathlib import Path
 
@@ -705,9 +698,8 @@ async def test_first_seen_is_when_the_error_started_not_when_the_cap_lifted(setu
 # Errors that are the code working
 # ---------------------------------------------------------------------------
 
-# One line, the way a monitor sees it: the level marker and the guard's own
-# name have to share a line to arrive as one event. The INFO line after it is
-# what releases the error from the traceback lookahead.
+# One line, the way a monitor sees it: the level marker and the guard's name
+# must share a line. The INFO line after it releases it from the lookahead.
 VALIDATION_ERROR = (
     "ERROR 2026-08-23 10:01:02 django.request: ValidationError on /api/signup: "
     "{'email': ['Enter a valid email address.']}\n"

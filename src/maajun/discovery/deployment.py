@@ -11,7 +11,6 @@ from maajun.utils.commands import run_text
 # only; a filesystem-wide search costs more than asking.
 CANDIDATE_ROOTS = ("/srv", "/opt", "/var/www", "/home", "~")
 
-# Log files worth watching, relative to the app folder.
 LOG_GLOBS = ("logs/*.log", "log/*.log", "*.log")
 
 # A reverse proxy fronting the app: its errors (502s, upstream timeouts)
@@ -284,7 +283,7 @@ def find_log_files(folder: str, proxied: bool) -> list[str]:
     return found
 
 
-def _nginx_context_body_limit(text: str, port: int) -> str:
+def nginx_context_body_limit(text: str, port: int) -> str:
     """The closest request-body limit around the proxy_pass for ``port``."""
     # Comments cannot affect block structure and may contain example directives.
     clean = "\n".join(line.partition("#")[0] for line in text.splitlines())
@@ -343,7 +342,7 @@ def nginx_proxy_for_port(port: int) -> tuple[str, str]:
     except OSError:
         path = matched_config
     config_text = "\n".join(sections[matched_config])
-    limit = _nginx_context_body_limit(config_text, port)
+    limit = nginx_context_body_limit(config_text, port)
     if not limit:
         main_limits = set(re.findall(
             r"\bclient_max_body_size\s+([^\s;]+)",
@@ -420,9 +419,8 @@ def discover(repo: str, existing: DeploymentConfig | None = None) -> Discovered:
         result.notes.append(f"systemd unit {unit.name}")
         result.port = result.port or port_from_command(unit.exec_start)
     if units:
-        # Several units can share one checkout (for example, a web process and
-        # a worker). Record the unit that actually supplied the discovered
-        # listening port instead of whichever systemd happened to list first.
+        # Several units can share one checkout. Record the one that supplied the
+        # discovered listening port, not whichever systemd listed first.
         selected_unit = next(
             (
                 unit for unit in units

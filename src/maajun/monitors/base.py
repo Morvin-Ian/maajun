@@ -22,9 +22,8 @@ FINGERPRINT_LENGTH = 16
 
 def fingerprint(text: str) -> str:
     normalized = canonical_evidence(text)
-    # A query may be present on one client version and omitted on another;
-    # parameter values are already redacted, and the whole optional suffix is
-    # transport noise for an error whose method and path are unchanged.
+    # A query may be present on one client version and omitted on another, and
+    # its values are already redacted — noise for an error on the same route.
     normalized = re.sub(r"(?P<path>/[^\s\"'?]+)\?[^\s\"']+", r"\g<path>", normalized)
     normalized = HEX_RE.sub("", normalized)
     normalized = NUM_RE.sub("", normalized)

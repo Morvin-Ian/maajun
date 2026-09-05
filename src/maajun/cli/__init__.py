@@ -4,10 +4,10 @@ from maajun.cli import (  # noqa: F401,E402  register commands
     deployment,
     github_auth,
     incidents,
-    monitor,
     promotion,
     settings,
     setup,
+    watch,
 )
 from maajun.cli.shared import app, console
 

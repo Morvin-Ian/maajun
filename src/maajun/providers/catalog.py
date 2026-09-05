@@ -1,12 +1,3 @@
-"""A gateway's model list, read from the gateway itself.
-
-A gateway fronts hundreds of models and takes on more every week, so there
-is no catalogue worth shipping in the source — and no way to derive a real
-model id from a display name. All three speak the OpenAI `/v1/models`
-endpoint, which names each model and prices it, so setup asks the gateway
-what it carries instead of guessing.
-"""
-
 from __future__ import annotations
 
 import asyncio

@@ -17,7 +17,7 @@ from maajun.monitors import (
     Monitor,
 )
 from maajun.vcs import GitHubClient, GitWorkspace
-from maajun.vcs.gh import remote_url
+from maajun.vcs.gh_cli import remote_url
 
 log = logging.getLogger(__name__)
 
@@ -211,7 +211,6 @@ def build_daemon(
                 "deployment source to a repo with 'maajun discover --save'."
             )
     except Exception:
-        # deps owns an open database by now.
         deps.store.close()
         raise
 

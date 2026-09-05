@@ -25,13 +25,13 @@ from maajun.cli.shared import (
 from maajun.cli.status_checks import build_status, gather_github
 from maajun.config import VALID_MODES, Config, RepoConfig
 from maajun.daemon import build_daemon, build_daemon_for_report, service
+from maajun.daemon.modes import decide_run_mode
 from maajun.daemon.store import ARTIFACT_IGNORED
-from maajun.discovery import probe_source
-from maajun.modes import decide_run_mode
-from maajun.progress import working
+from maajun.discovery.deployment import probe_source
+from maajun.terminal import working
 from maajun.utils import is_valid_repo, qualify, truncate
 from maajun.vcs import GitHubClient
-from maajun.vcs.gh import account_login
+from maajun.vcs.gh_cli import account_login
 
 NOTICE_STYLES = {"info": "cyan", "success": "green", "warn": "yellow", "error": "red"}
 
@@ -525,9 +525,8 @@ def add_repo(
     if reproduction_command is not None:
         entry.reproduction_command = reproduction_command
 
-    # Prompting is off unless a person is actually at the terminal. add-repo
-    # is used from scripts and from the chat tool, and a prompt there would
-    # hang waiting on a stdin nobody is typing into.
+    # Prompting is off unless a person is at the terminal: add-repo also runs
+    # from scripts and from chat, where a prompt would hang on stdin.
     ask = Asker(interactive=not non_interactive and at_a_terminal())
     configure_repo(
         entry,

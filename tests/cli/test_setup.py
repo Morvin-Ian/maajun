@@ -1,4 +1,5 @@
 import subprocess
+from pathlib import Path
 
 import pytest
 from typer.testing import CliRunner
@@ -6,7 +7,9 @@ from typer.testing import CliRunner
 from maajun.auth import AuthManager
 from maajun.cli import app
 from maajun.cli.setup import (
+    ask_verification_commands,
     catalog_line,
+    checkout_candidates,
     detect_repo_from_git,
     model_line,
     pick_from_gateway,
@@ -16,8 +19,8 @@ from maajun.cli.setup import (
 )
 from maajun.cli.shared import Asker, implemented_providers
 from maajun.config import Config, DeploymentConfig, GitHubConfig, RepoConfig
-from maajun.discovery import Discovered
-from maajun.inspection import Inspection
+from maajun.discovery.deployment import Discovered
+from maajun.discovery.inspection import Inspection
 from maajun.providers.catalog import CatalogEntry
 
 runner = CliRunner()
@@ -879,3 +882,39 @@ def test_a_free_model_says_free_rather_than_zero_dollars():
 def test_a_model_the_gateway_does_not_price_says_so():
     line = catalog_line(CatalogEntry(id="x/y", vendor="x", input=None, output=None))
     assert "not quoted" in line
+
+
+def ruff_checkout(directory):
+    """A checkout whose manifests imply `uv run ruff check .`."""
+    (directory / "pyproject.toml").write_text("[tool.ruff]\n", encoding="utf-8")
+    (directory / "uv.lock").write_text("", encoding="utf-8")
+    return directory
+
+
+def test_verification_commands_are_prefilled_from_the_checkout(tmp_path, monkeypatch):
+    monkeypatch.chdir(ruff_checkout(tmp_path))
+    monkeypatch.setattr("maajun.cli.setup.detect_repo_from_git", lambda *a: "acme/api")
+    assert ask_verification_commands(
+        Asker(interactive=False), "acme/api", None, []
+    ) == ["uv run ruff check ."]
+
+
+def test_configured_commands_are_kept_over_a_fresh_detection(tmp_path, monkeypatch):
+    monkeypatch.chdir(ruff_checkout(tmp_path))
+    monkeypatch.setattr("maajun.cli.setup.detect_repo_from_git", lambda *a: "acme/api")
+    assert ask_verification_commands(
+        Asker(interactive=False), "acme/api", None, ["pytest -q"]
+    ) == ["pytest -q"]
+
+
+def test_undetectable_project_leaves_the_prompt_empty(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("maajun.cli.setup.detect_repo_from_git", lambda *a: "acme/api")
+    assert ask_verification_commands(Asker(interactive=False), "acme/api", None, []) == []
+
+
+def test_checkout_candidates_skip_a_directory_for_another_repo(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("maajun.cli.setup.detect_repo_from_git", lambda *a: "other/app")
+    entry = RepoConfig(repo="acme/api", deployment=DeploymentConfig(path="/srv/api"))
+    assert checkout_candidates("acme/api", entry) == [Path("/srv/api")]

@@ -11,15 +11,14 @@ from maajun.daemon.followups import FollowUpTask
 from maajun.daemon.verification import VerificationCheck, VerificationSummary
 from maajun.monitors import ErrorEvent
 from maajun.privacy import sanitize_artifact
-from maajun.render import render
+from maajun.terminal import render
 from maajun.utils import truncate, truncate_tail
 from maajun.vcs import CommandResult
 
 PROJECT_URL = "https://github.com/Morvin-Ian/maajun"
 
-# Where the report file is committed inside the repo. Named here because the
-# gate that keeps a pull request from being nothing but a report has to know
-# which path does not count as a fix.
+# Where the report file is committed. Named here because the gate against a
+# pull request that is only a report has to know which path is not a fix.
 INCIDENT_REPORT_DIR = "docs/incidents"
 
 # Quoted verbatim, so cap them or GitHub rejects the body.
@@ -29,9 +28,8 @@ MAX_TEST_OUTPUT = 3000
 MAX_TITLE_CHARS = 80
 MAX_COMMIT_SUBJECT_CHARS = 60
 
-# The sections that make a report actionable. Not every one is required: a
-# model that renames a heading should not cost a filed incident. Both
-# spellings of the fix are here because the mode decides which is asked for.
+# The sections that make a report actionable. None is required: a renamed
+# heading should not cost an incident. Both spellings of the fix, one per mode.
 REPORT_HEADINGS = ("what happened", "root cause", "suggested fix", "applied fix")
 
 # Every heading the format asks for. A title is the report's summary, so a
@@ -570,9 +568,8 @@ def print_dry_run(
     if title:
         print(f"Would be titled: {title}")
     print(f"{bar}\n")
-    # The report is markdown. Rendered, because this is the copy a person
-    # reads to decide whether to file it — the file on disk and the issue
-    # body keep the source.
+    # Rendered, because this is the copy a person reads to decide whether to file
+    # it — the file on disk and the issue body keep the markdown source.
     render(Console(), sanitize_artifact(report))
     print(f"\n{bar}")
     print(

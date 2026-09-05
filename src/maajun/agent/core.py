@@ -27,9 +27,8 @@ MAX_HISTORY_MESSAGES = 40
 # MAX_HISTORY_MESSAGES alone does not bound a request. ~40k tokens.
 MAX_REQUEST_CHARS = 160_000
 
-# What a trim cuts back to. Trimming to the ceiling instead would drop one
-# more message every round, invalidating the provider's cached prefix each
-# time; cutting deeper once keeps it stable for several rounds.
+# Cutting back below the ceiling keeps the provider's cached prefix stable
+# for several rounds; trimming to it would drop a message every round.
 TRIM_TARGET_CHARS = 120_000
 
 # Floor, so one huge tool result cannot erase the question it answered.
@@ -103,10 +102,8 @@ NOT_ALLOWED_AS_CALLED = (
     "The change itself was not refused: make the corrected call now."
 )
 
-# A call whose arguments did not parse, which is almost always the output
-# ceiling cutting them off mid-JSON. Nobody denied it, and saying so sent the
-# model away from the edit it was making: PERMISSION_DENIED tells it not to
-# retry, so a truncated write_file ended the run with no change at all.
+# Arguments cut off mid-JSON by the output ceiling. Not a denial: telling the
+# model not to retry ended runs with no change at all.
 MALFORMED_ARGUMENTS = (
     "Error: the arguments for that call were not valid JSON — they were most "
     "likely cut off by the output limit. This was not a refusal. Make the "
@@ -356,13 +353,8 @@ class Agent:
                     )
                     return await self.answer_now(messages, emit, produced)
 
-            # The round ceiling, banked the way the spend ceiling is. Returning
-            # `last_content` here returned the prose that happened to accompany
-            # a tool call, which is usually nothing at all: a run that spent
-            # every round reading filed "the analysis produced no usable report
-            # (it was empty)" and threw away everything it had read. The spend
-            # ceiling never covers this on a free model, where nothing the run
-            # does can reach a dollar ceiling and rounds are the only limit.
+            # The round ceiling, banked like the spend ceiling: returning
+            # `last_content` threw away everything a free run had read.
             log.warning(
                 "used all %d tool rounds without an answer; asking for the "
                 "report from what has been read already",

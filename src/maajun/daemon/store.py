@@ -4,7 +4,7 @@ import logging
 import sqlite3
 from pathlib import Path
 
-from maajun.limits import DEFAULT_REOPEN_AFTER_DAYS
+from maajun.config import DEFAULT_REOPEN_AFTER_DAYS
 from maajun.monitors.base import ErrorEvent
 from maajun.utils import hours_between, utcnow_iso
 

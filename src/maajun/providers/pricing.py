@@ -6,12 +6,8 @@ from datetime import UTC, datetime, timedelta, timezone
 log = logging.getLogger(__name__)
 
 
-# USD per 1M tokens, list price, checked August 2026. Input is priced three
-# ways because that is how it is billed: fresh, re-served from the provider's
-# prefix cache, and stored into it. The tool loop resends a growing prefix
-# every round, so the cache rates are what most input tokens cost.
-#
-# The DeepSeek rows are its peak rates; off-peak is half of them.
+# USD per 1M tokens, list price, checked August 2026. The tool loop resends a
+# growing prefix each round, so cache rates cover most input. DeepSeek is peak.
 PRICING: dict[str, dict[str, float]] = {
     # https://api-docs.deepseek.com/quick_start/pricing
     "deepseek-v4-flash": {
@@ -31,8 +27,7 @@ PRICING: dict[str, dict[str, float]] = {
         "input": 2.50, "cached_input": 1.25, "cache_write": 2.50, "output": 10.00,
     },
     # https://docs.claude.com/en/docs/about-claude/pricing
-    # Anthropic is the one provider that charges to write the cache: reads
-    # are 0.1x a fresh token, writes 1.25x.
+    # The one provider that charges to write the cache: reads 0.1x, writes 1.25x.
     "claude-haiku-4-5": {
         "input": 1.00, "cached_input": 0.10, "cache_write": 1.25, "output": 5.00,
     },
@@ -103,11 +98,8 @@ def base_pricing(model: str | None) -> tuple[dict[str, float], str | None]:
     if not model:
         warn_once("(unnamed)")
         return DEFAULT_PRICING, None
-    # A gateway names the same model vendor/model, and writes the version
-    # with dots where the vendor's own id uses hyphens — claude-haiku-4.5
-    # for claude-haiku-4-5. The table is keyed on the vendor's id, so both
-    # differences are undone before giving up; either alone would charge a
-    # priced model at the dearest rate maajun knows.
+    # A gateway prefixes the vendor and spells the version with dots —
+    # claude-haiku-4.5 for claude-haiku-4-5. Both are undone before the fallback.
     spellings = [model]
     if "/" in model:
         spellings.append(model.rpartition("/")[2])

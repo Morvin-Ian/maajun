@@ -1,22 +1,3 @@
-"""Telling a defect from a guard that fired the way it was built to.
-
-Not every logged error is a bug. A rejected login, a validation failure, a
-429 from a rate limiter, a 404 for a row that was never there — the code did
-exactly what it is meant to do, and there is nothing to fix. Filing an issue
-for one costs a reader's attention and buries the errors that are real.
-
-Three passes catch them, and this module holds the two cheap ones. The
-signatures are matched against the raw error before any model is asked, and
-can only recognise an error named after its own intent. `SCREEN_PROMPT` is
-one tool-less question for the guards they cannot — a paywall, a feature
-flag, a quota. The third is the agent's own verdict on the report, in
-`reports.verdict`, which has read the code that raised.
-
-Nothing is dropped. A match is recorded against the incident with its reason
-and listed by `maajun incidents --ignored`, so a signature that turns out to
-be wrong for a codebase is visible rather than silent.
-"""
-
 from __future__ import annotations
 
 import logging
@@ -24,9 +5,8 @@ import re
 
 log = logging.getLogger(__name__)
 
-# (reason, pattern). Each has to be named after its own intent — a guard that
-# announces what it refused. Anything needing to know the application to
-# judge belongs in the agent's verdict, not here.
+# (reason, pattern), each named after its own intent. Anything needing to
+# know the application to judge belongs in the agent's verdict, not here.
 BY_DESIGN_SIGNATURES: tuple[tuple[str, str], ...] = (
     ("input failed validation", r"\bValidation(Error|Exception|Failed)\b"),
     ("input failed validation", r"\b(400|422)\s+(Bad Request|Unprocessable)"),
@@ -81,11 +61,8 @@ def by_design(
     return ""
 
 
-# The middle pass. Learning from a finished report that an error was a guard
-# doing its job costs the whole investigation to file nothing, so this asks
-# the same question first, of a cheap model, for the guards no signature can
-# recognise. Biased hard towards investigating: a wrong "by design" costs a
-# real bug its report.
+# The middle pass: asks a cheap model what no signature can recognise, before
+# a full investigation files nothing. Biased hard towards investigating.
 SCREEN_PROMPT = """\
 You are triaging one error from a running application before a full
 investigation is paid for. You have no tools and cannot read the code — judge

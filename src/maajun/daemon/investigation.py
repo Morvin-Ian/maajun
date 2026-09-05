@@ -1,12 +1,3 @@
-"""One incident, from the prompt to the artifact it is published as.
-
-Split out of `daemon.core` because the two jobs are different: the daemon
-watches, deduplicates and budgets, and this runs a single incident once the
-daemon has decided it is worth running. The state that used to be threaded
-through a dozen parameters — the event, the repo, the clone, the agent, what
-it has spent, the report as it changes — lives on the object instead.
-"""
-
 from __future__ import annotations
 
 import logging
@@ -17,12 +8,19 @@ from typing import TYPE_CHECKING
 from maajun.agent.core import accumulate_usage
 from maajun.config import RepoConfig
 from maajun.daemon import reports
+from maajun.daemon.fix_quality import (
+    QualityReview,
+    deployment_edit_problems,
+    parse_quality_review,
+    verification_problems,
+)
 from maajun.daemon.followups import (
     MAX_FOLLOW_UP_ISSUES,
     FollowUpTask,
     InvalidFollowUp,
     parse_follow_ups,
 )
+from maajun.daemon.modes import decide_run_mode
 from maajun.daemon.prompts import (
     AUTOMATIC_MODE_SECTION,
     DEPLOYMENT_SECTION,
@@ -35,6 +33,7 @@ from maajun.daemon.prompts import (
     RETRY_SUFFIX,
     UNAPPLIED_FIX_SUFFIX,
 )
+from maajun.daemon.publication import choose_runtime_artifact_target
 from maajun.daemon.reports import headline_problem, report_problem
 from maajun.daemon.store import (
     ARTIFACT_IGNORED,
@@ -43,19 +42,12 @@ from maajun.daemon.store import (
     ARTIFACT_REPORT,
 )
 from maajun.daemon.verification import VerificationCheck, VerificationSummary
-from maajun.fix_quality import (
-    QualityReview,
-    deployment_edit_problems,
-    parse_quality_review,
-    verification_problems,
-)
-from maajun.modes import decide_run_mode
+from maajun.discovery.runtime_env import verification_runtime_mismatch
+from maajun.discovery.toolchain import Formatter, detect_formatters
 from maajun.monitors import ErrorEvent
 from maajun.providers.pricing import extract_usage
-from maajun.publication import choose_runtime_artifact_target
 from maajun.utils import truncate_tail
 from maajun.vcs import CommandResult, GitError, GitWorkspace
-from maajun.verification_runtime import verification_runtime_mismatch
 
 if TYPE_CHECKING:  # imported for typing only; core imports this module
     from maajun.daemon.core import Daemon, ProgressCallback
@@ -65,6 +57,10 @@ log = logging.getLogger(__name__)
 # How much of a failing test run is pasted back for the repair round, taken
 # from the end — a runner prints what failed last.
 MAX_TEST_OUTPUT_IN_PROMPT = 8000
+
+# A formatter runs over the whole checkout; long enough for a large repo,
+# short enough not to stall the incident behind a missing binary.
+FORMAT_TIMEOUT = 120
 
 
 @dataclass(frozen=True)
@@ -122,6 +118,9 @@ class Investigation:
     ignored_reason: str = ""
     follow_up_source: str = ""
     reproduction_before: CommandResult | None = None
+    # Formatters the untouched clone already satisfied, so rewriting with them
+    # can only reach lines this fix introduced.
+    format_baseline: tuple[Formatter, ...] = ()
     quality_block: str = ""
     quality_issue_title: str = ""
     route_quality_to_infrastructure: bool = False
@@ -147,6 +146,7 @@ class Investigation:
         """Returns the issue or PR URL, or "" when nothing was published."""
         await self.prepare()
         await self.reproduce_before_edit()
+        await self.record_format_baseline()
         prompt = await self.build_prompt()
         self.progress("Analyzing with AI")
         agent_repo_config = self.repo_config
@@ -292,9 +292,8 @@ class Investigation:
 
         problem = report_problem(self.report)
         if problem and not self.plan.dry_run:
-            # Nothing is published: an issue or PR with no findings costs the
-            # reader more than it gives, and hides that the run failed. What
-            # it cost is still banked against the incident.
+            # Nothing is published: an issue or PR with no findings hides
+            # that the run failed. What it cost is still banked, though.
             self.bank_spend()
             raise RuntimeError(f"the analysis produced no usable report ({problem})")
 
@@ -304,9 +303,8 @@ class Investigation:
             return self.save_local_report()
 
         if self.opens_pull_request and not await self.has_a_diff():
-            # Asked twice and still nothing to merge, so the finding is a
-            # finding: an issue says that, a pull request with no diff in it
-            # only looks like a fix until you open the Files tab.
+            # Asked twice and still nothing to merge, so the finding is only
+            # a finding: a PR with no diff looks like a fix until you open it.
             log.info(
                 "fix mode changed no code for fp=%s in repo=%s; filing the "
                 "analysis as an issue instead of an empty pull request",
@@ -377,6 +375,7 @@ class Investigation:
         nothing was pushed and the caller files the analysis as an issue.
         """
         follow_ups = await self.prepare_follow_ups()
+        await self.apply_project_formatting()
         verification = await self.verified_fix()
         if self.should_review_fix():
             verification = await self.enforce_fix_quality(verification)
@@ -518,6 +517,7 @@ class Investigation:
             await self.mark_quality_block(reason, first.issue_title)
             return verification
         self.keep_if_usable(response.content.strip())
+        await self.apply_project_formatting()
         corrected = await self.verify()
         if corrected is not None:
             corrected, _ = await self.classify_failures(corrected)
@@ -762,6 +762,48 @@ class Investigation:
         """Take a follow-up answer as the report, unless it is not one."""
         if not report_problem(second):
             self.report = second
+
+    async def record_format_baseline(self) -> None:
+        """Which of the project's formatters the untouched clone satisfies.
+
+        A repo that is already clean can be reformatted afterwards without
+        touching a line the fix did not; one that is not stays untouched.
+        """
+        if not self.applies_a_fix:
+            return
+        clean = []
+        for formatter in detect_formatters(self.workspace.path):
+            result = await self.workspace.run_command(
+                formatter.check, timeout=FORMAT_TIMEOUT
+            )
+            if result.exit_code == 0:
+                clean.append(formatter)
+                continue
+            log.info(
+                "%s in repo=%s does not satisfy %r (exit %s); leaving its "
+                "formatting alone",
+                formatter.source, self.repo_config.repo,
+                formatter.check, result.exit_code,
+            )
+        self.format_baseline = tuple(clean)
+
+    async def apply_project_formatting(self) -> None:
+        """Format the edit the way the project formats everything else.
+
+        Not a verification step: a failure is logged, never a reason to
+        withhold a fix.
+        """
+        if not self.format_baseline:
+            return
+        self.progress("Formatting the change")
+        for formatter in self.format_baseline:
+            result = await self.workspace.run_command(
+                formatter.write, timeout=FORMAT_TIMEOUT
+            )
+            log.info(
+                "formatter %r exited %s in repo=%s",
+                formatter.write, result.exit_code, self.repo_config.repo,
+            )
 
     async def reproduce_before_edit(self) -> None:
         """Run the owner-supplied reproduction before the agent changes code."""

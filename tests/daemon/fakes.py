@@ -1,10 +1,3 @@
-"""The world the daemon tests run in: a fake agent, a fake GitHub, a real git.
-
-Shared by `test_core` (the watching loop) and `test_investigation` (one
-incident, from prompt to artifact). The fixtures that assemble them are in
-`conftest.py`.
-"""
-
 import subprocess
 from pathlib import Path
 

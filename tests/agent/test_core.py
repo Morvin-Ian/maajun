@@ -75,7 +75,6 @@ async def test_request_window_is_capped(agent):
     for i in range(MAX_HISTORY_MESSAGES * 2):
         agent.history.append({"role": "user", "content": str(i)})
     await agent.chat("latest")
-    # system prompt + at most MAX_HISTORY_MESSAGES history entries
     assert len(agent.provider.last_messages) == MAX_HISTORY_MESSAGES + 1
     assert agent.provider.last_messages[0]["role"] == "system"
     assert agent.provider.last_messages[-1]["content"] == "latest"

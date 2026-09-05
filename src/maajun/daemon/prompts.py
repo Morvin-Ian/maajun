@@ -90,9 +90,8 @@ that would have caught it. Write "None — working as intended" when the
 verdict is "by design".>
 """
 
-# Fix mode's replacement: the section records edits already made rather than
-# proposing them, and what the change left undone moves into "Follow-up",
-# which is filed as its own issue.
+# Fix mode's replacement: the section records edits already made, and what
+# the change left undone moves into "Follow-up", filed as its own issue.
 APPLIED_FIX_SECTION = """\
 ## Applied fix
 <the change you made, file by file: `path/to/file.py:LINE` and what is
@@ -349,10 +348,8 @@ and its file. Do not apologize or explain — output the report only.
 """
 
 
-# Sent when fix mode produced a report and no diff. The escape hatch in
-# FIX_PROMPT_SUFFIX gets taken for findings that do have an in-repo fix —
-# anything about an environment variable especially — so the run asks once
-# more rather than publishing a pull request with nothing to review.
+# Sent when fix mode produced a report and no diff: the escape hatch in
+# FIX_PROMPT_SUFFIX gets over-used, so the run asks once more before filing.
 UNAPPLIED_FIX_SUFFIX = """
 
 You changed no files. This run opens a pull request from your edits, so a
@@ -379,9 +376,8 @@ Then output the full report again, with "## Applied fix" naming every file
 you changed.
 """
 
-# Sent once when the project's test command fails against the applied fix,
-# with the failing output pasted in. One round, then the pull request ships
-# either way — a second failure is reported in its body rather than looped on.
+# Sent once when the project's test command fails against the applied fix.
+# One round, then the pull request ships with the failure in its body.
 FAILED_VERIFICATION_SUFFIX = """
 
 Your change is applied, but one or more owner-configured verification commands

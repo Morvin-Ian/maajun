@@ -1,5 +1,3 @@
-"""Fixtures for the daemon tests: a bare remote, and a daemon wired to it."""
-
 import subprocess
 
 import pytest
