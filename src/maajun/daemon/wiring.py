@@ -16,6 +16,7 @@ from maajun.monitors import (
     LogFileMonitor,
     Monitor,
 )
+from maajun.monitors.cursors import cursor_path
 from maajun.vcs import GitHubClient, GitWorkspace
 from maajun.vcs.gh_cli import remote_url
 
@@ -157,25 +158,62 @@ def build_monitors(
     watched: set[tuple[str, str, str]] = set()
     cursor_dir = Path(config.daemon.workdir).expanduser() / "cursors"
 
-    def build_source(kind: str, target: str) -> Monitor:
+    # File monitors expand ~ and normalize redundant separators via Path.
+    # Ownership, deduplication and migration must use that exact cursor key too.
+    repo_sources = [
+        (repo_config, [
+            (kind, str(Path(target).expanduser()) if kind == "file" else target)
+            for kind, target in sources
+        ])
+        for repo_config, sources in config.sources_by_repo(repos)
+    ]
+    source_owners: dict[tuple[str, str], set[str]] = {}
+    for repo_config, sources in repo_sources:
+        for kind, target in sources:
+            source_owners.setdefault((kind, target), set()).add(
+                repo_config.repo if repo_config else ""
+            )
+
+    def source_cursor_dir(kind: str, target: str, repo_config: RepoConfig | None) -> Path:
+        if len(source_owners[(kind, target)]) < 2 or repo_config is None:
+            return cursor_dir
+        directory = cursor_path(cursor_dir, repo_config.repo, "")
+        suffix = ".offset" if kind == "file" else ".cursor"
+        legacy = cursor_path(cursor_dir, target, suffix)
+        destination = cursor_path(directory, target, suffix)
+        try:
+            directory.mkdir(parents=True, exist_ok=True)
+            # Bootstrap each owner from the same pre-poll position, then keep
+            # independent cursors. One repo must never consume another's events.
+            if legacy.exists() and not destination.exists():
+                destination.write_bytes(legacy.read_bytes())
+        except OSError as error:
+            log.debug("could not migrate shared cursor %s: %s", legacy, error)
+        return directory
+
+    def build_source(kind: str, target: str, repo_config: RepoConfig | None) -> Monitor:
         """A monitor for one (kind, target), sharing the log-parsing tuning.
 
         Every kind is a stream of the same log text — only where it is read
         from differs — so error_pattern, the traceback headers and the burst
         settings apply to all three.
         """
+        directory = source_cursor_dir(kind, target, repo_config)
+        options = monitor_cfg.logfile_kwargs()
+        if repo_config is not None:
+            options["proxy_server_names"] = repo_config.deployment.proxy_server_names
         if kind == "journald":
             return JournaldMonitor(
-                target, cursor_dir=cursor_dir, backfill=backfill,
-                **monitor_cfg.logfile_kwargs(),
+                target, cursor_dir=directory, backfill=backfill,
+                **options,
             )
         if kind == "docker":
             return DockerLogMonitor(
-                target, backfill=backfill, **monitor_cfg.logfile_kwargs()
+                target, backfill=backfill, **options
             )
         return LogFileMonitor(
-            target, cursor_dir=cursor_dir, backfill=backfill,
-            **monitor_cfg.logfile_kwargs(),
+            target, cursor_dir=directory, backfill=backfill,
+            **options,
         )
 
     def attach_source(
@@ -186,9 +224,9 @@ def build_monitors(
             log.debug("%s %s already watched for repo %s", *key)
             return
         watched.add(key)
-        attach(build_source(kind, target), repo_config)
+        attach(build_source(kind, target, repo_config), repo_config)
 
-    for repo_config, sources in config.sources_by_repo(repos):
+    for repo_config, sources in repo_sources:
         for kind, target in sources:
             attach_source(kind, target, repo_config)
 

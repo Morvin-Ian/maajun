@@ -48,7 +48,7 @@ mode = "suggest"              # "suggest", "fix", or "automatic"
 path = "/srv/myapp"           # the app's folder on the server
 port = 8000                   # what it listens on
 runs = "docker compose"       # free text: how it is started
-log_files = ["/srv/myapp/logs/error.log", "/var/log/nginx/error.log"]
+log_files = ["/srv/myapp/logs/error.log", "/var/log/nginx/myapp-error.log"]
 journald_units = ["myapp.service"]      # journalctl -u myapp.service
 docker_containers = ["myapp-web-1"]     # docker logs myapp-web-1
 # runtime = "none"            # this repo deliberately has no runtime source
@@ -127,6 +127,18 @@ log_files = ["/var/log/web/error.log"]
 Each monitor's errors open PRs on the repo it's attached to. Any global
 `monitor.log_files` attach to the **first** configured repo.
 
+On a server hosting several apps, prefer a dedicated nginx `error_log` for each
+vhost. Discovery does not automatically attach `/var/log/nginx/error.log` to an
+app: that file contains unrelated apps and default-server traffic. To explicitly
+watch a shared nginx log (including journald or container output), set
+`github.repos.deployment.proxy_server_names` to the exact nginx `server:` names
+owned by that repo. Scoped nginx errors for other or missing server names are
+skipped; application logs and tracebacks are still monitored. An empty list keeps
+legacy unfiltered behavior. Wildcards are not expanded; list each emitted name.
+Repeated `connect() failed ... while connecting to upstream` errors are grouped
+by failure reason, server, upstream host and port, across request paths. Other
+error types retain route-specific fingerprints.
+
 `[[github.repos]]` is the only supported form, including for a single
 repository. A config using the older scalars (`repo`, `base_branch`,
 `mode` directly under `[github]`) is rejected at startup with the
@@ -193,7 +205,8 @@ proxy_body_limit = "1m (nginx default; no active directive found)"
 config_owner = "operator"
 # infra_repo = "owner/infrastructure"
 docker_containers = ["kfl-web-1"]           # the app's own exceptions
-log_files = ["/var/log/nginx/error.log"]    # 502s the app never sees
+log_files = ["/var/log/nginx/error.log"]    # shared proxy log: scope it below
+proxy_server_names = ["api.example.com"]  # exact nginx server: value, not host:
 ```
 
 Each source belongs to the repo whose block it sits in, so it always knows

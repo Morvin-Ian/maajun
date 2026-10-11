@@ -7,6 +7,7 @@ import time
 from abc import ABC, abstractmethod
 from collections import deque
 from dataclasses import dataclass, field
+from urllib.parse import urlsplit
 
 from maajun.privacy import canonical_evidence, sanitize_evidence
 from maajun.utils import utcnow_iso
@@ -19,8 +20,45 @@ NUM_RE = re.compile(r"\d+")
 # Shared, so every monitor's fingerprint is the same width.
 FINGERPRINT_LENGTH = 16
 
+NGINX_ERROR_RE = re.compile(
+    r"^\d{4}/\d{2}/\d{2} \d{2}:\d{2}:\d{2} \[(?:error|crit|alert|emerg)\] "
+    r"\d+#\d+: (?:\*\d+ )?"
+)
+NGINX_SERVER_RE = re.compile(r'(?:^|, )server: ([^,\s]+)')
+NGINX_UPSTREAM_RE = re.compile(r', upstream: "([^"\r\n]+)"')
+
+
+def nginx_connection_identity(text: str) -> str | None:
+    """A refused upstream is one outage across client IPs and request paths.
+
+    Keep upstream host/port and server identity before privacy redaction; removing
+    every number would merge outages on different services on the same host.
+    Restrict this to connection failures: route-specific application errors must
+    retain their normal fingerprint.
+    """
+    prefix = NGINX_ERROR_RE.match(text)
+    server = NGINX_SERVER_RE.search(text)
+    upstream = NGINX_UPSTREAM_RE.search(text)
+    if not prefix or not server or not upstream:
+        return None
+    reason = text[prefix.end():].partition(", client:")[0]
+    if not re.fullmatch(r"connect\(\) failed \([^\r\n]+\) while connecting to upstream", reason):
+        return None
+    try:
+        target = urlsplit(upstream[1])
+        if target.scheme not in {"http", "https"} or not target.hostname:
+            return None
+        port = target.port or (443 if target.scheme == "https" else 80)
+    except ValueError:
+        return None
+    return repr(("nginx-connect", reason, server[1].lower().rstrip("."),
+                 target.scheme, target.hostname.lower(), port))
+
 
 def fingerprint(text: str) -> str:
+    identity = nginx_connection_identity(text)
+    if identity is not None:
+        return hashlib.sha256(identity.encode()).hexdigest()[:FINGERPRINT_LENGTH]
     normalized = canonical_evidence(text)
     # A query may be present on one client version and omitted on another, and
     # its values are already redacted — noise for an error on the same route.

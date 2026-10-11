@@ -39,6 +39,7 @@ class LogFileMonitor(LogStreamMonitor):
         error_pattern: str = DEFAULT_ERROR_PATTERN,
         *,
         json_level_field: str = "",
+        proxy_server_names: tuple[str, ...] | list[str] = (),
         json_level_values: frozenset[str] = DEFAULT_JSON_LEVEL_VALUES,
         traceback_headers: tuple[str, ...] | list[str] | None = None,
         traceback_lookahead: int = TRACEBACK_LOOKAHEAD_LINES,
@@ -50,6 +51,7 @@ class LogFileMonitor(LogStreamMonitor):
         super().__init__(
             error_pattern,
             json_level_field=json_level_field,
+            proxy_server_names=proxy_server_names,
             json_level_values=json_level_values,
             traceback_headers=traceback_headers,
             traceback_lookahead=traceback_lookahead,
