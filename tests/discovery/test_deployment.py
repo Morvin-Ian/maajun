@@ -308,10 +308,8 @@ def test_discover_reports_finding_nothing(route):
     assert any("no checkout found" in note for note in found.notes)
 
 
-def test_an_nginx_container_pulls_in_the_proxy_error_log(route, tmp_path, monkeypatch):
-    """502s and upstream timeouts never reach the app's own logger."""
-    monkeypatch.setattr("maajun.discovery.deployment.NGINX_LOG", str(tmp_path / "nginx.log"))
-    (tmp_path / "nginx.log").write_text("")
+def test_an_nginx_container_does_not_attribute_host_proxy_log(route, tmp_path):
+    """A container can share a proxy with apps from other repositories."""
 
     def handler(cmd):
         if cmd[0] == "docker":
@@ -322,7 +320,8 @@ def test_an_nginx_container_pulls_in_the_proxy_error_log(route, tmp_path, monkey
 
     found = discover("me/kfl")
 
-    assert str(tmp_path / "nginx.log") in found.log_files
+    assert found.log_files == []
+    assert found.docker_containers == ["kfl-nginx-1"]
 
 
 # ---------------------------------------------------------------------------

@@ -13,10 +13,6 @@ CANDIDATE_ROOTS = ("/srv", "/opt", "/var/www", "/home", "~")
 
 LOG_GLOBS = ("logs/*.log", "log/*.log", "*.log")
 
-# A reverse proxy fronting the app: its errors (502s, upstream timeouts)
-# never reach the app's own logger.
-NGINX_LOG = "/var/log/nginx/error.log"
-
 PROXY_HINTS = ("nginx", "caddy", "traefik", "apache")
 
 # gunicorn -b 0.0.0.0:8000, uvicorn --port 8000, runserver 0.0.0.0:8000
@@ -266,7 +262,12 @@ def port_from_ports(ports: str) -> int:
 
 
 def find_log_files(folder: str, proxied: bool) -> list[str]:
-    """Log files under the app folder, plus the proxy's own error log."""
+    """Log files under the app folder.
+
+    A host-wide proxy log has no repository ownership. Operators can configure a
+    dedicated vhost log or explicitly scope a shared log with proxy_server_names.
+    Keep the proxied argument for existing callers.
+    """
     found: list[str] = []
     if folder:
         base = Path(folder)
@@ -278,8 +279,6 @@ def find_log_files(folder: str, proxied: bool) -> list[str]:
                 )
             except OSError:
                 continue
-    if proxied and Path(NGINX_LOG).exists() and NGINX_LOG not in found:
-        found.append(NGINX_LOG)
     return found
 
 

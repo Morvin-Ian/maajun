@@ -89,6 +89,7 @@ class DeploymentConfig(Base):
     service_unit: str = ""  # exact systemd unit selected by discovery
     service_command: str = ""  # exact ExecStart command from the active unit
     proxy_kind: str = ""  # nginx, caddy, traefik, ...
+    proxy_server_names: list[str] = Field(default_factory=list)
     proxy_config_path: str = ""  # active configuration path on this host
     proxy_repo_path: str = ""  # repository path deployed as that configuration
     proxy_body_limit: str = ""  # effective/discovered request body boundary
@@ -143,7 +144,7 @@ class DeploymentConfig(Base):
             self.path or self.port or self.runs or self.stack
             or self.service_unit or self.service_command
             or self.proxy_kind or self.proxy_config_path or self.proxy_repo_path
-            or self.proxy_body_limit
+            or self.proxy_body_limit or self.proxy_server_names
             or self.config_owner or self.infra_repo
             or self.runtime or self.sources()
         )
@@ -710,7 +711,7 @@ def deployment_table(deployment: "DeploymentConfig"):
         "proxy_body_limit", "config_owner", "infra_repo",
     ):
         set_or_del(node, name, getattr(deployment, name))
-    for name in ("log_files", "journald_units", "docker_containers"):
+    for name in ("log_files", "journald_units", "docker_containers", "proxy_server_names"):
         set_or_del(node, name, getattr(deployment, name))
     return node
 
@@ -772,7 +773,7 @@ def render_deployment(deployment: "DeploymentConfig") -> list[str]:
             lines.append(f'      {name} = [green]"{value}"[/green]')
     if deployment.port:
         lines.append(f"      port = [green]{deployment.port}[/green]")
-    for name in ("log_files", "journald_units", "docker_containers"):
+    for name in ("log_files", "journald_units", "docker_containers", "proxy_server_names"):
         value = getattr(deployment, name)
         if value:
             lines.append(f"      {name} = [green]{value}[/green]")

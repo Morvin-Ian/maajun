@@ -4,6 +4,7 @@ from __future__ import annotations
 # positive costs one analysis. Warnings are excluded — apps handle those.
 DEFAULT_ERROR_PATTERN = (
     r"\b(ERROR|CRITICAL|FATAL|SEVERE|EMERG|ALERT|Traceback|panic|panicked)\b"
+    r"|\[(?:error|crit|alert|emerg)\]"
     r"|\bUnhandled\w*"
     r"|\bFatal error\b"
     r"|\bException\b(?!\s+handled)"

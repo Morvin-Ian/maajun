@@ -5,7 +5,7 @@ import re
 from abc import abstractmethod
 from typing import Any
 
-from maajun.monitors.base import ErrorEvent, Monitor
+from maajun.monitors.base import NGINX_ERROR_RE, NGINX_SERVER_RE, ErrorEvent, Monitor
 from maajun.monitors.defaults import (
     DEFAULT_ERROR_PATTERN,
     DEFAULT_JSON_LEVEL_VALUES,
@@ -35,6 +35,7 @@ class LogStreamMonitor(Monitor):
         error_pattern: str = DEFAULT_ERROR_PATTERN,
         *,
         json_level_field: str = "",
+        proxy_server_names: tuple[str, ...] | list[str] = (),
         json_level_values: frozenset[str] = DEFAULT_JSON_LEVEL_VALUES,
         traceback_headers: tuple[str, ...] | list[str] | None = None,
         traceback_lookahead: int = TRACEBACK_LOOKAHEAD_LINES,
@@ -44,6 +45,9 @@ class LogStreamMonitor(Monitor):
         super().__init__(
             burst_threshold=burst_threshold,
             burst_window_seconds=burst_window_seconds,
+        )
+        self.proxy_server_names = frozenset(
+            name.lower().rstrip(".") for name in proxy_server_names
         )
         self.error_level_re = re.compile(error_pattern)
         self.json_level_field = json_level_field
@@ -84,6 +88,17 @@ class LogStreamMonitor(Monitor):
             self.carryover_text = self.carryover_text[-MAX_PENDING:]
 
         return self.apply_burst_threshold(events)
+
+    def accepts_line(self, line: str) -> bool:
+        """Scope shared nginx logs using the configured vhost, never the Host header.
+
+        A scoped nginx event with no server identity cannot safely be attributed.
+        Non-nginx application logs and tracebacks retain their existing behavior.
+        """
+        if not self.proxy_server_names or not NGINX_ERROR_RE.match(line):
+            return True
+        server = NGINX_SERVER_RE.search(line)
+        return bool(server and server[1].lower().rstrip(".") in self.proxy_server_names)
 
     def matches_error_level(self, line: str) -> bool:
         """Whether a line reports an error, by JSON level or by regex."""
@@ -138,6 +153,9 @@ class LogStreamMonitor(Monitor):
         i = 0
         while i < len(lines):
             line = lines[i]
+            if not self.accepts_line(line):
+                i += 1
+                continue
 
             if self.is_traceback_start(line):
                 block, end = self.collect_traceback(lines, i)
